@@ -100,10 +100,10 @@ router.post(
         shopifyVariants.push(...variants2);
       }
 
-      // 4. Two-step compare
+      // 4. Four-step compare (variant feed → product feed → raw CFS IDs → orphaned)
       console.log(`▶ Comparing ${shopifyVariants.length} variants…`);
-      const { results, summary } = compareVariants(shopifyVariants, validVariantSKUs, validProductSKUs);
-      console.log(`  ✓ ${summary.orphaned} orphaned, ${summary.ok} OK, ${summary.draft} draft/archived (skipped)`);
+      const { results, summary } = compareVariants(shopifyVariants, validVariantSKUs, validProductSKUs, cfsProductIds, cfsVariantAttrIds);
+      console.log(`  ✓ ${summary.orphaned} orphaned, ${summary.ok} OK, ${summary.draft} draft/archived (skipped), ${summary.cfsInactive} cfs-inactive`);
 
       res.json({
         success: true,

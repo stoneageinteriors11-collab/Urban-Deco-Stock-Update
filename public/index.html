@@ -168,6 +168,7 @@
     .tile.ok-count          .num { color: var(--success); }
     .tile.draft-count       .num { color: var(--text-muted); }
     .tile.cfs-inactive-count .num { color: var(--warning); }
+    .tile.cfs-product-count  .num { color: #a78bfa; }
 
     /* ── Table toolbar ── */
     .table-toolbar {
@@ -214,6 +215,7 @@
     .badge-ok           { background: rgba(34,197,94,.12);   color: var(--success); }
     .badge-draft        { background: rgba(148,163,184,.12); color: var(--text-muted); }
     .badge-cfs-inactive { background: rgba(245,158,11,.15);  color: var(--warning); }
+    .badge-cfs-product  { background: rgba(167,139,250,.15); color: #a78bfa; }
 
     /* ── Pagination ── */
     .pagination {
@@ -442,6 +444,10 @@
         <div class="num" id="tile-cfs-inactive">0</div>
         <div class="lbl">CFS Inactive (set to draft)</div>
       </div>
+      <div class="tile cfs-product-count">
+        <div class="num" id="tile-cfs-product">0</div>
+        <div class="lbl">CFS Product Match (review)</div>
+      </div>
     </div>
 
     <!-- Table toolbar -->
@@ -451,6 +457,7 @@
         <button class="fbtn active" data-filter="all"          onclick="setFilter('all',this)">All</button>
         <button class="fbtn"        data-filter="orphaned"     onclick="setFilter('orphaned',this)">Orphaned</button>
         <button class="fbtn"        data-filter="cfs-inactive" onclick="setFilter('cfs-inactive',this)">CFS Inactive</button>
+        <button class="fbtn"        data-filter="cfs-product"  onclick="setFilter('cfs-product',this)">CFS Product Match</button>
         <button class="fbtn"        data-filter="ok"           onclick="setFilter('ok',this)">OK</button>
         <button class="fbtn"        data-filter="draft"        onclick="setFilter('draft',this)">Draft / Archived</button>
       </div>
@@ -501,6 +508,9 @@
   let selectedSKUs = new Set();
   let lastLog      = [];      // stores the most recent delete/dry-run log for CSV download
   let lastLogDryRun = true;
+  // Raw CFS IDs used by the delete endpoint to decide whether to DRAFT or skip a product
+  let cfsProductIds    = [];   // Product Id values from CFS product feed
+  let cfsVariantAttrIds = [];  // iProAttrId values from CFS variant feed
 
   // ── File upload UI ─────────────────────────────────────────────────────────
   ['product','variant','shop1','shop2'].forEach(id => {
@@ -620,17 +630,20 @@
       const data = await res.json();
       if (!data.success) throw new Error(data.error);
 
-      allResults   = data.results;
+      allResults        = data.results;
+      cfsProductIds     = data.cfsProductIds    || [];
+      cfsVariantAttrIds = data.cfsVariantAttrIds || [];
       activeFilter = 'all';
       selectedSKUs = new Set();
       currentPage  = 1;
       lastLog      = [];
 
       document.getElementById('tile-total').textContent       = data.summary.total.toLocaleString();
-      document.getElementById('tile-orphaned').textContent    = data.summary.orphaned.toLocaleString();
-      document.getElementById('tile-ok').textContent          = data.summary.ok.toLocaleString();
-      document.getElementById('tile-draft').textContent       = (data.summary.draft      || 0).toLocaleString();
-      document.getElementById('tile-cfs-inactive').textContent = (data.summary.cfsInactive || 0).toLocaleString();
+      document.getElementById('tile-orphaned').textContent     = data.summary.orphaned.toLocaleString();
+      document.getElementById('tile-ok').textContent           = data.summary.ok.toLocaleString();
+      document.getElementById('tile-draft').textContent        = (data.summary.draft       || 0).toLocaleString();
+      document.getElementById('tile-cfs-inactive').textContent  = (data.summary.cfsInactive || 0).toLocaleString();
+      document.getElementById('tile-cfs-product').textContent   = (data.summary.cfsProduct  || 0).toLocaleString();
       document.getElementById('summary-tiles').classList.remove('hidden');
       document.getElementById('table-toolbar').classList.remove('hidden');
       document.getElementById('results-table').classList.remove('hidden');
@@ -682,8 +695,8 @@
       btnDel.style.display   = '';
       btnDraft.style.display = '';
     } else {
-      // OK / Draft — nothing selectable, hide the select-all row
-      wrapEl.style.display = 'none';
+      // OK / Draft / CFS Product — nothing selectable, hide select-all and action buttons
+      wrapEl.style.display   = 'none';
       btnDel.style.display   = 'none';
       btnDraft.style.display = 'none';
     }
@@ -714,14 +727,17 @@
       const isOrphaned    = r.matchStatus === 'orphaned';
       const isDraft       = r.matchStatus === 'draft';
       const isCfsInactive = r.matchStatus === 'cfs-inactive';
+      const isCfsProduct  = r.matchStatus === 'cfs-product';
       const isSelectable  = isOrphaned || isCfsInactive;
       const checked       = selectedSKUs.has(r.variantSku) ? 'checked' : '';
       const badgeCls      = isOrphaned    ? 'badge-orphaned'
                           : isCfsInactive ? 'badge-cfs-inactive'
+                          : isCfsProduct  ? 'badge-cfs-product'
                           : isDraft       ? 'badge-draft'
                           : 'badge-ok';
       const badgeTxt      = isOrphaned    ? 'Orphaned'
                           : isCfsInactive ? 'CFS Inactive'
+                          : isCfsProduct  ? 'CFS Product'
                           : isDraft       ? 'Draft'
                           : 'OK';
       const variantLabel  = [r.option1, r.option2, r.option3].filter(Boolean).join(' / ') || 'Default';
@@ -801,7 +817,7 @@
       const res  = await fetch('/api/shopify/delete-variants-bulk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ variants: variantsToDelete, dryRun }),
+        body: JSON.stringify({ variants: variantsToDelete, dryRun, cfsProductIds, cfsVariantAttrIds }),
       });
       const data = await res.json();
       showLog(data.log, dryRun);
@@ -825,10 +841,11 @@
   // ── Tile refresh helper ───────────────────────────────────────────────────
   function refreshTiles() {
     document.getElementById('tile-total').textContent        = allResults.length.toLocaleString();
-    document.getElementById('tile-orphaned').textContent     = allResults.filter(r=>r.matchStatus==='orphaned').length.toLocaleString();
-    document.getElementById('tile-ok').textContent           = allResults.filter(r=>r.matchStatus==='ok').length.toLocaleString();
-    document.getElementById('tile-draft').textContent        = allResults.filter(r=>r.matchStatus==='draft').length.toLocaleString();
-    document.getElementById('tile-cfs-inactive').textContent = allResults.filter(r=>r.matchStatus==='cfs-inactive').length.toLocaleString();
+    document.getElementById('tile-orphaned').textContent      = allResults.filter(r=>r.matchStatus==='orphaned').length.toLocaleString();
+    document.getElementById('tile-ok').textContent            = allResults.filter(r=>r.matchStatus==='ok').length.toLocaleString();
+    document.getElementById('tile-draft').textContent         = allResults.filter(r=>r.matchStatus==='draft').length.toLocaleString();
+    document.getElementById('tile-cfs-inactive').textContent  = allResults.filter(r=>r.matchStatus==='cfs-inactive').length.toLocaleString();
+    document.getElementById('tile-cfs-product').textContent   = allResults.filter(r=>r.matchStatus==='cfs-product').length.toLocaleString();
   }
 
   // ── Set selected CFS-inactive variants to Draft on Shopify ───────────────
