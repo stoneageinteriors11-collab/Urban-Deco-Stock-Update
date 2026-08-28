@@ -2,7 +2,7 @@ const express = require('express');
 const multer  = require('multer');
 const path    = require('path');
 const fs      = require('fs');
-const { streamProductSKUs, streamVariantSKUs, streamShopifyVariants } = require('../utils/parseCSV');
+const { streamProductSKUs, streamVariantSKUs, streamShopifyVariants, streamProductIds, streamVariantAttrIds } = require('../utils/parseCSV');
 const { compareVariants } = require('../utils/matchVariants');
 
 const router = express.Router();
@@ -72,12 +72,18 @@ router.post(
       const inactiveCount = validProductSKUs.size - activeCount;
       console.log(`  ✓ ${validProductSKUs.size} product SKUs (${activeCount} active, ${inactiveCount} inactive)`);
 
+      // Also extract raw Product IDs for the all-variants-orphaned CFS presence check
+      const cfsProductIds = await streamProductIds(productFeedPath);
+      console.log(`  ✓ ${cfsProductIds.size} raw CFS product IDs`);
+
       // 2. Variant feed (optional)
       let validVariantSKUs = new Set();
+      let cfsVariantAttrIds = new Set();
       if (variantFeedPath) {
         console.log('▶ Streaming CFS variant feed…');
         validVariantSKUs = await streamVariantSKUs(variantFeedPath);
-        console.log(`  ✓ ${validVariantSKUs.size} variant SKUs`);
+        cfsVariantAttrIds = await streamVariantAttrIds(variantFeedPath);
+        console.log(`  ✓ ${validVariantSKUs.size} variant SKUs, ${cfsVariantAttrIds.size} variant attr IDs`);
       } else {
         console.log('ℹ  No variant feed uploaded — using product feed only');
       }
@@ -99,7 +105,15 @@ router.post(
       const { results, summary } = compareVariants(shopifyVariants, validVariantSKUs, validProductSKUs);
       console.log(`  ✓ ${summary.orphaned} orphaned, ${summary.ok} OK, ${summary.draft} draft/archived (skipped)`);
 
-      res.json({ success: true, summary, results });
+      res.json({
+        success: true,
+        summary,
+        results,
+        // Raw CFS IDs sent to the frontend so the delete endpoint can check CFS presence
+        // before setting an all-orphaned product to DRAFT.
+        cfsProductIds:    [...cfsProductIds],
+        cfsVariantAttrIds: [...cfsVariantAttrIds],
+      });
 
     } catch (err) {
       console.error('Compare error:', err);

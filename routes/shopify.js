@@ -89,22 +89,35 @@ const SET_PRODUCT_DRAFT_MUTATION = `
   }
 `;
 
+// ── SKU parser: UD-{prodId}-{varId} ──────────────────────────────────────────
+function parseSku(sku) {
+  const parts = sku.split('-');
+  return { prodId: parts[1] || null, varId: parts[2] || null };
+}
+
 // ── POST /api/shopify/delete-variants-bulk ────────────────────────────────────
 //
-// Body: { variants: [{ handle, variantSku, title, option1, ... }], dryRun: bool }
+// Body: { variants: [{ handle, variantSku, ... }], dryRun: bool,
+//         cfsProductIds: string[], cfsVariantAttrIds: string[] }
 //
 // Strategy:
 //   1. Group orphaned variants by product handle (one lookup per product, not per variant).
 //   2. For each product:
 //        a. Fetch all its variants from Shopify via GraphQL.
 //        b. Identify which of the product's variants are in the orphaned list.
-//        c. If ALL variants are orphaned → delete the entire product.
+//        c. If ALL variants are orphaned:
+//             → Check CFS feeds: extract {prodId} and {varId} from each orphaned SKU.
+//               If {prodId} is in cfsProductIds  OR  {varId} is in cfsVariantAttrIds
+//               → product has a CFS presence → skip (don't draft, don't delete).
+//               Otherwise → set product to DRAFT.
 //           If SOME variants are orphaned → delete only those variants.
 //   3. Retry on 429 / 5xx up to 3 times with exponential backoff.
 //   4. 350ms pause between product operations to stay inside Shopify's rate limit.
 //
 router.post('/delete-variants-bulk', async (req, res) => {
-  const { variants = [], dryRun = true } = req.body;
+  const { variants = [], dryRun = true, cfsProductIds = [], cfsVariantAttrIds = [] } = req.body;
+  const productIdSet    = new Set(cfsProductIds);
+  const variantAttrIdSet = new Set(cfsVariantAttrIds);
 
   if (!variants.length) {
     return res.status(400).json({ error: 'No variants provided.' });
@@ -149,7 +162,23 @@ router.post('/delete-variants-bulk', async (req, res) => {
             productTitle = product.title;
             const allVariants = product.variants.edges.map(e => e.node);
             const allOrphaned = allVariants.every(v => orphanedSKUs.has(v.sku));
-            action = allOrphaned ? 'set product to DRAFT (all variants orphaned)' : `delete ${orphanedSKUs.size} of ${allVariants.length} variant(s)`;
+            if (allOrphaned) {
+              // Per-variant CFS presence check
+              const matchedInCFS = allVariants.filter(v => {
+                const { prodId, varId } = parseSku(v.sku);
+                return (prodId && productIdSet.has(prodId)) || (varId && variantAttrIdSet.has(varId));
+              });
+              const notInCFS = allVariants.length - matchedInCFS.length;
+              if (matchedInCFS.length === 0) {
+                action = 'set product to DRAFT (no variants found in CFS feeds)';
+              } else if (notInCFS === 0) {
+                action = 'keep all variants — all found in CFS feeds';
+              } else {
+                action = `delete ${notInCFS} unmatched variant(s), keep ${matchedInCFS.length} CFS-matched variant(s)`;
+              }
+            } else {
+              action = `delete ${orphanedSKUs.size} of ${allVariants.length} variant(s)`;
+            }
           }
         } catch (_) { /* dry-run lookup failure is non-fatal */ }
 
@@ -193,20 +222,63 @@ router.post('/delete-variants-bulk', async (req, res) => {
       }
 
       if (nonOrphanedLeft === 0) {
-        // All variants are orphaned → set the entire product to DRAFT
-        const result = await gql(client, SET_PRODUCT_DRAFT_MUTATION, { productId: product.id });
-        const userErrors = result?.productUpdate?.userErrors || [];
+        // All variants in the orphaned list — do a per-variant CFS presence check.
+        // Split UD-{prodId}-{varId} and test each piece against the raw CFS ID sets.
+        const cfsMatched = orphanedNodes.filter(node => {
+          const { prodId, varId } = parseSku(node.sku);
+          return (prodId && productIdSet.has(prodId)) || (varId && variantAttrIdSet.has(varId));
+        });
+        const cfsUnmatched = orphanedNodes.filter(node => {
+          const { prodId, varId } = parseSku(node.sku);
+          return !(prodId && productIdSet.has(prodId)) && !(varId && variantAttrIdSet.has(varId));
+        });
 
-        if (userErrors.length) {
-          const errMsg = userErrors.map(e => e.message).join(', ');
-          for (const v of orphanedForProduct) {
-            log.push({ sku: v.variantSku, status: 'error', message: `Set-to-draft failed: ${errMsg}` });
-            failed++;
+        // Log CFS-matched variants as kept
+        for (const node of cfsMatched) {
+          log.push({ sku: node.sku, status: 'kept', message: `Kept — found in CFS feeds: ${product.title} / ${node.title}` });
+        }
+
+        if (cfsMatched.length > 0 && cfsUnmatched.length > 0) {
+          // Mixed: delete only the unmatched variants, keep the CFS-matched ones
+          console.log(`  ↗ "${product.title}" — deleting ${cfsUnmatched.length} unmatched, keeping ${cfsMatched.length} CFS-matched`);
+          const variantIds = cfsUnmatched.map(v => v.id);
+          const result = await gql(client, DELETE_VARIANTS_MUTATION, { productId: product.id, variantsIds: variantIds });
+          const userErrors = result?.productVariantsBulkDelete?.userErrors || [];
+
+          if (userErrors.length) {
+            const errMsg = userErrors.map(e => e.message).join(', ');
+            for (const node of cfsUnmatched) {
+              log.push({ sku: node.sku, status: 'error', message: `Variant delete failed: ${errMsg}` });
+              failed++;
+            }
+          } else {
+            for (const node of cfsUnmatched) {
+              log.push({ sku: node.sku, status: 'deleted', message: `Deleted: ${product.title} / ${node.title}` });
+              deleted++;
+            }
           }
+
+        } else if (cfsUnmatched.length === 0) {
+          // All variants have CFS presence — keep everything, nothing to do
+          console.log(`  ↷ Keeping "${product.title}" — all variants found in CFS feeds`);
+
         } else {
-          for (const v of orphanedForProduct) {
-            log.push({ sku: v.variantSku, status: 'drafted', message: `Product set to DRAFT: ${product.title}` });
-            deleted++;
+          // No variants have any CFS presence → set the entire product to DRAFT
+          console.log(`  ✗ Drafting "${product.title}" — no variants found in CFS feeds`);
+          const result = await gql(client, SET_PRODUCT_DRAFT_MUTATION, { productId: product.id });
+          const userErrors = result?.productUpdate?.userErrors || [];
+
+          if (userErrors.length) {
+            const errMsg = userErrors.map(e => e.message).join(', ');
+            for (const v of orphanedForProduct) {
+              log.push({ sku: v.variantSku, status: 'error', message: `Set-to-draft failed: ${errMsg}` });
+              failed++;
+            }
+          } else {
+            for (const v of orphanedForProduct) {
+              log.push({ sku: v.variantSku, status: 'drafted', message: `Product set to DRAFT: ${product.title}` });
+              deleted++;
+            }
           }
         }
 

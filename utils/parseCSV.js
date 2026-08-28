@@ -104,6 +104,32 @@ async function streamShopifyVariants(filePath) {
   return variants;
 }
 
+// ── CFS Product feed → Set of raw Product IDs ────────────────────────────────
+// Used for the "all variants orphaned" check: extract {prodid} from UD-{prodid}-{varid}
+// and verify it against this set before deciding to set a product to DRAFT.
+async function streamProductIds(filePath) {
+  const rows = await getRows(filePath);
+  const ids = new Set();
+  for (const row of rows) {
+    const id = String(row['Product Id'] || '').trim();
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+
+// ── CFS Variant feed → Set of raw variant attribute IDs ──────────────────────
+// Used for the same "all variants orphaned" check: extract {varid} from
+// UD-{prodid}-{varid} and verify against this set before setting to DRAFT.
+async function streamVariantAttrIds(filePath) {
+  const rows = await getRows(filePath);
+  const ids = new Set();
+  for (const row of rows) {
+    const id = String(row['iProAttrId'] || '').trim();
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+
 // ── Legacy helpers (kept for compatibility) ───────────────────────────────────
 function extractVariantSKUs(rows) {
   const skus = new Set();
@@ -140,6 +166,8 @@ module.exports = {
   streamProductSKUs,
   streamVariantSKUs,
   streamShopifyVariants,
+  streamProductIds,
+  streamVariantAttrIds,
   parseCSVFile,
   extractVariantSKUs,
   extractShopifyVariants,
