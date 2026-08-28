@@ -934,11 +934,13 @@
 
     const dryRun = document.getElementById('dry-run-toggle').checked;
     const msg = dryRun
-      ? `DRY RUN: Will log what would happen to ${variantsToPublish.length} variants (no actual changes).`
+      ? `DRY RUN: Will log what would happen to ${variantsToPublish.length} variants (no actual changes).\n\nNote: product status is only updated when no other variants remain on the product.`
       : `Promote ${variantsToPublish.length} CFS Product Match items:\n` +
         `  • Delete variant from Shopify\n` +
-        `  • ${toActive} products → ACTIVE (CFS active)\n` +
-        `  • ${toDraft} products → DRAFT (CFS inactive)\n\nContinue?`;
+        `  • If no other variants remain on the product:\n` +
+        `      – ${toActive} → ACTIVE (CFS active)\n` +
+        `      – ${toDraft} → DRAFT (CFS inactive)\n` +
+        `  • Products with other variants: variant deleted, status unchanged\n\nContinue?`;
 
     if (!confirm(msg)) return;
 
