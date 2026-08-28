@@ -1014,13 +1014,17 @@
   // ── Download Dry Run Log as CSV ───────────────────────────────────────────
   function downloadDryRunLog() {
     if (!lastLog.length) return;
-    const headers = ['SKU', 'Handle', 'Status', 'Message'];
-    const rows = lastLog.map(l => [
-      l.sku,
-      `"${(l.handle || '').replace(/"/g, '""')}"`,
-      l.status,
-      `"${(l.message || '').replace(/"/g, '""')}"`,
-    ]);
+    const headers = ['Type', 'SKU', 'Handle', 'Status', 'Message'];
+    const rows = lastLog.map(l => {
+      const type = l.sku === '-' ? 'Image' : 'Variant';
+      return [
+        type,
+        l.sku === '-' ? '' : l.sku,
+        `"${(l.handle || '').replace(/"/g, '""')}"`,
+        l.status,
+        `"${(l.message || '').replace(/"/g, '""')}"`,
+      ];
+    });
     const csv  = [headers, ...rows].map(r => r.join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const a    = document.createElement('a');

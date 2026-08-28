@@ -64,8 +64,19 @@ const PRODUCT_BY_HANDLE_QUERY = `
     productByHandle(handle: $handle) {
       id
       title
+      images(first: 250) {
+        edges { node { id altText } }
+      }
       variants(first: 250) {
-        edges { node { id sku title } }
+        edges {
+          node {
+            id
+            sku
+            title
+            selectedOptions { name value }
+            image { id }
+          }
+        }
       }
     }
   }
@@ -89,10 +100,106 @@ const SET_PRODUCT_DRAFT_MUTATION = `
   }
 `;
 
+const DELETE_PRODUCT_IMAGES_MUTATION = `
+  mutation deleteProductImages($id: ID!, $imageIds: [ID!]!) {
+    productDeleteImages(id: $id, imageIds: $imageIds) {
+      deletedImageIds
+      userErrors { field message }
+    }
+  }
+`;
+
 // ── SKU parser: UD-{prodId}-{varId} ──────────────────────────────────────────
 function parseSku(sku) {
   const parts = sku.split('-');
   return { prodId: parts[1] || null, varId: parts[2] || null };
+}
+
+// ── Image orphan detection (two-tier) ────────────────────────────────────────
+//
+// Tier 1 — Alt text colour matching (preferred):
+//   Extract the colour option from each variant's selectedOptions.
+//   If a colour is present ONLY in deleted variants (not in remaining),
+//   all product images whose altText equals that colour are queued for deletion.
+//
+// Tier 2 — Direct variant.image.id fallback:
+//   Used when a variant's colour had no alt-text match (alt text blank/different).
+//   Deletes the variant's one directly-assigned image, but only if no remaining
+//   variant also references that same image ID.
+//
+// Returns { imageIdsToDelete: string[], logMessages: string[] }
+//
+function getOrphanedImageIds(allProductImages, deletedVariantNodes, remainingVariantNodes) {
+  const imageIdsToDelete = new Set();
+  const logMessages      = [];
+
+  // Extract the colour option value from a variant node's selectedOptions array.
+  // Prefers an option named "Colour"/"Color"/"Finish"/"Shade"; falls back to first option.
+  function getColour(node) {
+    const opts = node.selectedOptions || [];
+    const opt  = opts.find(o => /colou?r|finish|shade/i.test(o.name)) || opts[0];
+    return opt?.value?.trim() || null;
+  }
+
+  const deletedColours   = new Set(deletedVariantNodes.map(getColour).filter(Boolean));
+  const remainingColours = new Set(remainingVariantNodes.map(getColour).filter(Boolean));
+  // Colours that belong ONLY to deleted variants — no remaining variant shares them
+  const orphanedColours  = new Set([...deletedColours].filter(c => !remainingColours.has(c)));
+
+  // For Tier 2 safety: image IDs still referenced by remaining variants
+  const remainingVariantImageIds = new Set(
+    remainingVariantNodes.map(n => n.image?.id).filter(Boolean)
+  );
+
+  // ── Tier 1: alt text matching ─────────────────────────────────────────────
+  const tier1Handled = new Set(); // colours resolved by tier 1
+  for (const img of allProductImages) {
+    if (img.altText && orphanedColours.has(img.altText)) {
+      imageIdsToDelete.add(img.id);
+      tier1Handled.add(img.altText);
+    }
+  }
+  for (const colour of tier1Handled) {
+    const count = allProductImages.filter(i => i.altText === colour).length;
+    logMessages.push(`delete ${count} image(s) for colour "${colour}" via alt text (no remaining ${colour} variants)`);
+  }
+
+  // ── Tier 2: direct variant image fallback ─────────────────────────────────
+  for (const node of deletedVariantNodes) {
+    const colour = getColour(node);
+    // Skip if this colour was already handled by tier 1
+    if (colour && tier1Handled.has(colour)) continue;
+    // Skip if no directly assigned image
+    if (!node.image?.id) continue;
+    // Skip if a remaining variant still uses this image (shared image)
+    if (remainingVariantImageIds.has(node.image.id)) continue;
+    // Skip if already queued
+    if (imageIdsToDelete.has(node.image.id)) continue;
+
+    imageIdsToDelete.add(node.image.id);
+    logMessages.push(`delete 1 variant image for "${colour || node.title}" via direct assignment (alt text not available)`);
+  }
+
+  return { imageIdsToDelete: [...imageIdsToDelete], logMessages };
+}
+
+// ── Execute orphaned image deletion (non-fatal) ───────────────────────────────
+// Errors are logged as warnings and do not abort the parent operation.
+async function deleteOrphanedImages(client, productId, imageIds, log, handle) {
+  if (!imageIds.length) return;
+  try {
+    const result     = await gql(client, DELETE_PRODUCT_IMAGES_MUTATION, { id: productId, imageIds });
+    const userErrors = result?.productDeleteImages?.userErrors || [];
+    if (userErrors.length) {
+      const errMsg = userErrors.map(e => e.message).join(', ');
+      log.push({ sku: '-', handle, status: 'warning', message: `Image delete warning: ${errMsg}` });
+    } else {
+      const count = result?.productDeleteImages?.deletedImageIds?.length ?? imageIds.length;
+      console.log(`    ✓ Deleted ${count} orphaned image(s)`);
+    }
+  } catch (err) {
+    log.push({ sku: '-', handle, status: 'warning', message: `Image delete failed (non-fatal): ${err.message}` });
+  }
 }
 
 // ── POST /api/shopify/delete-variants-bulk ────────────────────────────────────
@@ -161,8 +268,12 @@ router.post('/delete-variants-bulk', async (req, res) => {
 
           if (product) {
             productTitle = product.title;
-            const allVariants = product.variants.edges.map(e => e.node);
-            const allOrphaned = allVariants.every(v => orphanedSKUs.has(v.sku));
+            const allVariants      = product.variants.edges.map(e => e.node);
+            const allImages        = product.images.edges.map(e => e.node);
+            const allOrphaned      = allVariants.every(v => orphanedSKUs.has(v.sku));
+            const deletedNodes     = allVariants.filter(v => orphanedSKUs.has(v.sku));
+            const remainingNodes   = allVariants.filter(v => !orphanedSKUs.has(v.sku));
+
             if (allOrphaned) {
               // Per-variant CFS presence check
               const matchedInCFS = allVariants.filter(v => {
@@ -179,6 +290,24 @@ router.post('/delete-variants-bulk', async (req, res) => {
               }
             } else {
               action = `delete ${orphanedSKUs.size} of ${allVariants.length} variant(s)`;
+            }
+
+            // Image dry-run: report what would be deleted (only for paths that delete variants)
+            const willDeleteVariants = action.startsWith('delete') || action.startsWith('set product to DRAFT') === false;
+            if (willDeleteVariants && !action.startsWith('keep') && !action.startsWith('set product to DRAFT')) {
+              const effectiveDeleted  = allOrphaned
+                ? allVariants.filter(v => { const { prodId, varId } = parseSku(v.sku); return !(prodId && productIdSet.has(prodId)) && !(varId && variantAttrIdSet.has(varId)); })
+                : deletedNodes;
+              const effectiveRemaining = allOrphaned
+                ? allVariants.filter(v => { const { prodId, varId } = parseSku(v.sku); return (prodId && productIdSet.has(prodId)) || (varId && variantAttrIdSet.has(varId)); })
+                : remainingNodes;
+              const { logMessages: imgMsgs } = getOrphanedImageIds(allImages, effectiveDeleted, effectiveRemaining);
+              for (const msg of imgMsgs) {
+                log.push({ sku: '-', handle, status: 'dry_run', message: `Images: would ${msg}: ${productTitle}` });
+              }
+              if (!imgMsgs.length) {
+                log.push({ sku: '-', handle, status: 'dry_run', message: `Images: no orphaned images found for ${productTitle}` });
+              }
             }
           }
         } catch (_) { /* dry-run lookup failure is non-fatal */ }
@@ -206,6 +335,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
       }
 
       const allVariants     = product.variants.edges.map(e => e.node);
+      const allImages       = product.images.edges.map(e => e.node);
       const orphanedNodes   = allVariants.filter(v => orphanedSKUs.has(v.sku));
       const nonOrphanedLeft = allVariants.length - orphanedNodes.length;
 
@@ -253,6 +383,9 @@ router.post('/delete-variants-bulk', async (req, res) => {
               log.push({ sku: node.sku, handle, status: 'deleted', message: `Deleted: ${product.title} / ${node.title}` });
               deleted++;
             }
+            // Delete images orphaned by the removed variants
+            const { imageIdsToDelete } = getOrphanedImageIds(allImages, cfsUnmatched, cfsMatched);
+            await deleteOrphanedImages(client, product.id, imageIdsToDelete, log, handle);
           }
 
         } else if (cfsUnmatched.length === 0) {
@@ -293,6 +426,10 @@ router.post('/delete-variants-bulk', async (req, res) => {
             log.push({ sku: node.sku, handle, status: 'deleted', message: `Deleted: ${product.title} / ${node.title}` });
             deleted++;
           }
+          // Delete images orphaned by the removed variants
+          const remainingNodes = allVariants.filter(v => !orphanedSKUs.has(v.sku));
+          const { imageIdsToDelete } = getOrphanedImageIds(allImages, orphanedNodes, remainingNodes);
+          await deleteOrphanedImages(client, product.id, imageIdsToDelete, log, handle);
         }
       }
 
@@ -494,6 +631,15 @@ router.post('/publish-products', async (req, res) => {
         for (const v of variantsForProduct) {
           log.push({ sku: v.variantSku, handle, status: 'dry_run', message: `Would ${action}: ${product.title}` });
         }
+        // Image dry-run
+        const allImages = product.images.edges.map(e => e.node);
+        const { logMessages: imgMsgs } = getOrphanedImageIds(allImages, variantsToDelete, remainingVariants);
+        for (const msg of imgMsgs) {
+          log.push({ sku: '-', handle, status: 'dry_run', message: `Images: would ${msg}: ${product.title}` });
+        }
+        if (!imgMsgs.length) {
+          log.push({ sku: '-', handle, status: 'dry_run', message: `Images: no orphaned images found for ${product.title}` });
+        }
         await sleep(150);
         continue;
       }
@@ -518,6 +664,11 @@ router.post('/publish-products', async (req, res) => {
 
       deleted += variantIds.length;
       console.log(`  ✓ Deleted ${variantIds.length} variant(s) from "${product.title}"`);
+
+      // ── Step 1b — delete orphaned images ─────────────────────────────────
+      const allImages = product.images.edges.map(e => e.node);
+      const { imageIdsToDelete } = getOrphanedImageIds(allImages, variantsToDelete, remainingVariants);
+      await deleteOrphanedImages(client, product.id, imageIdsToDelete, log, handle);
 
       // ── Step 2 — update product status only if no other variants remain ──
       if (remainingVariants.length > 0) {
