@@ -2,7 +2,7 @@ const express = require('express');
 const multer  = require('multer');
 const path    = require('path');
 const fs      = require('fs');
-const { streamVariantSKUs, streamShopifyVariants } = require('../utils/parseCSV');
+const { streamProductSKUs, streamVariantSKUs, streamShopifyVariants } = require('../utils/parseCSV');
 const { compareVariants } = require('../utils/matchVariants');
 
 const router = express.Router();
@@ -20,11 +20,20 @@ function tryUnlink(filePath) {
 }
 
 // ── POST /api/compare ────────────────────────────────────────────────────────
-// Accepts: variantFeed (non-Shopify variant CSV), shopifyFile1, shopifyFile2 (optional)
-// All CSV parsing uses streaming — no whole-file reads into memory.
+// Accepts:
+//   productFeed   — CFS non-Shopify product CSV  (Shopify SKU col: UD-{ProductId})
+//   variantFeed   — CFS non-Shopify variant CSV  (Shopify SKU col: UD-{ProductId}-{VariantId})
+//   shopifyFile1  — Shopify export part 1
+//   shopifyFile2  — Shopify export part 2 (optional)
+//
+// Matching logic (two-step):
+//   1. Check full SKU against variant feed  (exact)
+//   2. If not found, check product ID portion against product feed  (fallback)
+//   Orphaned only if BOTH checks fail.
 router.post(
   '/compare',
   upload.fields([
+    { name: 'productFeed',  maxCount: 1 },
     { name: 'variantFeed',  maxCount: 1 },
     { name: 'shopifyFile1', maxCount: 1 },
     { name: 'shopifyFile2', maxCount: 1 },
@@ -35,24 +44,32 @@ router.post(
     try {
       const files = req.files;
 
-      if (!files.variantFeed || !files.shopifyFile1) {
-        return res.status(400).json({ error: 'Please upload the non-Shopify variant feed and at least one Shopify export file.' });
+      if (!files.productFeed || !files.variantFeed || !files.shopifyFile1) {
+        return res.status(400).json({
+          error: 'Please upload the CFS product feed, CFS variant feed, and at least one Shopify export file.',
+        });
       }
 
+      const productFeedPath  = files.productFeed[0].path;
       const variantFeedPath  = files.variantFeed[0].path;
       const shopifyFile1Path = files.shopifyFile1[0].path;
       const shopifyFile2Path = files.shopifyFile2?.[0]?.path || null;
 
-      uploadedPaths.push(variantFeedPath, shopifyFile1Path);
+      uploadedPaths.push(productFeedPath, variantFeedPath, shopifyFile1Path);
       if (shopifyFile2Path) uploadedPaths.push(shopifyFile2Path);
 
-      console.log('▶ Streaming non-Shopify variant feed…');
-      // 1. Stream non-Shopify variant feed → build Set of valid SKUs (very low memory)
-      const validSKUs = await streamVariantSKUs(variantFeedPath);
-      console.log(`  ✓ ${validSKUs.size} valid SKUs loaded`);
+      // 1. Stream CFS product feed → Set of short product SKUs (UD-{ProductId})
+      console.log('▶ Streaming CFS product feed…');
+      const validProductSKUs = await streamProductSKUs(productFeedPath);
+      console.log(`  ✓ ${validProductSKUs.size} product SKUs loaded`);
 
+      // 2. Stream CFS variant feed → Set of full variant SKUs (UD-{ProductId}-{VariantId})
+      console.log('▶ Streaming CFS variant feed…');
+      const validVariantSKUs = await streamVariantSKUs(variantFeedPath);
+      console.log(`  ✓ ${validVariantSKUs.size} variant SKUs loaded`);
+
+      // 3. Stream Shopify export(s)
       console.log('▶ Streaming Shopify export file 1…');
-      // 2. Stream Shopify export(s) — process sequentially to keep peak memory low
       const shopifyVariants = await streamShopifyVariants(shopifyFile1Path);
       console.log(`  ✓ ${shopifyVariants.length} variants from file 1`);
 
@@ -63,9 +80,9 @@ router.post(
         shopifyVariants.push(...variants2);
       }
 
-      console.log(`▶ Comparing ${shopifyVariants.length} Shopify variants against ${validSKUs.size} valid SKUs…`);
-      // 3. Compare
-      const { results, summary } = compareVariants(shopifyVariants, validSKUs);
+      // 4. Two-step compare
+      console.log(`▶ Comparing ${shopifyVariants.length} Shopify variants…`);
+      const { results, summary } = compareVariants(shopifyVariants, validVariantSKUs, validProductSKUs);
       console.log(`  ✓ Done — ${summary.orphaned} orphaned, ${summary.ok} OK`);
 
       res.json({ success: true, summary, results });
@@ -74,7 +91,7 @@ router.post(
       console.error('Compare error:', err);
       res.status(500).json({ error: err.message });
     } finally {
-      // 4. Always clean up uploaded temp files
+      // Always clean up uploaded temp files
       uploadedPaths.forEach(tryUnlink);
     }
   }

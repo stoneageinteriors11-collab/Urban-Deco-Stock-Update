@@ -56,16 +56,35 @@
       letter-spacing: 0.06em; color: var(--text-muted); margin-bottom: 18px;
     }
 
+    /* ── Upload section grouping ── */
+    .upload-group {
+      margin-bottom: 20px;
+    }
+    .upload-group:last-child { margin-bottom: 0; }
+    .upload-group-label {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .07em; color: var(--text-muted);
+      margin-bottom: 12px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .upload-group-label::after {
+      content: ''; flex: 1; height: 1px; background: var(--border);
+    }
+
     /* ── Grid ── */
     .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-    .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
-    @media (max-width: 700px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+    @media (max-width: 700px) { .grid-2 { grid-template-columns: 1fr; } }
 
     /* ── Upload zones ── */
+    .upload-zone-label {
+      font-size: 13px; font-weight: 600; margin-bottom: 8px;
+    }
+    .upload-zone-label .req { color: var(--danger); }
+    .upload-zone-label .opt { color: var(--text-muted); font-weight: 400; }
     .upload-zone {
       border: 2px dashed var(--border);
       border-radius: var(--radius);
-      padding: 28px 20px;
+      padding: 24px 20px;
       text-align: center;
       cursor: pointer;
       transition: border-color .2s, background .2s;
@@ -78,31 +97,11 @@
     .upload-zone input[type=file] {
       position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
     }
-    .upload-zone .icon { font-size: 28px; margin-bottom: 8px; }
-    .upload-zone .label { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
-    .upload-zone .sub { font-size: 12px; color: var(--text-muted); }
+    .upload-zone .icon { font-size: 26px; margin-bottom: 8px; }
+    .upload-zone .label { font-size: 13px; font-weight: 600; margin-bottom: 3px; }
+    .upload-zone .sub { font-size: 11px; color: var(--text-muted); }
     .upload-zone.has-file { border-color: var(--success); background: rgba(34,197,94,.05); }
-    .upload-zone.has-file .icon::after { content: ' ✓'; font-size: 16px; color: var(--success); }
-    .file-name { font-size: 12px; color: var(--success); margin-top: 6px; font-weight: 500; }
-
-    /* ── Settings bar ── */
-    .settings-row {
-      display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap;
-    }
-    .field { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 200px; }
-    .field label { font-size: 12px; font-weight: 600; color: var(--text-muted); }
-    .field input {
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      border-radius: 7px;
-      color: var(--text);
-      padding: 9px 12px;
-      font-size: 14px;
-      outline: none;
-      transition: border-color .2s;
-    }
-    .field input:focus { border-color: var(--accent); }
-    .field input::placeholder { color: var(--text-muted); }
+    .file-name { font-size: 11px; color: var(--success); margin-top: 6px; font-weight: 500; }
 
     /* ── Toggle ── */
     .toggle-wrap { display: flex; align-items: center; gap: 10px; padding-bottom: 2px; }
@@ -144,15 +143,13 @@
       border: 1px solid var(--border);
     }
     .btn-outline:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-    .btn-success { background: var(--success); color: #fff; }
+    .btn-warning { background: var(--warning); color: #000; }
+    .btn-warning:hover:not(:disabled) { opacity: .85; }
 
     .actions-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 
     /* ── Connection test ── */
     #conn-status { font-size: 13px; padding: 6px 12px; border-radius: 7px; }
-    #conn-status.ok      { background: rgba(34,197,94,.12); color: var(--success); }
-    #conn-status.error   { background: rgba(239,68,68,.12);  color: var(--danger);  }
-    #conn-status.testing { background: rgba(99,102,241,.12); color: var(--accent);  }
 
     /* ── Summary tiles ── */
     .summary-tiles { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin-bottom: 20px; }
@@ -270,56 +267,74 @@
   <!-- ── Step 1: Upload Files ── -->
   <div class="card">
     <div class="card-title">Step 1 — Upload Files</div>
-    <div class="grid-3">
 
-      <div>
-        <div style="font-size:13px;font-weight:600;margin-bottom:10px;">
-          Non-Shopify Variant Feed <span style="color:var(--danger)">*</span>
+    <!-- CFS (Non-Shopify) feeds -->
+    <div class="upload-group">
+      <div class="upload-group-label">Choice Furniture Superstore — Non-Shopify Feeds</div>
+      <div class="grid-2">
+
+        <div>
+          <div class="upload-zone-label">Product Feed <span class="req">*</span></div>
+          <div class="upload-zone" id="zone-product" onclick="document.getElementById('input-product').click()">
+            <input type="file" id="input-product" accept=".csv" />
+            <div class="icon">📋</div>
+            <div class="label">215_Froogle_Product_*.csv</div>
+            <div class="sub">SKU format: UD-{ProductId}</div>
+            <div class="file-name" id="fname-product"></div>
+          </div>
         </div>
-        <div class="upload-zone" id="zone-variant" onclick="document.getElementById('input-variant').click()">
-          <input type="file" id="input-variant" accept=".csv" />
-          <div class="icon">📄</div>
-          <div class="label">215_Froogle_Variant_*.csv</div>
-          <div class="sub">Choice Furniture variant feed</div>
-          <div class="file-name" id="fname-variant"></div>
+
+        <div>
+          <div class="upload-zone-label">Variant Feed <span class="req">*</span></div>
+          <div class="upload-zone" id="zone-variant" onclick="document.getElementById('input-variant').click()">
+            <input type="file" id="input-variant" accept=".csv" />
+            <div class="icon">📄</div>
+            <div class="label">215_Froogle_Variant_*.csv</div>
+            <div class="sub">SKU format: UD-{ProductId}-{VariantId}</div>
+            <div class="file-name" id="fname-variant"></div>
+          </div>
         </div>
+
       </div>
-
-      <div>
-        <div style="font-size:13px;font-weight:600;margin-bottom:10px;">
-          Shopify Export — File 1 <span style="color:var(--danger)">*</span>
-        </div>
-        <div class="upload-zone" id="zone-shop1" onclick="document.getElementById('input-shop1').click()">
-          <input type="file" id="input-shop1" accept=".csv" />
-          <div class="icon">🛍</div>
-          <div class="label">products_export_1.csv</div>
-          <div class="sub">Urban Deco Shopify export</div>
-          <div class="file-name" id="fname-shop1"></div>
-        </div>
-      </div>
-
-      <div>
-        <div style="font-size:13px;font-weight:600;margin-bottom:10px;">
-          Shopify Export — File 2 <span style="color:var(--text-muted)">(optional)</span>
-        </div>
-        <div class="upload-zone" id="zone-shop2" onclick="document.getElementById('input-shop2').click()">
-          <input type="file" id="input-shop2" accept=".csv" />
-          <div class="icon">🛍</div>
-          <div class="label">products_export_2.csv</div>
-          <div class="sub">If split into two files</div>
-          <div class="file-name" id="fname-shop2"></div>
-        </div>
-      </div>
-
     </div>
+
+    <!-- Shopify exports -->
+    <div class="upload-group">
+      <div class="upload-group-label">Urban Deco — Shopify Export</div>
+      <div class="grid-2">
+
+        <div>
+          <div class="upload-zone-label">File 1 <span class="req">*</span></div>
+          <div class="upload-zone" id="zone-shop1" onclick="document.getElementById('input-shop1').click()">
+            <input type="file" id="input-shop1" accept=".csv" />
+            <div class="icon">🛍</div>
+            <div class="label">products_export_1.csv</div>
+            <div class="sub">Urban Deco Shopify export</div>
+            <div class="file-name" id="fname-shop1"></div>
+          </div>
+        </div>
+
+        <div>
+          <div class="upload-zone-label">File 2 <span class="opt">(optional)</span></div>
+          <div class="upload-zone" id="zone-shop2" onclick="document.getElementById('input-shop2').click()">
+            <input type="file" id="input-shop2" accept=".csv" />
+            <div class="icon">🛍</div>
+            <div class="label">products_export_2.csv</div>
+            <div class="sub">If export was split into two files</div>
+            <div class="file-name" id="fname-shop2"></div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
   </div>
 
   <!-- ── Step 2: Settings ── -->
   <div class="card">
     <div class="card-title">Step 2 — Shopify Connection</div>
-    <div class="settings-row">
+    <div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;">
 
-      <!-- Connection status + button -->
       <div style="display:flex;flex-direction:column;gap:10px;flex:1;">
         <div id="shopify-disconnected" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
           <a href="/auth" class="btn btn-primary" style="text-decoration:none;">
@@ -337,7 +352,6 @@
         <div id="conn-status" class="hidden" style="font-size:13px;padding:6px 12px;border-radius:7px;"></div>
       </div>
 
-      <!-- Dry run toggle -->
       <div style="padding-bottom:2px;">
         <div class="toggle-wrap">
           <label class="toggle">
@@ -365,11 +379,14 @@
       <button class="btn btn-outline hidden" id="btn-export" onclick="exportCSV()">
         📥 Export Results CSV
       </button>
+      <button class="btn btn-warning hidden" id="btn-download-log" onclick="downloadDryRunLog()">
+        📋 Download Dry Run Log
+      </button>
       <span id="compare-spinner" class="hidden"><span class="spinner"></span> Comparing…</span>
       <span id="delete-spinner"  class="hidden"><span class="spinner"></span> Deleting…</span>
     </div>
 
-    <!-- Summary Tiles (hidden until compare runs) -->
+    <!-- Summary Tiles -->
     <div class="summary-tiles hidden" id="summary-tiles">
       <div class="tile">
         <div class="num" id="tile-total">0</div>
@@ -377,7 +394,7 @@
       </div>
       <div class="tile orphaned">
         <div class="num" id="tile-orphaned">0</div>
-        <div class="lbl">Orphaned (not in CFS feed)</div>
+        <div class="lbl">Orphaned (not in CFS feeds)</div>
       </div>
       <div class="tile ok-count">
         <div class="num" id="tile-ok">0</div>
@@ -387,7 +404,7 @@
 
     <!-- Table toolbar -->
     <div class="table-toolbar hidden" id="table-toolbar">
-      <input class="search-input" id="search-input" placeholder="Search by product, SKU, variant…" oninput="renderTable()" />
+      <input class="search-input" id="search-input" placeholder="Search by product, SKU, variant…" oninput="applyFilter2()" />
       <div class="filter-btns">
         <button class="fbtn active" data-filter="all"      onclick="setFilter('all',this)">All</button>
         <button class="fbtn"        data-filter="orphaned" onclick="setFilter('orphaned',this)">Orphaned</button>
@@ -438,9 +455,11 @@
   const PAGE_SIZE  = 50;
   let activeFilter = 'all';
   let selectedSKUs = new Set();
+  let lastLog      = [];      // stores the most recent delete/dry-run log for CSV download
+  let lastLogDryRun = true;
 
   // ── File upload UI ─────────────────────────────────────────────────────────
-  ['variant','shop1','shop2'].forEach(id => {
+  ['product','variant','shop1','shop2'].forEach(id => {
     const input = document.getElementById(`input-${id}`);
     const zone  = document.getElementById(`zone-${id}`);
     const fname = document.getElementById(`fname-${id}`);
@@ -476,7 +495,6 @@
   async function checkConnectionStatus() {
     const params = new URLSearchParams(window.location.search);
     if (params.get('connected') === 'true') {
-      // Clean URL after redirect from OAuth
       window.history.replaceState({}, '', '/');
     }
     try {
@@ -496,7 +514,6 @@
     setConnected(false);
   }
 
-  // ── Test connection ────────────────────────────────────────────────────────
   async function testConnection() {
     const el = document.getElementById('conn-status');
     el.style.cssText = 'font-size:13px;padding:6px 12px;border-radius:7px;background:rgba(99,102,241,.12);color:var(--accent)';
@@ -514,25 +531,27 @@
     }
   }
 
-  // Run on load
   checkConnectionStatus();
 
   // ── Run comparison ─────────────────────────────────────────────────────────
   async function runCompare() {
+    const productFile = document.getElementById('input-product').files[0];
     const variantFile = document.getElementById('input-variant').files[0];
     const shopFile1   = document.getElementById('input-shop1').files[0];
     const shopFile2   = document.getElementById('input-shop2').files[0];
 
-    if (!variantFile || !shopFile1) {
-      alert('Please upload the non-Shopify variant feed and at least one Shopify export file.');
+    if (!productFile || !variantFile || !shopFile1) {
+      alert('Please upload the CFS product feed, CFS variant feed, and at least one Shopify export file.');
       return;
     }
 
     document.getElementById('btn-compare').disabled = true;
     document.getElementById('compare-spinner').classList.remove('hidden');
+    document.getElementById('btn-download-log').classList.add('hidden');
 
     const form = new FormData();
-    form.append('variantFeed', variantFile);
+    form.append('productFeed',  productFile);
+    form.append('variantFeed',  variantFile);
     form.append('shopifyFile1', shopFile1);
     if (shopFile2) form.append('shopifyFile2', shopFile2);
 
@@ -541,25 +560,23 @@
       const data = await res.json();
       if (!data.success) throw new Error(data.error);
 
-      allResults  = data.results;
+      allResults   = data.results;
       activeFilter = 'all';
       selectedSKUs = new Set();
       currentPage  = 1;
+      lastLog      = [];
 
-      // Summary tiles
       document.getElementById('tile-total').textContent    = data.summary.total.toLocaleString();
       document.getElementById('tile-orphaned').textContent = data.summary.orphaned.toLocaleString();
       document.getElementById('tile-ok').textContent       = data.summary.ok.toLocaleString();
       document.getElementById('summary-tiles').classList.remove('hidden');
-
-      // Show toolbar and table
       document.getElementById('table-toolbar').classList.remove('hidden');
       document.getElementById('results-table').classList.remove('hidden');
       document.getElementById('empty-state').classList.add('hidden');
       document.getElementById('btn-delete').classList.remove('hidden');
       document.getElementById('btn-export').classList.remove('hidden');
 
-      applyFilter();
+      applyFilter2();
 
     } catch(e) {
       alert('Error: ' + e.message);
@@ -575,21 +592,6 @@
     document.querySelectorAll('.fbtn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     currentPage = 1;
-    applyFilter();
-  }
-
-  function applyFilter() {
-    const q = document.getElementById('search-input').value.toLowerCase();
-    filtered = allResults.filter(r => {
-      const matchFilter = activeFilter === 'all' || r.matchStatus === activeFilter;
-      const matchSearch = !q || [r.title,r.variantSku,r.option1,r.option2,r.handle]
-        .join(' ').toLowerCase().includes(q);
-      return matchFilter && matchSearch;
-    });
-    renderTable();
-  }
-
-  function renderTable() {
     applyFilter2();
   }
 
@@ -610,10 +612,10 @@
     const page  = filtered.slice(start, start + PAGE_SIZE);
 
     tbody.innerHTML = page.map(r => {
-      const isOrphaned = r.matchStatus === 'orphaned';
-      const checked    = selectedSKUs.has(r.variantSku) ? 'checked' : '';
-      const badgeCls   = isOrphaned ? 'badge-orphaned' : 'badge-ok';
-      const badgeTxt   = isOrphaned ? 'Orphaned' : 'OK';
+      const isOrphaned  = r.matchStatus === 'orphaned';
+      const checked     = selectedSKUs.has(r.variantSku) ? 'checked' : '';
+      const badgeCls    = isOrphaned ? 'badge-orphaned' : 'badge-ok';
+      const badgeTxt    = isOrphaned ? 'Orphaned' : 'OK';
       const variantLabel = [r.option1, r.option2, r.option3].filter(Boolean).join(' / ') || 'Default';
       return `<tr>
         <td>${isOrphaned ? `<input type="checkbox" ${checked} onchange="toggleSKU('${r.variantSku}',this.checked)" />` : ''}</td>
@@ -687,7 +689,6 @@
       showLog(data.log, dryRun);
 
       if (!dryRun && data.deleted > 0) {
-        // Remove deleted from results
         allResults = allResults.filter(r => !skus.includes(r.variantSku));
         selectedSKUs.clear();
         applyFilter2();
@@ -707,16 +708,46 @@
 
   // ── Log panel ─────────────────────────────────────────────────────────────
   function showLog(log, dryRun) {
+    // Save for CSV download
+    lastLog       = log;
+    lastLogDryRun = dryRun;
+
+    // Show download button only after dry run
+    if (dryRun) {
+      document.getElementById('btn-download-log').classList.remove('hidden');
+    }
+
     const panel = document.getElementById('log-panel');
     panel.style.display = 'block';
-    panel.innerHTML = `<p style="color:var(--text-muted);margin-bottom:8px">${dryRun?'DRY RUN LOG':'ACTION LOG'} — ${new Date().toLocaleTimeString()}</p>` +
+    panel.innerHTML =
+      `<p style="color:var(--text-muted);margin-bottom:8px">${dryRun ? 'DRY RUN LOG' : 'ACTION LOG'} — ${new Date().toLocaleTimeString()}</p>` +
       log.map(l => {
-        const cls = l.status==='deleted'?'log-deleted':l.status==='dry_run'?'log-dry':l.status==='error'?'log-error':'log-ok';
+        const cls = l.status==='deleted' ? 'log-deleted'
+                  : l.status==='dry_run' ? 'log-dry'
+                  : l.status==='error'   ? 'log-error'
+                  : 'log-ok';
         return `<p class="${cls}">[${l.status.toUpperCase()}] ${l.sku} — ${l.message}</p>`;
       }).join('');
   }
 
-  // ── Export CSV ────────────────────────────────────────────────────────────
+  // ── Download Dry Run Log as CSV ───────────────────────────────────────────
+  function downloadDryRunLog() {
+    if (!lastLog.length) return;
+    const headers = ['SKU', 'Status', 'Message'];
+    const rows = lastLog.map(l => [
+      l.sku,
+      l.status,
+      `"${(l.message || '').replace(/"/g, '""')}"`,
+    ]);
+    const csv  = [headers, ...rows].map(r => r.join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const a    = document.createElement('a');
+    a.href     = URL.createObjectURL(blob);
+    a.download = `dry-run-log-${Date.now()}.csv`;
+    a.click();
+  }
+
+  // ── Export Results CSV ────────────────────────────────────────────────────
   function exportCSV() {
     if (!allResults.length) return;
     const headers = ['Handle','Product Title','Variant','SKU','Price','Inventory Qty','Status'];
@@ -729,16 +760,13 @@
       r.inventoryQty,
       r.matchStatus,
     ]);
-    const csv = [headers, ...rows].map(r=>r.join(',')).join('\n');
-    const blob = new Blob([csv], { type:'text/csv' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
+    const csv  = [headers, ...rows].map(r => r.join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const a    = document.createElement('a');
+    a.href     = URL.createObjectURL(blob);
     a.download = `variant-sync-results-${Date.now()}.csv`;
     a.click();
   }
-
-  // Wire search
-  document.getElementById('search-input').addEventListener('input', applyFilter2);
 </script>
 </body>
 </html>

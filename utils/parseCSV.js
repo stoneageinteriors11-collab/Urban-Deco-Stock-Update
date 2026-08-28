@@ -23,6 +23,32 @@ function parseCSVFile(filePath) {
 }
 
 /**
+ * Stream the non-Shopify PRODUCT Froogle CSV and return a Set of product-level SKUs.
+ * Column: "Shopify SKU"  e.g. UD-144246  (no variant attribute suffix)
+ * Used as the first-pass check: if a Shopify variant's product ID matches here,
+ * the product is still live on CFS even if the specific variant isn't in the variant feed.
+ */
+function streamProductSKUs(filePath) {
+  return new Promise((resolve, reject) => {
+    const skus = new Set();
+    fs.createReadStream(filePath)
+      .pipe(parse({
+        columns: true,
+        skip_empty_lines: true,
+        trim: true,
+        relax_column_count: true,
+        bom: true,
+      }))
+      .on('data', row => {
+        const sku = (row['Shopify SKU'] || '').trim();
+        if (sku) skus.add(sku);
+      })
+      .on('end',  () => resolve(skus))
+      .on('error', reject);
+  });
+}
+
+/**
  * Stream the non-Shopify variant Froogle CSV and return a Set of valid Shopify SKUs.
  * Column: "Shopify SKU"  e.g. UD-144246-16985763
  * Memory cost: one string per unique SKU (~30 bytes each), not the whole file.
@@ -118,6 +144,7 @@ function extractShopifyVariants(rows) {
 
 module.exports = {
   parseCSVFile,
+  streamProductSKUs,
   streamVariantSKUs,
   streamShopifyVariants,
   extractVariantSKUs,
