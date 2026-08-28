@@ -94,7 +94,14 @@ function compareVariants(
       }
     }
 
-    results.push({ ...v, matchStatus });
+    // For cfs-product rows, carry along the CFS product status (active/inactive)
+    // so the publish endpoint can decide whether to set ACTIVE or DRAFT.
+    const cfsProductStatus =
+      matchStatus === 'cfs-product'
+        ? (cfsProductIds.get(parseSku(v.variantSku).prodId) || 'active')
+        : undefined;
+
+    results.push({ ...v, matchStatus, ...(cfsProductStatus !== undefined && { cfsProductStatus }) });
   }
 
   const orphaned    = results.filter(r => r.matchStatus === 'orphaned').length;

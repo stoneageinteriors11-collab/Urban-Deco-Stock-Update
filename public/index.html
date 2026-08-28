@@ -147,6 +147,8 @@
     .btn-warning:hover:not(:disabled) { opacity: .85; }
     .btn-amber   { background: rgba(245,158,11,.18); color: var(--warning); border: 1px solid rgba(245,158,11,.4); }
     .btn-amber:hover:not(:disabled)   { background: rgba(245,158,11,.28); }
+    .btn-purple  { background: rgba(167,139,250,.18); color: #a78bfa; border: 1px solid rgba(167,139,250,.4); }
+    .btn-purple:hover:not(:disabled)  { background: rgba(167,139,250,.28); }
 
     .actions-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 
@@ -411,6 +413,9 @@
       <button class="btn btn-amber hidden" id="btn-set-draft" onclick="setSelectedDraft()">
         📄 Set Selected to Draft
       </button>
+      <button class="btn btn-purple hidden" id="btn-publish" onclick="publishSelected()">
+        📗 Publish Selected as Main Product
+      </button>
       <button class="btn btn-outline hidden" id="btn-export" onclick="exportCSV()">
         📥 Export Results CSV
       </button>
@@ -509,7 +514,8 @@
   let lastLog      = [];      // stores the most recent delete/dry-run log for CSV download
   let lastLogDryRun = true;
   // Raw CFS IDs used by the delete endpoint to decide whether to DRAFT or skip a product
-  let cfsProductIds    = [];   // Product Id values from CFS product feed
+  // cfsProductIds is now [[prodId, 'active'|'inactive'], ...] entries (Map-serialised)
+  let cfsProductIds    = [];   // [[prodId, status], ...] from CFS product feed
   let cfsVariantAttrIds = [];  // iProAttrId values from CFS variant feed
 
   // ── File upload UI ─────────────────────────────────────────────────────────
@@ -650,12 +656,14 @@
       document.getElementById('empty-state').classList.add('hidden');
       document.getElementById('btn-delete').classList.remove('hidden');
       document.getElementById('btn-set-draft').classList.remove('hidden');
+      document.getElementById('btn-publish').classList.remove('hidden');
       document.getElementById('btn-export').classList.remove('hidden');
       // Reset select-all to 'all' state
       document.getElementById('select-all-label').textContent = 'Select all orphaned & CFS Inactive';
       document.getElementById('select-all-wrap').style.display = '';
-      document.getElementById('btn-delete').style.display   = '';
+      document.getElementById('btn-delete').style.display    = '';
       document.getElementById('btn-set-draft').style.display = '';
+      document.getElementById('btn-publish').style.display   = 'none'; // only shown on cfs-product tab
 
       applyFilter2();
 
@@ -676,30 +684,41 @@
     // Update select-all label and button visibility based on active filter
     const labelEl  = document.getElementById('select-all-label');
     const wrapEl   = document.getElementById('select-all-wrap');
-    const btnDel   = document.getElementById('btn-delete');
-    const btnDraft = document.getElementById('btn-set-draft');
+    const btnDel     = document.getElementById('btn-delete');
+    const btnDraft   = document.getElementById('btn-set-draft');
+    const btnPublish = document.getElementById('btn-publish');
+
+    // Helper: reset all action buttons to hidden, then show only what's needed
+    const hideAll = () => {
+      btnDel.style.display     = 'none';
+      btnDraft.style.display   = 'none';
+      btnPublish.style.display = 'none';
+      wrapEl.style.display     = 'none';
+    };
+
+    hideAll();
 
     if (f === 'cfs-inactive') {
       labelEl.textContent = 'Select all CFS Inactive';
-      wrapEl.style.display = '';
-      btnDel.style.display   = 'none';
+      wrapEl.style.display   = '';
       btnDraft.style.display = '';
     } else if (f === 'orphaned') {
       labelEl.textContent = 'Select all orphaned';
       wrapEl.style.display = '';
-      btnDel.style.display   = '';
-      btnDraft.style.display = 'none';
+      btnDel.style.display = '';
+    } else if (f === 'cfs-product') {
+      labelEl.textContent    = 'Select all CFS Product Matches';
+      wrapEl.style.display   = '';
+      btnPublish.style.display = '';
     } else if (f === 'all') {
-      labelEl.textContent = 'Select all orphaned & CFS Inactive';
-      wrapEl.style.display = '';
+      labelEl.textContent    = 'Select all orphaned & CFS Inactive';
+      wrapEl.style.display   = '';
       btnDel.style.display   = '';
       btnDraft.style.display = '';
-    } else {
-      // OK / Draft / CFS Product — nothing selectable, hide select-all and action buttons
-      wrapEl.style.display   = 'none';
-      btnDel.style.display   = 'none';
-      btnDraft.style.display = 'none';
+      // cfs-product rows are selectable on All tab but publish btn not shown
+      // (mixed selection — user can use the individual tabs for targeted actions)
     }
+    // OK / Draft — nothing selectable; all hidden (already done by hideAll)
 
     // Uncheck select-all when switching filters
     document.getElementById('select-all').checked = false;
@@ -728,7 +747,7 @@
       const isDraft       = r.matchStatus === 'draft';
       const isCfsInactive = r.matchStatus === 'cfs-inactive';
       const isCfsProduct  = r.matchStatus === 'cfs-product';
-      const isSelectable  = isOrphaned || isCfsInactive;
+      const isSelectable  = isOrphaned || isCfsInactive || isCfsProduct;
       const checked       = selectedSKUs.has(r.variantSku) ? 'checked' : '';
       const badgeCls      = isOrphaned    ? 'badge-orphaned'
                           : isCfsInactive ? 'badge-cfs-inactive'
@@ -788,9 +807,11 @@
       selectable = allResults.filter(r => r.matchStatus === 'orphaned');
     } else if (activeFilter === 'cfs-inactive') {
       selectable = allResults.filter(r => r.matchStatus === 'cfs-inactive');
+    } else if (activeFilter === 'cfs-product') {
+      selectable = allResults.filter(r => r.matchStatus === 'cfs-product');
     } else {
-      // 'all' — select both actionable types
-      selectable = allResults.filter(r => r.matchStatus === 'orphaned' || r.matchStatus === 'cfs-inactive');
+      // 'all' — select all actionable types
+      selectable = allResults.filter(r => ['orphaned','cfs-inactive','cfs-product'].includes(r.matchStatus));
     }
     selectable.forEach(r => { if (checked) selectedSKUs.add(r.variantSku); else selectedSKUs.delete(r.variantSku); });
     renderPage();
@@ -896,6 +917,71 @@
     }
   }
 
+  // ── Publish selected CFS-product-match variants as Active on Shopify ────────
+  async function publishSelected() {
+    const skus = [...selectedSKUs];
+    if (!skus.length) { alert('No variants selected.'); return; }
+
+    const variantsToPublish = allResults.filter(r => skus.includes(r.variantSku) && r.matchStatus === 'cfs-product');
+    if (!variantsToPublish.length) {
+      alert('Only CFS Product Match variants can be promoted using this button.\nPlease select CFS Product Match rows.');
+      return;
+    }
+
+    // Count how many will be active vs draft based on CFS status
+    const toActive = variantsToPublish.filter(v => (v.cfsProductStatus || 'active') === 'active').length;
+    const toDraft  = variantsToPublish.filter(v => v.cfsProductStatus === 'inactive').length;
+
+    const dryRun = document.getElementById('dry-run-toggle').checked;
+    const msg = dryRun
+      ? `DRY RUN: Will log what would happen to ${variantsToPublish.length} variants (no actual changes).`
+      : `Promote ${variantsToPublish.length} CFS Product Match items:\n` +
+        `  • Delete variant from Shopify\n` +
+        `  • ${toActive} products → ACTIVE (CFS active)\n` +
+        `  • ${toDraft} products → DRAFT (CFS inactive)\n\nContinue?`;
+
+    if (!confirm(msg)) return;
+
+    document.getElementById('btn-publish').disabled = true;
+
+    try {
+      const res  = await fetch('/api/shopify/publish-products', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // variants already carry cfsProductStatus from the compare response
+        body: JSON.stringify({ variants: variantsToPublish, dryRun }),
+      });
+      const data = await res.json();
+      showLog(data.log, dryRun);
+
+      if (!dryRun && (data.published > 0 || data.drafted > 0)) {
+        // Remove promoted rows from local state (variant was deleted from Shopify)
+        const promotedSKUs = new Set(
+          data.log
+            .filter(l => l.status === 'published' || l.status === 'drafted')
+            .map(l => l.sku)
+        );
+        allResults = allResults.filter(r => !promotedSKUs.has(r.variantSku));
+        selectedSKUs.clear();
+        applyFilter2();
+        refreshTiles();
+      }
+
+      alert(
+        `Done!\n` +
+        `Variants deleted: ${data.deleted ?? 0}\n` +
+        `Products → ACTIVE: ${data.published ?? 0}\n` +
+        `Products → DRAFT: ${data.drafted ?? 0}\n` +
+        `Failed: ${data.failed}\n` +
+        `Dry run: ${dryRun}`
+      );
+    } catch(e) {
+      alert('Error: ' + e.message);
+    } finally {
+      document.getElementById('btn-publish').disabled = false;
+    }
+  }
+
   // ── Log panel ─────────────────────────────────────────────────────────────
   function showLog(log, dryRun) {
     // Save for CSV download
@@ -912,10 +998,12 @@
     panel.innerHTML =
       `<p style="color:var(--text-muted);margin-bottom:8px">${dryRun ? 'DRY RUN LOG' : 'ACTION LOG'} — ${new Date().toLocaleTimeString()}</p>` +
       log.map(l => {
-        const cls = l.status==='deleted'  ? 'log-deleted'
-                  : l.status==='drafted'  ? 'log-dry'
-                  : l.status==='dry_run'  ? 'log-dry'
-                  : l.status==='error'    ? 'log-error'
+        const cls = l.status==='deleted'   ? 'log-deleted'
+                  : l.status==='drafted'   ? 'log-dry'
+                  : l.status==='dry_run'   ? 'log-dry'
+                  : l.status==='error'     ? 'log-error'
+                  : l.status==='kept'      ? 'log-dry'
+                  : l.status==='published' ? 'log-ok'
                   : 'log-ok';
         return `<p class="${cls}">[${l.status.toUpperCase()}] ${l.sku} — ${l.message}</p>`;
       }).join('');

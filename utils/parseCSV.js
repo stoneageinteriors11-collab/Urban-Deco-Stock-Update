@@ -104,15 +104,16 @@ async function streamShopifyVariants(filePath) {
   return variants;
 }
 
-// ── CFS Product feed → Set of raw Product IDs ────────────────────────────────
-// Used for the "all variants orphaned" check: extract {prodid} from UD-{prodid}-{varid}
-// and verify it against this set before deciding to set a product to DRAFT.
+// ── CFS Product feed → Map of raw Product IDs → CFS status ───────────────────
+// Used for the "all variants orphaned" check and cfs-product status propagation.
+// Map value is normalised status: 'active' | 'inactive'
 async function streamProductIds(filePath) {
   const rows = await getRows(filePath);
-  const ids = new Set();
+  const ids = new Map(); // prodId → 'active' | 'inactive'
   for (const row of rows) {
-    const id = String(row['Product Id'] || '').trim();
-    if (id) ids.add(id);
+    const id     = String(row['Product Id'] || '').trim();
+    const status = String(row['Status']     || '').trim().toLowerCase();
+    if (id) ids.set(id, status === 'inactive' ? 'inactive' : 'active');
   }
   return ids;
 }

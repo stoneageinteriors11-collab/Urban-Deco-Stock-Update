@@ -116,7 +116,8 @@ function parseSku(sku) {
 //
 router.post('/delete-variants-bulk', async (req, res) => {
   const { variants = [], dryRun = true, cfsProductIds = [], cfsVariantAttrIds = [] } = req.body;
-  const productIdSet    = new Set(cfsProductIds);
+  // cfsProductIds arrives as [[prodId, status], ...] entries; build a Map (has() still works)
+  const productIdSet    = new Map(cfsProductIds);
   const variantAttrIdSet = new Set(cfsVariantAttrIds);
 
   if (!variants.length) {
@@ -405,6 +406,170 @@ router.post('/set-draft', async (req, res) => {
 
   console.log(`  ✓ Done — drafted: ${drafted}, failed: ${failed}`);
   res.json({ success: true, dryRun, drafted, failed, total: variants.length, log });
+});
+
+
+// ── POST /api/shopify/publish-products ───────────────────────────────────────
+//
+// Body: { variants: [{ handle, variantSku, title, cfsProductStatus, ... }], dryRun: bool }
+//
+// For each CFS Product Match variant:
+//   1. Look up the Shopify product by handle.
+//   2. Delete the specific variant(s) from Shopify (they should be standalone products,
+//      not variants of a parent product).
+//   3. Determine status from the variant's cfsProductStatus field:
+//        'active'   → set Shopify product to ACTIVE
+//        'inactive' → set Shopify product to DRAFT
+//   If a product has a mix of CFS-active and CFS-inactive matched variants,
+//   the product is set to DRAFT (conservative).
+//
+const SET_PRODUCT_ACTIVE_MUTATION = `
+  mutation setProductActive($productId: ID!) {
+    productUpdate(input: { id: $productId, status: ACTIVE }) {
+      product { id title status }
+      userErrors { field message }
+    }
+  }
+`;
+
+router.post('/publish-products', async (req, res) => {
+  const { variants = [], dryRun = true } = req.body;
+
+  if (!variants.length) {
+    return res.status(400).json({ error: 'No variants provided.' });
+  }
+
+  let client;
+  try {
+    client = graphqlClient();
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  const log      = [];
+  let published  = 0;
+  let drafted    = 0;
+  let deleted    = 0;
+  let failed     = 0;
+
+  // Group all selected variants by handle
+  const byHandle = new Map();
+  for (const v of variants) {
+    if (!byHandle.has(v.handle)) byHandle.set(v.handle, []);
+    byHandle.get(v.handle).push(v);
+  }
+
+  console.log(`▶ Publishing/drafting ${byHandle.size} CFS-product-match products (dryRun=${dryRun})`);
+
+  for (const [handle, variantsForProduct] of byHandle) {
+    const affectedSKUs = variantsForProduct.map(v => v.variantSku);
+
+    // Determine target status: DRAFT if any matched variant is CFS-inactive
+    const anyCfsInactive = variantsForProduct.some(v => v.cfsProductStatus === 'inactive');
+    const targetStatus   = anyCfsInactive ? 'DRAFT' : 'ACTIVE';
+
+    try {
+      if (dryRun) {
+        for (const v of variantsForProduct) {
+          log.push({
+            sku: v.variantSku,
+            status: 'dry_run',
+            message: `Would delete variant & set product to ${targetStatus}: ${v.title || handle}`,
+          });
+        }
+        await sleep(150);
+        continue;
+      }
+
+      // Look up the product and its variants by handle
+      const data    = await gql(client, PRODUCT_BY_HANDLE_QUERY, { handle });
+      const product = data?.productByHandle;
+
+      if (!product) {
+        for (const sku of affectedSKUs) {
+          log.push({ sku, status: 'not_found', message: `Product handle "${handle}" not found on Shopify` });
+          failed++;
+        }
+        continue;
+      }
+
+      // Find the Shopify variant IDs for the selected SKUs
+      const skuSet         = new Set(affectedSKUs);
+      const variantsToDelete = product.variants.edges
+        .map(e => e.node)
+        .filter(n => skuSet.has(n.sku));
+
+      if (variantsToDelete.length === 0) {
+        for (const sku of affectedSKUs) {
+          log.push({ sku, status: 'not_found', message: `SKU not found on Shopify product "${product.title}"` });
+          failed++;
+        }
+        continue;
+      }
+
+      // Step 1: Delete the variant(s)
+      const variantIds  = variantsToDelete.map(v => v.id);
+      const deleteResult = await gql(client, DELETE_VARIANTS_MUTATION, {
+        productId: product.id,
+        variantsIds: variantIds,
+      });
+      const deleteErrors = deleteResult?.productVariantsBulkDelete?.userErrors || [];
+
+      if (deleteErrors.length) {
+        const errMsg = deleteErrors.map(e => e.message).join(', ');
+        for (const sku of affectedSKUs) {
+          log.push({ sku, status: 'error', message: `Variant delete failed: ${errMsg}` });
+          failed++;
+        }
+        await sleep(350);
+        continue; // don't attempt status update if delete failed
+      }
+
+      deleted += variantIds.length;
+      console.log(`  ✓ Deleted ${variantIds.length} variant(s) from "${product.title}"`);
+
+      // Step 2: Set product status (ACTIVE or DRAFT based on CFS)
+      const statusMutation = targetStatus === 'ACTIVE'
+        ? SET_PRODUCT_ACTIVE_MUTATION
+        : SET_PRODUCT_DRAFT_MUTATION;
+
+      const statusResult = await gql(client, statusMutation, { productId: product.id });
+      const statusErrors = statusResult?.productUpdate?.userErrors || [];
+
+      if (statusErrors.length) {
+        const errMsg = statusErrors.map(e => e.message).join(', ');
+        for (const sku of affectedSKUs) {
+          log.push({ sku, status: 'error', message: `Status update failed: ${errMsg}` });
+          failed++;
+        }
+      } else {
+        const verb = targetStatus === 'ACTIVE' ? 'published' : 'drafted';
+        for (const v of variantsForProduct) {
+          const cfsStatus = v.cfsProductStatus || 'active';
+          log.push({
+            sku: v.variantSku,
+            status: verb,
+            message: `Variant deleted & product set to ${targetStatus} (CFS: ${cfsStatus}): ${product.title}`,
+          });
+        }
+        if (targetStatus === 'ACTIVE') published++;
+        else drafted++;
+        console.log(`  ✓ Product "${product.title}" → ${targetStatus} (CFS was ${anyCfsInactive ? 'inactive' : 'active'})`);
+      }
+
+      await sleep(350);
+
+    } catch (err) {
+      const msg = err.response?.data?.errors || err.message;
+      for (const sku of affectedSKUs) {
+        log.push({ sku, status: 'error', message: String(msg) });
+        failed++;
+      }
+    }
+  }
+
+  console.log(`  ✓ Done — deleted variants: ${deleted}, published: ${published}, drafted: ${drafted}, failed: ${failed}`);
+  res.json({ success: true, dryRun, deleted, published, drafted, failed, total: variants.length, log });
 });
 
 
