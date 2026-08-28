@@ -1,15 +1,19 @@
 /**
  * Compare Shopify variants against CFS feeds.
  *
- * Matching rules (both checks always run):
+ * Matching rules — DIRECT lookup only (no extraction or fallback):
  *
- *   OK       = full SKU (UD-{ProductId}-{VariantId}) found in variant feed
- *              OR product-ID portion (UD-{ProductId}) found in product feed
+ *   OK       = Shopify SKU found verbatim in the variant feed's "Shopify SKU" column
+ *              OR Shopify SKU found verbatim in the product feed's "Shopify SKU" column
  *
- *   Orphaned = full SKU NOT in variant feed  AND  product ID NOT in product feed
+ *   Orphaned = SKU not found in either feed
  *
- * This means a variant is only flagged as orphaned if it doesn't appear
- * in either the variant-level feed or the product-level feed.
+ * Why direct lookup:
+ *   - Short SKUs (UD-1242963)        → match the product feed directly
+ *   - Full SKUs  (UD-170639-17280410) → match the variant feed directly
+ *   Extracting the product-ID from a full SKU and checking the product feed
+ *   produces false "OK" results (the product exists on CFS but the specific
+ *   variant does not).
  *
  * @param {Array}  shopifyVariants   — from streamShopifyVariants()
  * @param {Set}    validVariantSKUs  — from streamVariantSKUs()  (full UD-x-y format)
@@ -21,16 +25,8 @@ function compareVariants(shopifyVariants, validVariantSKUs, validProductSKUs = n
   for (const v of shopifyVariants) {
     const sku = v.variantSku;
 
-    // Step 1: check full SKU against variant feed
-    const inVariantFeed = validVariantSKUs.size > 0 && validVariantSKUs.has(sku);
-
-    // Step 2: check product-ID portion against product feed (UD-144246-16985763 → UD-144246)
-    const parts     = sku.split('-');
-    const productId = parts.slice(0, 2).join('-');
-    const inProductFeed = validProductSKUs.has(productId);
-
-    // OK if found in either feed; orphaned only if missing from both
-    const inFeed = inVariantFeed || inProductFeed;
+    // Direct lookup in both feeds — no extraction, no fallback
+    const inFeed = validVariantSKUs.has(sku) || validProductSKUs.has(sku);
 
     results.push({
       ...v,
