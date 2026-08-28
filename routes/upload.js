@@ -68,7 +68,9 @@ router.post(
       // 1. Product feed (required)
       console.log('▶ Streaming CFS product feed…');
       const validProductSKUs = await streamProductSKUs(productFeedPath);
-      console.log(`  ✓ ${validProductSKUs.size} product SKUs`);
+      const activeCount   = [...validProductSKUs.values()].filter(s => s === 'active').length;
+      const inactiveCount = validProductSKUs.size - activeCount;
+      console.log(`  ✓ ${validProductSKUs.size} product SKUs (${activeCount} active, ${inactiveCount} inactive)`);
 
       // 2. Variant feed (optional)
       let validVariantSKUs = new Set();
@@ -95,7 +97,7 @@ router.post(
       // 4. Two-step compare
       console.log(`▶ Comparing ${shopifyVariants.length} variants…`);
       const { results, summary } = compareVariants(shopifyVariants, validVariantSKUs, validProductSKUs);
-      console.log(`  ✓ ${summary.orphaned} orphaned, ${summary.ok} OK`);
+      console.log(`  ✓ ${summary.orphaned} orphaned, ${summary.ok} OK, ${summary.draft} draft/archived (skipped)`);
 
       res.json({ success: true, summary, results });
 

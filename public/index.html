@@ -145,6 +145,8 @@
     .btn-outline:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
     .btn-warning { background: var(--warning); color: #000; }
     .btn-warning:hover:not(:disabled) { opacity: .85; }
+    .btn-amber   { background: rgba(245,158,11,.18); color: var(--warning); border: 1px solid rgba(245,158,11,.4); }
+    .btn-amber:hover:not(:disabled)   { background: rgba(245,158,11,.28); }
 
     .actions-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 
@@ -152,8 +154,9 @@
     #conn-status { font-size: 13px; padding: 6px 12px; border-radius: 7px; }
 
     /* ── Summary tiles ── */
-    .summary-tiles { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin-bottom: 20px; }
-    @media (max-width: 500px) { .summary-tiles { grid-template-columns: 1fr; } }
+    .summary-tiles { display: grid; grid-template-columns: repeat(5,1fr); gap: 12px; margin-bottom: 20px; }
+    @media (max-width: 750px) { .summary-tiles { grid-template-columns: repeat(3,1fr); } }
+    @media (max-width: 500px) { .summary-tiles { grid-template-columns: repeat(2,1fr); } }
     .tile {
       background: var(--surface2); border-radius: var(--radius);
       border: 1px solid var(--border); padding: 16px;
@@ -161,8 +164,10 @@
     }
     .tile .num { font-size: 32px; font-weight: 800; }
     .tile .lbl { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
-    .tile.orphaned .num { color: var(--danger); }
-    .tile.ok-count .num { color: var(--success); }
+    .tile.orphaned          .num { color: var(--danger); }
+    .tile.ok-count          .num { color: var(--success); }
+    .tile.draft-count       .num { color: var(--text-muted); }
+    .tile.cfs-inactive-count .num { color: var(--warning); }
 
     /* ── Table toolbar ── */
     .table-toolbar {
@@ -205,8 +210,10 @@
       display: inline-block; padding: 2px 9px; border-radius: 20px;
       font-size: 11px; font-weight: 700;
     }
-    .badge-orphaned { background: rgba(239,68,68,.15); color: var(--danger); }
-    .badge-ok       { background: rgba(34,197,94,.12);  color: var(--success); }
+    .badge-orphaned     { background: rgba(239,68,68,.15);  color: var(--danger); }
+    .badge-ok           { background: rgba(34,197,94,.12);   color: var(--success); }
+    .badge-draft        { background: rgba(148,163,184,.12); color: var(--text-muted); }
+    .badge-cfs-inactive { background: rgba(245,158,11,.15);  color: var(--warning); }
 
     /* ── Pagination ── */
     .pagination {
@@ -399,6 +406,9 @@
       <button class="btn btn-danger hidden" id="btn-delete" onclick="deleteSelected()">
         🗑 Delete Selected Orphaned
       </button>
+      <button class="btn btn-amber hidden" id="btn-set-draft" onclick="setSelectedDraft()">
+        📄 Set Selected to Draft
+      </button>
       <button class="btn btn-outline hidden" id="btn-export" onclick="exportCSV()">
         📥 Export Results CSV
       </button>
@@ -407,6 +417,7 @@
       </button>
       <span id="compare-spinner" class="hidden"><span class="spinner"></span> Comparing…</span>
       <span id="delete-spinner"  class="hidden"><span class="spinner"></span> Deleting…</span>
+      <span id="draft-spinner"   class="hidden"><span class="spinner"></span> Setting to draft…</span>
     </div>
 
     <!-- Summary Tiles -->
@@ -423,15 +434,25 @@
         <div class="num" id="tile-ok">0</div>
         <div class="lbl">Matched (OK)</div>
       </div>
+      <div class="tile draft-count">
+        <div class="num" id="tile-draft">0</div>
+        <div class="lbl">Draft / Archived (skipped)</div>
+      </div>
+      <div class="tile cfs-inactive-count">
+        <div class="num" id="tile-cfs-inactive">0</div>
+        <div class="lbl">CFS Inactive (set to draft)</div>
+      </div>
     </div>
 
     <!-- Table toolbar -->
     <div class="table-toolbar hidden" id="table-toolbar">
       <input class="search-input" id="search-input" placeholder="Search by product, SKU, variant…" oninput="applyFilter2()" />
       <div class="filter-btns">
-        <button class="fbtn active" data-filter="all"      onclick="setFilter('all',this)">All</button>
-        <button class="fbtn"        data-filter="orphaned" onclick="setFilter('orphaned',this)">Orphaned</button>
-        <button class="fbtn"        data-filter="ok"       onclick="setFilter('ok',this)">OK</button>
+        <button class="fbtn active" data-filter="all"          onclick="setFilter('all',this)">All</button>
+        <button class="fbtn"        data-filter="orphaned"     onclick="setFilter('orphaned',this)">Orphaned</button>
+        <button class="fbtn"        data-filter="cfs-inactive" onclick="setFilter('cfs-inactive',this)">CFS Inactive</button>
+        <button class="fbtn"        data-filter="ok"           onclick="setFilter('ok',this)">OK</button>
+        <button class="fbtn"        data-filter="draft"        onclick="setFilter('draft',this)">Draft / Archived</button>
       </div>
       <div class="select-all-wrap">
         <input type="checkbox" id="select-all" onchange="toggleSelectAll(this.checked)" />
@@ -605,14 +626,17 @@
       currentPage  = 1;
       lastLog      = [];
 
-      document.getElementById('tile-total').textContent    = data.summary.total.toLocaleString();
-      document.getElementById('tile-orphaned').textContent = data.summary.orphaned.toLocaleString();
-      document.getElementById('tile-ok').textContent       = data.summary.ok.toLocaleString();
+      document.getElementById('tile-total').textContent       = data.summary.total.toLocaleString();
+      document.getElementById('tile-orphaned').textContent    = data.summary.orphaned.toLocaleString();
+      document.getElementById('tile-ok').textContent          = data.summary.ok.toLocaleString();
+      document.getElementById('tile-draft').textContent       = (data.summary.draft      || 0).toLocaleString();
+      document.getElementById('tile-cfs-inactive').textContent = (data.summary.cfsInactive || 0).toLocaleString();
       document.getElementById('summary-tiles').classList.remove('hidden');
       document.getElementById('table-toolbar').classList.remove('hidden');
       document.getElementById('results-table').classList.remove('hidden');
       document.getElementById('empty-state').classList.add('hidden');
       document.getElementById('btn-delete').classList.remove('hidden');
+      document.getElementById('btn-set-draft').classList.remove('hidden');
       document.getElementById('btn-export').classList.remove('hidden');
 
       applyFilter2();
@@ -651,13 +675,23 @@
     const page  = filtered.slice(start, start + PAGE_SIZE);
 
     tbody.innerHTML = page.map(r => {
-      const isOrphaned  = r.matchStatus === 'orphaned';
-      const checked     = selectedSKUs.has(r.variantSku) ? 'checked' : '';
-      const badgeCls    = isOrphaned ? 'badge-orphaned' : 'badge-ok';
-      const badgeTxt    = isOrphaned ? 'Orphaned' : 'OK';
-      const variantLabel = [r.option1, r.option2, r.option3].filter(Boolean).join(' / ') || 'Default';
-      return `<tr>
-        <td>${isOrphaned ? `<input type="checkbox" ${checked} onchange="toggleSKU('${r.variantSku}',this.checked)" />` : ''}</td>
+      const isOrphaned    = r.matchStatus === 'orphaned';
+      const isDraft       = r.matchStatus === 'draft';
+      const isCfsInactive = r.matchStatus === 'cfs-inactive';
+      const isSelectable  = isOrphaned || isCfsInactive;
+      const checked       = selectedSKUs.has(r.variantSku) ? 'checked' : '';
+      const badgeCls      = isOrphaned    ? 'badge-orphaned'
+                          : isCfsInactive ? 'badge-cfs-inactive'
+                          : isDraft       ? 'badge-draft'
+                          : 'badge-ok';
+      const badgeTxt      = isOrphaned    ? 'Orphaned'
+                          : isCfsInactive ? 'CFS Inactive'
+                          : isDraft       ? 'Draft'
+                          : 'OK';
+      const variantLabel  = [r.option1, r.option2, r.option3].filter(Boolean).join(' / ') || 'Default';
+      const rowStyle      = isDraft ? ' style="opacity:0.5"' : '';
+      return `<tr${rowStyle}>
+        <td>${isSelectable ? `<input type="checkbox" ${checked} onchange="toggleSKU('${r.variantSku}',this.checked)" />` : ''}</td>
         <td title="${r.title}">${r.title || '—'}</td>
         <td title="${variantLabel}">${variantLabel}</td>
         <td><code style="font-size:11px;color:var(--text-muted)">${r.variantSku}</code></td>
@@ -696,8 +730,8 @@
   }
 
   function toggleSelectAll(checked) {
-    const orphaned = allResults.filter(r => r.matchStatus === 'orphaned');
-    orphaned.forEach(r => { if(checked) selectedSKUs.add(r.variantSku); else selectedSKUs.delete(r.variantSku); });
+    const selectable = allResults.filter(r => r.matchStatus === 'orphaned' || r.matchStatus === 'cfs-inactive');
+    selectable.forEach(r => { if(checked) selectedSKUs.add(r.variantSku); else selectedSKUs.delete(r.variantSku); });
     renderPage();
   }
 
@@ -731,9 +765,7 @@
         allResults = allResults.filter(r => !skus.includes(r.variantSku));
         selectedSKUs.clear();
         applyFilter2();
-        document.getElementById('tile-total').textContent    = allResults.length.toLocaleString();
-        document.getElementById('tile-orphaned').textContent = allResults.filter(r=>r.matchStatus==='orphaned').length.toLocaleString();
-        document.getElementById('tile-ok').textContent       = allResults.filter(r=>r.matchStatus==='ok').length.toLocaleString();
+        refreshTiles();
       }
 
       alert(`Done! Deleted: ${data.deleted} | Failed: ${data.failed} | Dry run: ${dryRun}`);
@@ -742,6 +774,63 @@
     } finally {
       document.getElementById('btn-delete').disabled = false;
       document.getElementById('delete-spinner').classList.add('hidden');
+    }
+  }
+
+  // ── Tile refresh helper ───────────────────────────────────────────────────
+  function refreshTiles() {
+    document.getElementById('tile-total').textContent        = allResults.length.toLocaleString();
+    document.getElementById('tile-orphaned').textContent     = allResults.filter(r=>r.matchStatus==='orphaned').length.toLocaleString();
+    document.getElementById('tile-ok').textContent           = allResults.filter(r=>r.matchStatus==='ok').length.toLocaleString();
+    document.getElementById('tile-draft').textContent        = allResults.filter(r=>r.matchStatus==='draft').length.toLocaleString();
+    document.getElementById('tile-cfs-inactive').textContent = allResults.filter(r=>r.matchStatus==='cfs-inactive').length.toLocaleString();
+  }
+
+  // ── Set selected CFS-inactive variants to Draft on Shopify ───────────────
+  async function setSelectedDraft() {
+    const skus = [...selectedSKUs];
+    if (!skus.length) { alert('No variants selected.'); return; }
+
+    const variantsToUpdate = allResults.filter(r => skus.includes(r.variantSku) && r.matchStatus === 'cfs-inactive');
+    if (!variantsToUpdate.length) { alert('Only CFS Inactive variants can be set to draft using this button.\nPlease select CFS Inactive rows.'); return; }
+
+    const dryRun = document.getElementById('dry-run-toggle').checked;
+    const msg    = dryRun
+      ? `DRY RUN: Simulate setting ${variantsToUpdate.length} variant(s) to draft on Shopify?`
+      : `Set ${variantsToUpdate.length} variant(s) to DRAFT on Shopify?\n\nThis cannot be undone automatically.`;
+    if (!confirm(msg)) return;
+
+    document.getElementById('btn-set-draft').disabled = true;
+    document.getElementById('draft-spinner').classList.remove('hidden');
+
+    try {
+      const res  = await fetch('/api/shopify/set-draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ variants: variantsToUpdate, dryRun }),
+      });
+      const data = await res.json();
+      showLog(data.log, dryRun);
+
+      if (!dryRun && data.drafted > 0) {
+        // Mark successfully drafted variants as 'draft' in local results
+        const draftedSKUs = new Set(
+          data.log.filter(l => l.status === 'drafted').map(l => l.sku)
+        );
+        allResults = allResults.map(r =>
+          draftedSKUs.has(r.variantSku) ? { ...r, matchStatus: 'draft' } : r
+        );
+        selectedSKUs.clear();
+        applyFilter2();
+        refreshTiles();
+      }
+
+      alert(`Done! Set to draft: ${data.drafted} | Failed: ${data.failed} | Dry run: ${dryRun}`);
+    } catch(e) {
+      alert('Error: ' + e.message);
+    } finally {
+      document.getElementById('btn-set-draft').disabled = false;
+      document.getElementById('draft-spinner').classList.add('hidden');
     }
   }
 
@@ -761,9 +850,10 @@
     panel.innerHTML =
       `<p style="color:var(--text-muted);margin-bottom:8px">${dryRun ? 'DRY RUN LOG' : 'ACTION LOG'} — ${new Date().toLocaleTimeString()}</p>` +
       log.map(l => {
-        const cls = l.status==='deleted' ? 'log-deleted'
-                  : l.status==='dry_run' ? 'log-dry'
-                  : l.status==='error'   ? 'log-error'
+        const cls = l.status==='deleted'  ? 'log-deleted'
+                  : l.status==='drafted'  ? 'log-dry'
+                  : l.status==='dry_run'  ? 'log-dry'
+                  : l.status==='error'    ? 'log-error'
                   : 'log-ok';
         return `<p class="${cls}">[${l.status.toUpperCase()}] ${l.sku} — ${l.message}</p>`;
       }).join('');

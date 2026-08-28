@@ -42,13 +42,16 @@ async function getRows(filePath) {
   return parseCSVFile(filePath);
 }
 
-// ── CFS Product feed → Set of short product SKUs (UD-{ProductId}) ─────────────
+// ── CFS Product feed → Map of short product SKUs → CFS status ────────────────
+// Map value is the normalised status string: 'active' | 'inactive'
+// The CFS product feed has a "Status" column with values "Active" / "Inactive".
 async function streamProductSKUs(filePath) {
   const rows = await getRows(filePath);
-  const skus = new Set();
+  const skus = new Map(); // SKU → 'active' | 'inactive'
   for (const row of rows) {
-    const sku = String(row['Shopify SKU'] || '').trim();
-    if (sku) skus.add(sku);
+    const sku    = String(row['Shopify SKU'] || '').trim();
+    const status = String(row['Status']      || '').trim().toLowerCase();
+    if (sku) skus.set(sku, status || 'active'); // default to active if missing
   }
   return skus;
 }
@@ -65,14 +68,27 @@ async function streamVariantSKUs(filePath) {
 }
 
 // ── Shopify export → array of variant objects ─────────────────────────────────
+// Status is only populated on the first row of each product in standard CSV
+// exports. We track the last-seen status per handle so every variant row
+// inherits its product's status correctly.
 async function streamShopifyVariants(filePath) {
-  const rows     = await getRows(filePath);
-  const variants = [];
+  const rows          = await getRows(filePath);
+  const variants      = [];
+  const statusByHandle = {}; // handle → last seen non-empty status
+
   for (const row of rows) {
+    const handle = String(row['Handle'] || '').trim();
+    if (!handle) continue;
+
+    // Capture status whenever the row has one (even if no SKU)
+    const rowStatus = String(row['Status'] || '').trim();
+    if (rowStatus) statusByHandle[handle] = rowStatus;
+
     const sku = String(row['Variant SKU'] || '').trim();
-    if (!sku || !row['Handle']) continue; // skip image-only rows
+    if (!sku) continue; // skip image-only / header rows
+
     variants.push({
-      handle:       String(row['Handle']               || '').trim(),
+      handle,
       title:        String(row['Title']                || '').trim(),
       variantSku:   sku,
       option1:      String(row['Option1 Value']        || '').trim(),
@@ -81,7 +97,8 @@ async function streamShopifyVariants(filePath) {
       price:        String(row['Variant Price']         || '').trim(),
       barcode:      String(row['Variant Barcode']       || '').trim(),
       inventoryQty: String(row['Variant Inventory Qty'] || '').trim(),
-      status:       String(row['Status']               || '').trim(),
+      // Use the captured status; fall back to the handle's inherited status
+      status:       rowStatus || statusByHandle[handle] || '',
     });
   }
   return variants;

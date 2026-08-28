@@ -1,43 +1,66 @@
 /**
  * Compare Shopify variants against CFS feeds.
  *
- * Matching rules — DIRECT lookup only (no extraction or fallback):
+ * Step 1 — Shopify product status check:
+ *   Draft / Archived → matchStatus = 'draft'  (already inactive; skip CFS check)
+ *   Active / Unlisted / unknown → proceed to step 2
  *
- *   OK       = Shopify SKU found verbatim in the variant feed's "Shopify SKU" column
- *              OR Shopify SKU found verbatim in the product feed's "Shopify SKU" column
+ * Step 2 — CFS feed lookup (direct, no extraction):
+ *   a) Check full SKU against variant feed (Set)
+ *      Found → matchStatus = 'ok'
  *
- *   Orphaned = SKU not found in either feed
+ *   b) Check SKU against product feed (Map: SKU → CFS status)
+ *      Found AND CFS status is 'active'   → matchStatus = 'ok'
+ *      Found AND CFS status is 'inactive' → matchStatus = 'draft'
+ *                                           (product exists on CFS but is inactive
+ *                                            → Shopify product should be set to draft)
  *
- * Why direct lookup:
- *   - Short SKUs (UD-1242963)        → match the product feed directly
- *   - Full SKUs  (UD-170639-17280410) → match the variant feed directly
- *   Extracting the product-ID from a full SKU and checking the product feed
- *   produces false "OK" results (the product exists on CFS but the specific
- *   variant does not).
+ *   c) Not found in either feed → matchStatus = 'orphaned'
  *
  * @param {Array}  shopifyVariants   — from streamShopifyVariants()
- * @param {Set}    validVariantSKUs  — from streamVariantSKUs()  (full UD-x-y format)
- * @param {Set}    validProductSKUs  — from streamProductSKUs()  (short UD-x format)
+ * @param {Set}    validVariantSKUs  — from streamVariantSKUs()   (full UD-x-y format)
+ * @param {Map}    validProductSKUs  — from streamProductSKUs()   (short UD-x → 'active'|'inactive')
  */
-function compareVariants(shopifyVariants, validVariantSKUs, validProductSKUs = new Set()) {
+function compareVariants(shopifyVariants, validVariantSKUs, validProductSKUs = new Map()) {
   const results = [];
 
+  // Shopify statuses treated as "already inactive — skip CFS check"
+  const SHOPIFY_INACTIVE = new Set(['draft', 'archived']);
+
   for (const v of shopifyVariants) {
-    const sku = v.variantSku;
+    const sku          = v.variantSku;
+    const shopifyStatus = (v.status || '').toLowerCase();
 
-    // Direct lookup in both feeds — no extraction, no fallback
-    const inFeed = validVariantSKUs.has(sku) || validProductSKUs.has(sku);
+    let matchStatus;
 
-    results.push({
-      ...v,
-      matchStatus: inFeed ? 'ok' : 'orphaned',
-    });
+    if (SHOPIFY_INACTIVE.has(shopifyStatus)) {
+      // Product is already draft/archived on Shopify — no action needed
+      matchStatus = 'draft';
+
+    } else if (validVariantSKUs.has(sku)) {
+      // Exact match in CFS variant feed → OK
+      matchStatus = 'ok';
+
+    } else if (validProductSKUs.has(sku)) {
+      // Matched in CFS product feed — honour the CFS product's status
+      const cfsStatus = validProductSKUs.get(sku); // 'active' | 'inactive'
+      // 'cfs-inactive' = active on Shopify but CFS product is inactive → needs set-to-draft action
+      matchStatus = cfsStatus === 'inactive' ? 'cfs-inactive' : 'ok';
+
+    } else {
+      // Not in either feed → orphaned
+      matchStatus = 'orphaned';
+    }
+
+    results.push({ ...v, matchStatus });
   }
 
-  const orphaned = results.filter(r => r.matchStatus === 'orphaned').length;
-  const ok       = results.filter(r => r.matchStatus === 'ok').length;
+  const orphaned    = results.filter(r => r.matchStatus === 'orphaned').length;
+  const ok          = results.filter(r => r.matchStatus === 'ok').length;
+  const draft       = results.filter(r => r.matchStatus === 'draft').length;
+  const cfsInactive = results.filter(r => r.matchStatus === 'cfs-inactive').length;
 
-  return { results, summary: { total: results.length, orphaned, ok } };
+  return { results, summary: { total: results.length, orphaned, ok, draft, cfsInactive } };
 }
 
 module.exports = { compareVariants };
