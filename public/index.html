@@ -454,9 +454,9 @@
         <button class="fbtn"        data-filter="ok"           onclick="setFilter('ok',this)">OK</button>
         <button class="fbtn"        data-filter="draft"        onclick="setFilter('draft',this)">Draft / Archived</button>
       </div>
-      <div class="select-all-wrap">
+      <div class="select-all-wrap" id="select-all-wrap">
         <input type="checkbox" id="select-all" onchange="toggleSelectAll(this.checked)" />
-        <label for="select-all">Select all orphaned</label>
+        <label for="select-all" id="select-all-label">Select all orphaned</label>
       </div>
     </div>
 
@@ -638,6 +638,11 @@
       document.getElementById('btn-delete').classList.remove('hidden');
       document.getElementById('btn-set-draft').classList.remove('hidden');
       document.getElementById('btn-export').classList.remove('hidden');
+      // Reset select-all to 'all' state
+      document.getElementById('select-all-label').textContent = 'Select all orphaned & CFS Inactive';
+      document.getElementById('select-all-wrap').style.display = '';
+      document.getElementById('btn-delete').style.display   = '';
+      document.getElementById('btn-set-draft').style.display = '';
 
       applyFilter2();
 
@@ -654,6 +659,37 @@
     activeFilter = f;
     document.querySelectorAll('.fbtn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
+
+    // Update select-all label and button visibility based on active filter
+    const labelEl  = document.getElementById('select-all-label');
+    const wrapEl   = document.getElementById('select-all-wrap');
+    const btnDel   = document.getElementById('btn-delete');
+    const btnDraft = document.getElementById('btn-set-draft');
+
+    if (f === 'cfs-inactive') {
+      labelEl.textContent = 'Select all CFS Inactive';
+      wrapEl.style.display = '';
+      btnDel.style.display   = 'none';
+      btnDraft.style.display = '';
+    } else if (f === 'orphaned') {
+      labelEl.textContent = 'Select all orphaned';
+      wrapEl.style.display = '';
+      btnDel.style.display   = '';
+      btnDraft.style.display = 'none';
+    } else if (f === 'all') {
+      labelEl.textContent = 'Select all orphaned & CFS Inactive';
+      wrapEl.style.display = '';
+      btnDel.style.display   = '';
+      btnDraft.style.display = '';
+    } else {
+      // OK / Draft — nothing selectable, hide the select-all row
+      wrapEl.style.display = 'none';
+      btnDel.style.display   = 'none';
+      btnDraft.style.display = 'none';
+    }
+
+    // Uncheck select-all when switching filters
+    document.getElementById('select-all').checked = false;
     currentPage = 1;
     applyFilter2();
   }
@@ -730,8 +766,17 @@
   }
 
   function toggleSelectAll(checked) {
-    const selectable = allResults.filter(r => r.matchStatus === 'orphaned' || r.matchStatus === 'cfs-inactive');
-    selectable.forEach(r => { if(checked) selectedSKUs.add(r.variantSku); else selectedSKUs.delete(r.variantSku); });
+    // Select only the rows relevant to the current filter view
+    let selectable;
+    if (activeFilter === 'orphaned') {
+      selectable = allResults.filter(r => r.matchStatus === 'orphaned');
+    } else if (activeFilter === 'cfs-inactive') {
+      selectable = allResults.filter(r => r.matchStatus === 'cfs-inactive');
+    } else {
+      // 'all' — select both actionable types
+      selectable = allResults.filter(r => r.matchStatus === 'orphaned' || r.matchStatus === 'cfs-inactive');
+    }
+    selectable.forEach(r => { if (checked) selectedSKUs.add(r.variantSku); else selectedSKUs.delete(r.variantSku); });
     renderPage();
   }
 
