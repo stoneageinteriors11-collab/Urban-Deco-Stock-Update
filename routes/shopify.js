@@ -236,7 +236,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
 
         // Log CFS-matched variants as kept
         for (const node of cfsMatched) {
-          log.push({ sku: node.sku, status: 'kept', message: `Kept — found in CFS feeds: ${product.title} / ${node.title}` });
+          log.push({ sku: node.sku, status: 'kept', message: `Kept - found in CFS feeds: ${product.title} / ${node.title}` });
         }
 
         if (cfsMatched.length > 0 && cfsUnmatched.length > 0) {
@@ -496,7 +496,7 @@ router.post('/publish-products', async (req, res) => {
       // ── Dry-run: report what would happen ────────────────────────────────
       if (dryRun) {
         const action = remainingVariants.length > 0
-          ? `delete variant only — ${remainingVariants.length} other variant(s) remain on product`
+          ? `delete variant only - ${remainingVariants.length} other variant(s) remain on product`
           : `delete variant & set product to ${targetStatus} (no other variants remain)`;
         for (const v of variantsForProduct) {
           log.push({ sku: v.variantSku, status: 'dry_run', message: `Would ${action}: ${product.title}` });
@@ -533,7 +533,7 @@ router.post('/publish-products', async (req, res) => {
           log.push({
             sku: v.variantSku,
             status: 'deleted',
-            message: `Variant deleted; product status unchanged — ${remainingVariants.length} other variant(s) remain: ${product.title}`,
+            message: `Variant deleted; product status unchanged - ${remainingVariants.length} other variant(s) remain: ${product.title}`,
           });
         }
         console.log(`  ↷ Skipping status update for "${product.title}" — ${remainingVariants.length} variant(s) still present`);
