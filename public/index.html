@@ -248,6 +248,17 @@
     .empty-state .icon { font-size: 40px; margin-bottom: 12px; }
     .empty-state p { font-size: 14px; }
 
+    /* ── Remove file button ── */
+    .remove-btn {
+      display: none; margin-top: 6px; width: 100%;
+      padding: 5px; border-radius: 6px; font-size: 11px; font-weight: 600;
+      cursor: pointer; border: 1px solid rgba(239,68,68,.4);
+      background: rgba(239,68,68,.08); color: var(--danger);
+      transition: .15s;
+    }
+    .remove-btn:hover { background: rgba(239,68,68,.18); }
+    .upload-slot.has-file .remove-btn { display: block; }
+
     /* ── Hidden ── */
     .hidden { display: none !important; }
   </style>
@@ -275,23 +286,29 @@
 
         <div>
           <div class="upload-zone-label">Product Feed <span class="req">*</span></div>
-          <div class="upload-zone" id="zone-product" onclick="document.getElementById('input-product').click()">
-            <input type="file" id="input-product" accept=".csv" />
-            <div class="icon">📋</div>
-            <div class="label">215_Froogle_Product_*.csv</div>
-            <div class="sub">SKU format: UD-{ProductId}</div>
-            <div class="file-name" id="fname-product"></div>
+          <div class="upload-slot" id="slot-product">
+            <div class="upload-zone" id="zone-product" onclick="document.getElementById('input-product').click()">
+              <input type="file" id="input-product" accept=".csv,.xlsx,.xls" />
+              <div class="icon">📋</div>
+              <div class="label">215_Froogle_Product_*</div>
+              <div class="sub">CSV or Excel · SKU: UD-{ProductId}</div>
+              <div class="file-name" id="fname-product"></div>
+            </div>
+            <button class="remove-btn" onclick="clearFile('product')">✕ Remove file</button>
           </div>
         </div>
 
         <div>
-          <div class="upload-zone-label">Variant Feed <span class="req">*</span></div>
-          <div class="upload-zone" id="zone-variant" onclick="document.getElementById('input-variant').click()">
-            <input type="file" id="input-variant" accept=".csv" />
-            <div class="icon">📄</div>
-            <div class="label">215_Froogle_Variant_*.csv</div>
-            <div class="sub">SKU format: UD-{ProductId}-{VariantId}</div>
-            <div class="file-name" id="fname-variant"></div>
+          <div class="upload-zone-label">Variant Feed <span class="opt">(optional)</span></div>
+          <div class="upload-slot" id="slot-variant">
+            <div class="upload-zone" id="zone-variant" onclick="document.getElementById('input-variant').click()">
+              <input type="file" id="input-variant" accept=".csv,.xlsx,.xls" />
+              <div class="icon">📄</div>
+              <div class="label">215_Froogle_Variant_*</div>
+              <div class="sub">CSV or Excel · SKU: UD-{ProductId}-{VariantId}</div>
+              <div class="file-name" id="fname-variant"></div>
+            </div>
+            <button class="remove-btn" onclick="clearFile('variant')">✕ Remove file</button>
           </div>
         </div>
 
@@ -305,23 +322,29 @@
 
         <div>
           <div class="upload-zone-label">File 1 <span class="req">*</span></div>
-          <div class="upload-zone" id="zone-shop1" onclick="document.getElementById('input-shop1').click()">
-            <input type="file" id="input-shop1" accept=".csv" />
-            <div class="icon">🛍</div>
-            <div class="label">products_export_1.csv</div>
-            <div class="sub">Urban Deco Shopify export</div>
-            <div class="file-name" id="fname-shop1"></div>
+          <div class="upload-slot" id="slot-shop1">
+            <div class="upload-zone" id="zone-shop1" onclick="document.getElementById('input-shop1').click()">
+              <input type="file" id="input-shop1" accept=".csv,.xlsx,.xls" />
+              <div class="icon">🛍</div>
+              <div class="label">products_export_1</div>
+              <div class="sub">CSV or Excel · Urban Deco Shopify export</div>
+              <div class="file-name" id="fname-shop1"></div>
+            </div>
+            <button class="remove-btn" onclick="clearFile('shop1')">✕ Remove file</button>
           </div>
         </div>
 
         <div>
           <div class="upload-zone-label">File 2 <span class="opt">(optional)</span></div>
-          <div class="upload-zone" id="zone-shop2" onclick="document.getElementById('input-shop2').click()">
-            <input type="file" id="input-shop2" accept=".csv" />
-            <div class="icon">🛍</div>
-            <div class="label">products_export_2.csv</div>
-            <div class="sub">If export was split into two files</div>
-            <div class="file-name" id="fname-shop2"></div>
+          <div class="upload-slot" id="slot-shop2">
+            <div class="upload-zone" id="zone-shop2" onclick="document.getElementById('input-shop2').click()">
+              <input type="file" id="input-shop2" accept=".csv,.xlsx,.xls" />
+              <div class="icon">🛍</div>
+              <div class="label">products_export_2</div>
+              <div class="sub">CSV or Excel · If export was split</div>
+              <div class="file-name" id="fname-shop2"></div>
+            </div>
+            <button class="remove-btn" onclick="clearFile('shop2')">✕ Remove file</button>
           </div>
         </div>
 
@@ -462,12 +485,17 @@
   ['product','variant','shop1','shop2'].forEach(id => {
     const input = document.getElementById(`input-${id}`);
     const zone  = document.getElementById(`zone-${id}`);
+    const slot  = document.getElementById(`slot-${id}`);
     const fname = document.getElementById(`fname-${id}`);
+
+    function markFile(file) {
+      zone.classList.add('has-file');
+      slot.classList.add('has-file');
+      fname.textContent = file.name;
+    }
+
     input.addEventListener('change', () => {
-      if (input.files[0]) {
-        zone.classList.add('has-file');
-        fname.textContent = input.files[0].name;
-      }
+      if (input.files[0]) markFile(input.files[0]);
     });
     zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
     zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
@@ -476,10 +504,21 @@
       const file = e.dataTransfer.files[0];
       if (file) {
         const dt = new DataTransfer(); dt.items.add(file); input.files = dt.files;
-        zone.classList.add('has-file'); fname.textContent = file.name;
+        markFile(file);
       }
     });
   });
+
+  function clearFile(id) {
+    const input = document.getElementById(`input-${id}`);
+    const zone  = document.getElementById(`zone-${id}`);
+    const slot  = document.getElementById(`slot-${id}`);
+    const fname = document.getElementById(`fname-${id}`);
+    input.value = '';
+    zone.classList.remove('has-file');
+    slot.classList.remove('has-file');
+    fname.textContent = '';
+  }
 
   // ── Dry run badge ─────────────────────────────────────────────────────────
   function updateDryBadge() {
@@ -540,8 +579,8 @@
     const shopFile1   = document.getElementById('input-shop1').files[0];
     const shopFile2   = document.getElementById('input-shop2').files[0];
 
-    if (!productFile || !variantFile || !shopFile1) {
-      alert('Please upload the CFS product feed, CFS variant feed, and at least one Shopify export file.');
+    if (!productFile || !shopFile1) {
+      alert('Please upload the CFS product feed and at least one Shopify export file.');
       return;
     }
 
@@ -551,7 +590,7 @@
 
     const form = new FormData();
     form.append('productFeed',  productFile);
-    form.append('variantFeed',  variantFile);
+    if (variantFile) form.append('variantFeed', variantFile);
     form.append('shopifyFile1', shopFile1);
     if (shopFile2) form.append('shopifyFile2', shopFile2);
 

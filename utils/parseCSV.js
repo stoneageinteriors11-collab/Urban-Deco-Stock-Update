@@ -1,10 +1,15 @@
 const fs   = require('fs');
+const path = require('path');
 const { parse } = require('csv-parse');
+const XLSX = require('xlsx');
 
-/**
- * Stream a CSV file and collect all rows as an array of objects.
- * Uses csv-parse in streaming mode so the entire file is never held in memory at once.
- */
+// ── File type detection ───────────────────────────────────────────────────────
+function isExcel(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  return ext === '.xlsx' || ext === '.xls';
+}
+
+// ── CSV streaming (memory-efficient for large files) ──────────────────────────
 function parseCSVFile(filePath) {
   return new Promise((resolve, reject) => {
     const rows = [];
@@ -22,96 +27,67 @@ function parseCSVFile(filePath) {
   });
 }
 
-/**
- * Stream the non-Shopify PRODUCT Froogle CSV and return a Set of product-level SKUs.
- * Column: "Shopify SKU"  e.g. UD-144246  (no variant attribute suffix)
- * Used as the first-pass check: if a Shopify variant's product ID matches here,
- * the product is still live on CFS even if the specific variant isn't in the variant feed.
- */
-function streamProductSKUs(filePath) {
-  return new Promise((resolve, reject) => {
-    const skus = new Set();
-    fs.createReadStream(filePath)
-      .pipe(parse({
-        columns: true,
-        skip_empty_lines: true,
-        trim: true,
-        relax_column_count: true,
-        bom: true,
-      }))
-      .on('data', row => {
-        const sku = (row['Shopify SKU'] || '').trim();
-        if (sku) skus.add(sku);
-      })
-      .on('end',  () => resolve(skus))
-      .on('error', reject);
-  });
+// ── XLSX parsing (SheetJS — reads first sheet) ────────────────────────────────
+function parseXLSXFile(filePath) {
+  const wb   = XLSX.readFile(filePath);
+  const ws   = wb.Sheets[wb.SheetNames[0]];
+  // raw:false → all values as strings; defval:'' → empty cells become ''
+  return XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
 }
 
-/**
- * Stream the non-Shopify variant Froogle CSV and return a Set of valid Shopify SKUs.
- * Column: "Shopify SKU"  e.g. UD-144246-16985763
- * Memory cost: one string per unique SKU (~30 bytes each), not the whole file.
- */
-function streamVariantSKUs(filePath) {
-  return new Promise((resolve, reject) => {
-    const skus = new Set();
-    fs.createReadStream(filePath)
-      .pipe(parse({
-        columns: true,
-        skip_empty_lines: true,
-        trim: true,
-        relax_column_count: true,
-        bom: true,
-      }))
-      .on('data', row => {
-        const sku = (row['Shopify SKU'] || '').trim();
-        if (sku) skus.add(sku);
-      })
-      .on('end',  () => resolve(skus))
-      .on('error', reject);
-  });
+// ── Unified entry point ───────────────────────────────────────────────────────
+// Returns Promise<Array of row objects> regardless of file type
+async function getRows(filePath) {
+  if (isExcel(filePath)) return parseXLSXFile(filePath);
+  return parseCSVFile(filePath);
 }
 
-/**
- * Stream a Shopify export CSV and return an array of variant objects.
- * Skips image-only rows (rows with no Variant SKU or no Handle).
- * Column: "Variant SKU"
- */
-function streamShopifyVariants(filePath) {
-  return new Promise((resolve, reject) => {
-    const variants = [];
-    fs.createReadStream(filePath)
-      .pipe(parse({
-        columns: true,
-        skip_empty_lines: true,
-        trim: true,
-        relax_column_count: true,
-        bom: true,
-      }))
-      .on('data', row => {
-        const sku = (row['Variant SKU'] || '').trim();
-        if (!sku || !row['Handle']) return; // skip image-only rows
-        variants.push({
-          handle:       (row['Handle']             || '').trim(),
-          title:        (row['Title']              || '').trim(),
-          variantSku:   sku,
-          option1:      (row['Option1 Value']      || '').trim(),
-          option2:      (row['Option2 Value']      || '').trim(),
-          option3:      (row['Option3 Value']      || '').trim(),
-          price:        (row['Variant Price']       || '').trim(),
-          barcode:      (row['Variant Barcode']     || '').trim(),
-          inventoryQty: (row['Variant Inventory Qty'] || '').trim(),
-          status:       (row['Status']             || '').trim(),
-        });
-      })
-      .on('end',  () => resolve(variants))
-      .on('error', reject);
-  });
+// ── CFS Product feed → Set of short product SKUs (UD-{ProductId}) ─────────────
+async function streamProductSKUs(filePath) {
+  const rows = await getRows(filePath);
+  const skus = new Set();
+  for (const row of rows) {
+    const sku = String(row['Shopify SKU'] || '').trim();
+    if (sku) skus.add(sku);
+  }
+  return skus;
 }
 
-// ── Legacy sync-style helpers (kept for any callers that still use them) ──────
-// These now delegate to the streaming versions — same API, now async.
+// ── CFS Variant feed → Set of full variant SKUs (UD-{ProductId}-{VariantId}) ──
+async function streamVariantSKUs(filePath) {
+  const rows = await getRows(filePath);
+  const skus = new Set();
+  for (const row of rows) {
+    const sku = String(row['Shopify SKU'] || '').trim();
+    if (sku) skus.add(sku);
+  }
+  return skus;
+}
+
+// ── Shopify export → array of variant objects ─────────────────────────────────
+async function streamShopifyVariants(filePath) {
+  const rows     = await getRows(filePath);
+  const variants = [];
+  for (const row of rows) {
+    const sku = String(row['Variant SKU'] || '').trim();
+    if (!sku || !row['Handle']) continue; // skip image-only rows
+    variants.push({
+      handle:       String(row['Handle']               || '').trim(),
+      title:        String(row['Title']                || '').trim(),
+      variantSku:   sku,
+      option1:      String(row['Option1 Value']        || '').trim(),
+      option2:      String(row['Option2 Value']        || '').trim(),
+      option3:      String(row['Option3 Value']        || '').trim(),
+      price:        String(row['Variant Price']         || '').trim(),
+      barcode:      String(row['Variant Barcode']       || '').trim(),
+      inventoryQty: String(row['Variant Inventory Qty'] || '').trim(),
+      status:       String(row['Status']               || '').trim(),
+    });
+  }
+  return variants;
+}
+
+// ── Legacy helpers (kept for compatibility) ───────────────────────────────────
 function extractVariantSKUs(rows) {
   const skus = new Set();
   for (const row of rows) {
@@ -127,26 +103,27 @@ function extractShopifyVariants(rows) {
     const sku = (row['Variant SKU'] || '').trim();
     if (!sku || !row['Handle']) continue;
     variants.push({
-      handle:       (row['Handle']             || '').trim(),
-      title:        (row['Title']              || '').trim(),
+      handle:       (row['Handle']               || '').trim(),
+      title:        (row['Title']                || '').trim(),
       variantSku:   sku,
-      option1:      (row['Option1 Value']      || '').trim(),
-      option2:      (row['Option2 Value']      || '').trim(),
-      option3:      (row['Option3 Value']      || '').trim(),
-      price:        (row['Variant Price']       || '').trim(),
-      barcode:      (row['Variant Barcode']     || '').trim(),
+      option1:      (row['Option1 Value']        || '').trim(),
+      option2:      (row['Option2 Value']        || '').trim(),
+      option3:      (row['Option3 Value']        || '').trim(),
+      price:        (row['Variant Price']         || '').trim(),
+      barcode:      (row['Variant Barcode']       || '').trim(),
       inventoryQty: (row['Variant Inventory Qty'] || '').trim(),
-      status:       (row['Status']             || '').trim(),
+      status:       (row['Status']               || '').trim(),
     });
   }
   return variants;
 }
 
 module.exports = {
-  parseCSVFile,
+  getRows,
   streamProductSKUs,
   streamVariantSKUs,
   streamShopifyVariants,
+  parseCSVFile,
   extractVariantSKUs,
   extractShopifyVariants,
 };

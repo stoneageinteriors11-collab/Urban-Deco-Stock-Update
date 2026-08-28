@@ -7,28 +7,34 @@ const { compareVariants } = require('../utils/matchVariants');
 
 const router = express.Router();
 
-// Store uploads in /uploads folder, keep original extension
+const ALLOWED_EXTS = ['.csv', '.xlsx', '.xls'];
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, path.join(__dirname, '../uploads')),
   filename:    (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
 });
-const upload = multer({ storage, limits: { fileSize: 100 * 1024 * 1024 } }); // 100MB max
 
-// Helper: delete a file safely (won't throw if already gone)
+const upload = multer({
+  storage,
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
+  fileFilter: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (ALLOWED_EXTS.includes(ext)) return cb(null, true);
+    cb(new Error(`Only CSV and Excel files are allowed (got ${ext})`));
+  },
+});
+
 function tryUnlink(filePath) {
   try { fs.unlinkSync(filePath); } catch (_) {}
 }
 
 // ── POST /api/compare ────────────────────────────────────────────────────────
-// Accepts:
-//   productFeed   — CFS non-Shopify product CSV  (Shopify SKU col: UD-{ProductId})
-//   variantFeed   — CFS non-Shopify variant CSV  (Shopify SKU col: UD-{ProductId}-{VariantId})
-//   shopifyFile1  — Shopify export part 1
-//   shopifyFile2  — Shopify export part 2 (optional)
+// Required:  productFeed, shopifyFile1
+// Optional:  variantFeed, shopifyFile2
 //
-// Matching logic (two-step):
-//   1. Check full SKU against variant feed  (exact)
-//   2. If not found, check product ID portion against product feed  (fallback)
+// Matching (two-step):
+//   1. Full SKU vs variant feed (exact)
+//   2. Product-ID portion vs product feed (fallback)
 //   Orphaned only if BOTH checks fail.
 router.post(
   '/compare',
@@ -42,33 +48,39 @@ router.post(
     const uploadedPaths = [];
 
     try {
-      const files = req.files;
+      const files = req.files || {};
 
-      if (!files.productFeed || !files.variantFeed || !files.shopifyFile1) {
+      if (!files.productFeed || !files.shopifyFile1) {
         return res.status(400).json({
-          error: 'Please upload the CFS product feed, CFS variant feed, and at least one Shopify export file.',
+          error: 'Please upload the CFS product feed and at least one Shopify export file.',
         });
       }
 
       const productFeedPath  = files.productFeed[0].path;
-      const variantFeedPath  = files.variantFeed[0].path;
+      const variantFeedPath  = files.variantFeed?.[0]?.path  || null;
       const shopifyFile1Path = files.shopifyFile1[0].path;
       const shopifyFile2Path = files.shopifyFile2?.[0]?.path || null;
 
-      uploadedPaths.push(productFeedPath, variantFeedPath, shopifyFile1Path);
+      uploadedPaths.push(productFeedPath, shopifyFile1Path);
+      if (variantFeedPath)  uploadedPaths.push(variantFeedPath);
       if (shopifyFile2Path) uploadedPaths.push(shopifyFile2Path);
 
-      // 1. Stream CFS product feed → Set of short product SKUs (UD-{ProductId})
+      // 1. Product feed (required)
       console.log('▶ Streaming CFS product feed…');
       const validProductSKUs = await streamProductSKUs(productFeedPath);
-      console.log(`  ✓ ${validProductSKUs.size} product SKUs loaded`);
+      console.log(`  ✓ ${validProductSKUs.size} product SKUs`);
 
-      // 2. Stream CFS variant feed → Set of full variant SKUs (UD-{ProductId}-{VariantId})
-      console.log('▶ Streaming CFS variant feed…');
-      const validVariantSKUs = await streamVariantSKUs(variantFeedPath);
-      console.log(`  ✓ ${validVariantSKUs.size} variant SKUs loaded`);
+      // 2. Variant feed (optional)
+      let validVariantSKUs = new Set();
+      if (variantFeedPath) {
+        console.log('▶ Streaming CFS variant feed…');
+        validVariantSKUs = await streamVariantSKUs(variantFeedPath);
+        console.log(`  ✓ ${validVariantSKUs.size} variant SKUs`);
+      } else {
+        console.log('ℹ  No variant feed uploaded — using product feed only');
+      }
 
-      // 3. Stream Shopify export(s)
+      // 3. Shopify export(s)
       console.log('▶ Streaming Shopify export file 1…');
       const shopifyVariants = await streamShopifyVariants(shopifyFile1Path);
       console.log(`  ✓ ${shopifyVariants.length} variants from file 1`);
@@ -81,9 +93,9 @@ router.post(
       }
 
       // 4. Two-step compare
-      console.log(`▶ Comparing ${shopifyVariants.length} Shopify variants…`);
+      console.log(`▶ Comparing ${shopifyVariants.length} variants…`);
       const { results, summary } = compareVariants(shopifyVariants, validVariantSKUs, validProductSKUs);
-      console.log(`  ✓ Done — ${summary.orphaned} orphaned, ${summary.ok} OK`);
+      console.log(`  ✓ ${summary.orphaned} orphaned, ${summary.ok} OK`);
 
       res.json({ success: true, summary, results });
 
@@ -91,7 +103,6 @@ router.post(
       console.error('Compare error:', err);
       res.status(500).json({ error: err.message });
     } finally {
-      // Always clean up uploaded temp files
       uploadedPaths.forEach(tryUnlink);
     }
   }
