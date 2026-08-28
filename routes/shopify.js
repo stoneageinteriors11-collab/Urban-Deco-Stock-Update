@@ -184,7 +184,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
         } catch (_) { /* dry-run lookup failure is non-fatal */ }
 
         for (const v of orphanedForProduct) {
-          log.push({ sku: v.variantSku, status: 'dry_run', message: `[${action}] ${productTitle} / ${v.option1 || v.option2 || 'Default'}` });
+          log.push({ sku: v.variantSku, handle, status: 'dry_run', message: `[${action}] ${productTitle} / ${v.option1 || v.option2 || 'Default'}` });
         }
 
         await sleep(150); // lighter pause during dry-run lookups
@@ -199,7 +199,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
 
       if (!product) {
         for (const v of orphanedForProduct) {
-          log.push({ sku: v.variantSku, status: 'not_found', message: `Product handle "${handle}" not found on Shopify` });
+          log.push({ sku: v.variantSku, handle, status: 'not_found', message: `Product handle "${handle}" not found on Shopify` });
           failed++;
         }
         continue;
@@ -212,7 +212,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
       // Match up log entries: report any SKUs from the CSV that weren't found on Shopify
       for (const v of orphanedForProduct) {
         if (!orphanedNodes.find(n => n.sku === v.variantSku)) {
-          log.push({ sku: v.variantSku, status: 'not_found', message: `SKU ${v.variantSku} not found on Shopify product "${product.title}"` });
+          log.push({ sku: v.variantSku, handle, status: 'not_found', message: `SKU ${v.variantSku} not found on Shopify product "${product.title}"` });
           failed++;
         }
       }
@@ -223,8 +223,6 @@ router.post('/delete-variants-bulk', async (req, res) => {
       }
 
       if (nonOrphanedLeft === 0) {
-        // All variants in the orphaned list — do a per-variant CFS presence check.
-        // Split UD-{prodId}-{varId} and test each piece against the raw CFS ID sets.
         const cfsMatched = orphanedNodes.filter(node => {
           const { prodId, varId } = parseSku(node.sku);
           return (prodId && productIdSet.has(prodId)) || (varId && variantAttrIdSet.has(varId));
@@ -234,13 +232,11 @@ router.post('/delete-variants-bulk', async (req, res) => {
           return !(prodId && productIdSet.has(prodId)) && !(varId && variantAttrIdSet.has(varId));
         });
 
-        // Log CFS-matched variants as kept
         for (const node of cfsMatched) {
-          log.push({ sku: node.sku, status: 'kept', message: `Kept - found in CFS feeds: ${product.title} / ${node.title}` });
+          log.push({ sku: node.sku, handle, status: 'kept', message: `Kept - found in CFS feeds: ${product.title} / ${node.title}` });
         }
 
         if (cfsMatched.length > 0 && cfsUnmatched.length > 0) {
-          // Mixed: delete only the unmatched variants, keep the CFS-matched ones
           console.log(`  ↗ "${product.title}" — deleting ${cfsUnmatched.length} unmatched, keeping ${cfsMatched.length} CFS-matched`);
           const variantIds = cfsUnmatched.map(v => v.id);
           const result = await gql(client, DELETE_VARIANTS_MUTATION, { productId: product.id, variantsIds: variantIds });
@@ -249,22 +245,20 @@ router.post('/delete-variants-bulk', async (req, res) => {
           if (userErrors.length) {
             const errMsg = userErrors.map(e => e.message).join(', ');
             for (const node of cfsUnmatched) {
-              log.push({ sku: node.sku, status: 'error', message: `Variant delete failed: ${errMsg}` });
+              log.push({ sku: node.sku, handle, status: 'error', message: `Variant delete failed: ${errMsg}` });
               failed++;
             }
           } else {
             for (const node of cfsUnmatched) {
-              log.push({ sku: node.sku, status: 'deleted', message: `Deleted: ${product.title} / ${node.title}` });
+              log.push({ sku: node.sku, handle, status: 'deleted', message: `Deleted: ${product.title} / ${node.title}` });
               deleted++;
             }
           }
 
         } else if (cfsUnmatched.length === 0) {
-          // All variants have CFS presence — keep everything, nothing to do
           console.log(`  ↷ Keeping "${product.title}" — all variants found in CFS feeds`);
 
         } else {
-          // No variants have any CFS presence → set the entire product to DRAFT
           console.log(`  ✗ Drafting "${product.title}" — no variants found in CFS feeds`);
           const result = await gql(client, SET_PRODUCT_DRAFT_MUTATION, { productId: product.id });
           const userErrors = result?.productUpdate?.userErrors || [];
@@ -272,19 +266,18 @@ router.post('/delete-variants-bulk', async (req, res) => {
           if (userErrors.length) {
             const errMsg = userErrors.map(e => e.message).join(', ');
             for (const v of orphanedForProduct) {
-              log.push({ sku: v.variantSku, status: 'error', message: `Set-to-draft failed: ${errMsg}` });
+              log.push({ sku: v.variantSku, handle, status: 'error', message: `Set-to-draft failed: ${errMsg}` });
               failed++;
             }
           } else {
             for (const v of orphanedForProduct) {
-              log.push({ sku: v.variantSku, status: 'drafted', message: `Product set to DRAFT: ${product.title}` });
+              log.push({ sku: v.variantSku, handle, status: 'drafted', message: `Product set to DRAFT: ${product.title}` });
               deleted++;
             }
           }
         }
 
       } else {
-        // Only some variants are orphaned → delete those variants only
         const variantIds = orphanedNodes.map(v => v.id);
         const result = await gql(client, DELETE_VARIANTS_MUTATION, { productId: product.id, variantsIds: variantIds });
         const userErrors = result?.productVariantsBulkDelete?.userErrors || [];
@@ -292,23 +285,23 @@ router.post('/delete-variants-bulk', async (req, res) => {
         if (userErrors.length) {
           const errMsg = userErrors.map(e => e.message).join(', ');
           for (const node of orphanedNodes) {
-            log.push({ sku: node.sku, status: 'error', message: `Variant delete failed: ${errMsg}` });
+            log.push({ sku: node.sku, handle, status: 'error', message: `Variant delete failed: ${errMsg}` });
             failed++;
           }
         } else {
           for (const node of orphanedNodes) {
-            log.push({ sku: node.sku, status: 'deleted', message: `Deleted: ${product.title} / ${node.title}` });
+            log.push({ sku: node.sku, handle, status: 'deleted', message: `Deleted: ${product.title} / ${node.title}` });
             deleted++;
           }
         }
       }
 
-      await sleep(350); // ~3 products/sec — safely inside Shopify's rate limit
+      await sleep(350);
 
     } catch (err) {
       const msg = err.response?.data?.errors || err.message;
       for (const v of orphanedForProduct) {
-        log.push({ sku: v.variantSku, status: 'error', message: String(msg) });
+        log.push({ sku: v.variantSku, handle, status: 'error', message: String(msg) });
         failed++;
       }
     }
@@ -359,7 +352,7 @@ router.post('/set-draft', async (req, res) => {
     try {
       if (dryRun) {
         for (const sku of affectedSKUs) {
-          log.push({ sku, status: 'dry_run', message: `Would set product to DRAFT: ${representative.title || handle}` });
+          log.push({ sku, handle, status: 'dry_run', message: `Would set product to DRAFT: ${representative.title || handle}` });
         }
         await sleep(150);
         continue;
@@ -371,7 +364,7 @@ router.post('/set-draft', async (req, res) => {
 
       if (!product) {
         for (const sku of affectedSKUs) {
-          log.push({ sku, status: 'not_found', message: `Product handle "${handle}" not found on Shopify` });
+          log.push({ sku, handle, status: 'not_found', message: `Product handle "${handle}" not found on Shopify` });
           failed++;
         }
         continue;
@@ -383,12 +376,12 @@ router.post('/set-draft', async (req, res) => {
       if (userErrors.length) {
         const errMsg = userErrors.map(e => e.message).join(', ');
         for (const sku of affectedSKUs) {
-          log.push({ sku, status: 'error', message: `Set-to-draft failed: ${errMsg}` });
+          log.push({ sku, handle, status: 'error', message: `Set-to-draft failed: ${errMsg}` });
           failed++;
         }
       } else {
         for (const sku of affectedSKUs) {
-          log.push({ sku, status: 'drafted', message: `Set to DRAFT: ${product.title}` });
+          log.push({ sku, handle, status: 'drafted', message: `Set to DRAFT: ${product.title}` });
           drafted++;
         }
       }
@@ -398,7 +391,7 @@ router.post('/set-draft', async (req, res) => {
     } catch (err) {
       const msg = err.response?.data?.errors || err.message;
       for (const sku of affectedSKUs) {
-        log.push({ sku, status: 'error', message: String(msg) });
+        log.push({ sku, handle, status: 'error', message: String(msg) });
         failed++;
       }
     }
@@ -487,7 +480,7 @@ router.post('/publish-products', async (req, res) => {
 
       if (variantsToDelete.length === 0) {
         for (const sku of affectedSKUs) {
-          log.push({ sku, status: 'not_found', message: `SKU not found on Shopify product "${product.title}"` });
+          log.push({ sku, handle, status: 'not_found', message: `SKU not found on Shopify product "${product.title}"` });
           failed++;
         }
         continue;
@@ -499,7 +492,7 @@ router.post('/publish-products', async (req, res) => {
           ? `delete variant only - ${remainingVariants.length} other variant(s) remain on product`
           : `delete variant & set product to ${targetStatus} (no other variants remain)`;
         for (const v of variantsForProduct) {
-          log.push({ sku: v.variantSku, status: 'dry_run', message: `Would ${action}: ${product.title}` });
+          log.push({ sku: v.variantSku, handle, status: 'dry_run', message: `Would ${action}: ${product.title}` });
         }
         await sleep(150);
         continue;
@@ -516,7 +509,7 @@ router.post('/publish-products', async (req, res) => {
       if (deleteErrors.length) {
         const errMsg = deleteErrors.map(e => e.message).join(', ');
         for (const sku of affectedSKUs) {
-          log.push({ sku, status: 'error', message: `Variant delete failed: ${errMsg}` });
+          log.push({ sku, handle, status: 'error', message: `Variant delete failed: ${errMsg}` });
           failed++;
         }
         await sleep(350);
@@ -528,10 +521,10 @@ router.post('/publish-products', async (req, res) => {
 
       // ── Step 2 — update product status only if no other variants remain ──
       if (remainingVariants.length > 0) {
-        // Other variants still on this product — leave status alone
         for (const v of variantsForProduct) {
           log.push({
             sku: v.variantSku,
+            handle,
             status: 'deleted',
             message: `Variant deleted; product status unchanged - ${remainingVariants.length} other variant(s) remain: ${product.title}`,
           });
@@ -539,7 +532,6 @@ router.post('/publish-products', async (req, res) => {
         console.log(`  ↷ Skipping status update for "${product.title}" — ${remainingVariants.length} variant(s) still present`);
 
       } else {
-        // No variants left → set status based on CFS
         const statusMutation = targetStatus === 'ACTIVE'
           ? SET_PRODUCT_ACTIVE_MUTATION
           : SET_PRODUCT_DRAFT_MUTATION;
@@ -550,7 +542,7 @@ router.post('/publish-products', async (req, res) => {
         if (statusErrors.length) {
           const errMsg = statusErrors.map(e => e.message).join(', ');
           for (const sku of affectedSKUs) {
-            log.push({ sku, status: 'error', message: `Status update failed: ${errMsg}` });
+            log.push({ sku, handle, status: 'error', message: `Status update failed: ${errMsg}` });
             failed++;
           }
         } else {
@@ -559,6 +551,7 @@ router.post('/publish-products', async (req, res) => {
           for (const v of variantsForProduct) {
             log.push({
               sku: v.variantSku,
+              handle,
               status: verb,
               message: `Variant deleted & product set to ${targetStatus} (CFS: ${cfsStatus}): ${product.title}`,
             });
@@ -574,7 +567,7 @@ router.post('/publish-products', async (req, res) => {
     } catch (err) {
       const msg = err.response?.data?.errors || err.message;
       for (const sku of affectedSKUs) {
-        log.push({ sku, status: 'error', message: String(msg) });
+        log.push({ sku, handle, status: 'error', message: String(msg) });
         failed++;
       }
     }

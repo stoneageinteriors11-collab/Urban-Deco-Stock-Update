@@ -1014,9 +1014,10 @@
   // ── Download Dry Run Log as CSV ───────────────────────────────────────────
   function downloadDryRunLog() {
     if (!lastLog.length) return;
-    const headers = ['SKU', 'Status', 'Message'];
+    const headers = ['SKU', 'Handle', 'Status', 'Message'];
     const rows = lastLog.map(l => [
       l.sku,
+      `"${(l.handle || '').replace(/"/g, '""')}"`,
       l.status,
       `"${(l.message || '').replace(/"/g, '""')}"`,
     ]);
