@@ -1,0 +1,18 @@
+name = "urban-deco-stock-update"
+client_id = "a2a8370228edac44a821eae03864bcee"
+application_url = "https://urban-deco-stock-update.onrender.com"
+embedded = false
+
+[access_scopes]
+scopes = "read_products,write_products"
+
+[auth]
+redirect_urls = [
+  "https://urban-deco-stock-update.onrender.com/auth/callback"
+]
+
+[webhooks]
+api_version = "2026-07"
+
+[build]
+automatically_update_urls_on_dev = true
