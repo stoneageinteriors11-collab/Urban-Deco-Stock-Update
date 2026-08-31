@@ -105,17 +105,26 @@ function compareVariants(
         ? (cfsProductIds.get(parseSku(v.variantSku).prodId) || 'active')
         : undefined;
 
-    // Resolve CFS product code — try variant feed first, then product feed,
-    // then fall back to ID-based lookups for cases matched via raw IDs.
+    // Resolve per-feed codes separately so the sync endpoint can write
+    // the right value to each metafield without mixing sources.
     const { prodId, varId } = parseSku(sku);
-    const productCode =
-      variantCodesBySku.get(sku)          ||
-      productCodesBySku.get(sku)          ||
+
+    // custom.variant_code → var_code from variant feed only
+    const variantCode =
+      variantCodesBySku.get(sku)                  ||
       (varId  && variantCodesByAttrId.get(varId))  ||
-      (prodId && productCodesByProdId.get(prodId)) ||
       '';
 
-    results.push({ ...v, matchStatus, productCode, ...(cfsProductStatus !== undefined && { cfsProductStatus }) });
+    // custom.product_code → Product Code from product feed only
+    const productCodeOnly =
+      productCodesBySku.get(sku)                   ||
+      (prodId && productCodesByProdId.get(prodId))  ||
+      '';
+
+    // Combined display value (variant code preferred; falls back to product code)
+    const productCode = variantCode || productCodeOnly || '';
+
+    results.push({ ...v, matchStatus, productCode, variantCode, productCodeOnly, ...(cfsProductStatus !== undefined && { cfsProductStatus }) });
   }
 
   const orphaned    = results.filter(r => r.matchStatus === 'orphaned').length;

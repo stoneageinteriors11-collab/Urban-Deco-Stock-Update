@@ -501,6 +501,30 @@
     <div id="log-panel"></div>
   </div>
 
+  <!-- ── Step 4: Sync CFS Codes to Shopify Metafields ── -->
+  <div class="card hidden" id="sync-card">
+    <div class="card-title">Step 4 — Sync CFS Codes to Shopify Metafields</div>
+
+    <div id="sync-summary" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:16px;"></div>
+
+    <div class="actions-row">
+      <button class="btn btn-purple" id="btn-sync" onclick="syncCodes()">
+        🏷 Sync Codes to Shopify
+      </button>
+      <button class="btn btn-warning hidden" id="btn-download-sync-log" onclick="downloadSyncLog()">
+        📋 Download Sync Log
+      </button>
+      <span id="sync-spinner" class="hidden"><span class="spinner"></span> Syncing…</span>
+    </div>
+
+    <p style="font-size:12px;color:var(--text-muted);margin-top:12px;line-height:1.6">
+      Uses the global <strong>Dry Run</strong> toggle. Writes <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.product_code</code> on products
+      and <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.variant_code</code> on variants — upsert, safe to run multiple times.
+    </p>
+
+    <div id="sync-log-panel" style="margin-top:16px;"></div>
+  </div>
+
 </div>
 
 <script>
@@ -513,6 +537,7 @@
   let selectedSKUs = new Set();
   let lastLog      = [];      // stores the most recent delete/dry-run log for CSV download
   let lastLogDryRun = true;
+  let lastSyncLog  = [];      // stores the most recent sync-metafields log for CSV download
   // Raw CFS IDs used by the delete endpoint to decide whether to DRAFT or skip a product
   // cfsProductIds is now [[prodId, 'active'|'inactive'], ...] entries (Map-serialised)
   let cfsProductIds    = [];   // [[prodId, status], ...] from CFS product feed
@@ -666,6 +691,7 @@
       document.getElementById('btn-publish').style.display   = 'none'; // only shown on cfs-product tab
 
       applyFilter2();
+      updateSyncCard();
 
     } catch(e) {
       alert('Error: ' + e.message);
@@ -1009,6 +1035,126 @@
                   : 'log-ok';
         return `<p class="${cls}">[${l.status.toUpperCase()}] ${l.sku} — ${l.message}</p>`;
       }).join('');
+  }
+
+  // ── Sync CFS Codes to Shopify Metafields ─────────────────────────────────
+
+  function updateSyncCard() {
+    const withProductCode = allResults.filter(r => r.productCodeOnly).length;
+    const withVariantCode = allResults.filter(r => r.variantCode).length;
+    const card = document.getElementById('sync-card');
+
+    if (!withProductCode && !withVariantCode) {
+      card.classList.add('hidden');
+      return;
+    }
+
+    card.classList.remove('hidden');
+
+    const uniqueProducts = new Set(
+      allResults.filter(r => r.productCodeOnly).map(r => r.handle)
+    ).size;
+
+    document.getElementById('sync-summary').innerHTML = `
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 20px;min-width:130px">
+        <div style="font-size:24px;font-weight:700;color:var(--accent)">${uniqueProducts.toLocaleString()}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:3px">Products with code<br>
+          <code style="font-size:10px">custom.product_code</code></div>
+      </div>
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 20px;min-width:130px">
+        <div style="font-size:24px;font-weight:700;color:var(--accent)">${withVariantCode.toLocaleString()}</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:3px">Variants with code<br>
+          <code style="font-size:10px">custom.variant_code</code></div>
+      </div>
+    `;
+  }
+
+  async function syncCodes() {
+    const dryRun = document.getElementById('dry-run-toggle').checked;
+    const toSync = allResults.filter(r => r.productCodeOnly || r.variantCode);
+
+    if (!toSync.length) {
+      alert('No variants with CFS codes to sync. Make sure the CFS feeds contain Product Code / var_code columns.');
+      return;
+    }
+
+    const msg = dryRun
+      ? `DRY RUN: Simulate syncing CFS codes for ${toSync.length} variants (no actual changes).`
+      : `Sync CFS codes to Shopify metafields for ${toSync.length} variants?\n\n` +
+        `Sets:\n  • custom.product_code on products\n  • custom.variant_code on variants\n\n` +
+        `This is an upsert — safe to run multiple times. Continue?`;
+
+    if (!confirm(msg)) return;
+
+    document.getElementById('btn-sync').disabled = true;
+    document.getElementById('sync-spinner').classList.remove('hidden');
+    document.getElementById('btn-download-sync-log').classList.add('hidden');
+    document.getElementById('sync-log-panel').style.display = 'none';
+
+    try {
+      const res  = await fetch('/api/shopify/sync-metafields', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ variants: toSync, dryRun }),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error);
+
+      lastSyncLog = data.log || [];
+      showSyncLog(data.log, dryRun);
+
+      if (dryRun) {
+        document.getElementById('btn-download-sync-log').classList.remove('hidden');
+      }
+
+      alert(
+        `Done!\n` +
+        `Metafields synced: ${data.synced}\n` +
+        `Failed: ${data.failed}\n` +
+        `Dry run: ${dryRun}`
+      );
+    } catch(e) {
+      alert('Error: ' + e.message);
+    } finally {
+      document.getElementById('btn-sync').disabled = false;
+      document.getElementById('sync-spinner').classList.add('hidden');
+    }
+  }
+
+  function showSyncLog(log, dryRun) {
+    const panel = document.getElementById('sync-log-panel');
+    panel.style.display = 'block';
+    panel.innerHTML =
+      `<p style="color:var(--text-muted);margin-bottom:8px">${dryRun ? 'DRY RUN SYNC LOG' : 'SYNC LOG'} — ${new Date().toLocaleTimeString()}</p>` +
+      log.map(l => {
+        const cls = l.status === 'synced'    ? 'log-ok'
+                  : l.status === 'dry_run'   ? 'log-dry'
+                  : l.status === 'not_found' ? 'log-error'
+                  : l.status === 'error'     ? 'log-error'
+                  : 'log-ok';
+        const label = l.sku ? l.sku : '(product)';
+        return `<p class="${cls}">[${l.status.toUpperCase()}] ${label} — ${l.message}</p>`;
+      }).join('');
+  }
+
+  function downloadSyncLog() {
+    if (!lastSyncLog.length) return;
+    const headers = ['Type', 'SKU', 'Handle', 'Status', 'Message', 'Product Code', 'Variant Code'];
+    const rows = lastSyncLog.map(l => [
+      l.sku ? 'Variant' : 'Product',
+      l.sku || '',
+      `"${(l.handle || '').replace(/"/g, '""')}"`,
+      l.status,
+      `"${(l.message || '').replace(/"/g, '""')}"`,
+      l.productCode || '',
+      l.variantCode || '',
+    ]);
+    const csv  = [headers, ...rows].map(r => r.join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const a    = document.createElement('a');
+    a.href     = URL.createObjectURL(blob);
+    a.download = `sync-metafields-log-${Date.now()}.csv`;
+    a.click();
   }
 
   // ── Download Dry Run Log as CSV ───────────────────────────────────────────
