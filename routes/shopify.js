@@ -807,6 +807,15 @@ router.post('/sync-metafields', async (req, res) => {
     return res.status(400).json({ error: err.message });
   }
 
+  // ── Stream NDJSON so long syncs don't hit proxy/Render timeouts ───────────
+  // Each line is a JSON object. The last line is { type:'done', ... } with the
+  // full log and counters. Intermediate lines are { type:'progress', ... }.
+  res.setHeader('Content-Type', 'application/x-ndjson');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('X-Accel-Buffering', 'no'); // tell nginx/Render not to buffer
+  res.flushHeaders();
+  const send = obj => res.write(JSON.stringify(obj) + '\n');
+
   const log  = [];
   let synced         = 0;  // total metafields written (new + overwrites)
   let newCount       = 0;  // written because no prior value existed
@@ -820,6 +829,9 @@ router.post('/sync-metafields', async (req, res) => {
     if (!byHandle.has(v.handle)) byHandle.set(v.handle, []);
     byHandle.get(v.handle).push(v);
   }
+
+  let processed = 0;
+  const totalProducts = byHandle.size;
 
   console.log(`▶ Syncing metafields for ${toSync.length} variants across ${byHandle.size} products (dryRun=${dryRun})`);
 
@@ -979,10 +991,17 @@ router.post('/sync-metafields', async (req, res) => {
         failed++;
       }
     }
+
+    // Send a progress heartbeat after every product so the connection stays alive
+    processed++;
+    send({ type: 'progress', processed, totalProducts, synced, newCount, overwriteCount, skipped, failed });
   }
 
   console.log(`  ✓ Done — synced: ${synced} (new: ${newCount}, overwrites: ${overwriteCount}), skipped: ${skipped}, failed: ${failed}`);
-  res.json({ success: true, dryRun, synced, newCount, overwriteCount, skipped, failed, total: toSync.length, log });
+
+  // Final line carries the full log and summary
+  send({ type: 'done', success: true, dryRun, synced, newCount, overwriteCount, skipped, failed, total: toSync.length, log });
+  res.end();
 });
 
 

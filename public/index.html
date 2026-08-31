@@ -1089,23 +1089,64 @@
     if (!confirm(msg)) return;
 
     document.getElementById('btn-sync').disabled = true;
-    document.getElementById('sync-spinner').classList.remove('hidden');
+    const syncSpinnerEl = document.getElementById('sync-spinner');
+    syncSpinnerEl.innerHTML = '<span class="spinner"></span> <span id="sync-progress">Starting…</span>';
+    syncSpinnerEl.classList.remove('hidden');
     document.getElementById('btn-download-sync-log').classList.add('hidden');
     document.getElementById('sync-log-panel').style.display = 'none';
 
     try {
-      const res  = await fetch('/api/shopify/sync-metafields', {
+      const res = await fetch('/api/shopify/sync-metafields', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ variants: toSync, dryRun }),
       });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error);
 
-      lastSyncLog = data.log || [];
-      showSyncLog(data.log, dryRun);
+      if (!res.ok) {
+        // Non-200 means the server rejected before streaming started (e.g. 400 error)
+        const text = await res.text();
+        let msg = text;
+        try { msg = JSON.parse(text).error || text; } catch(_) {}
+        throw new Error(msg);
+      }
+
+      // Read NDJSON stream line by line
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer    = '';
+      let finalData = null;
+      const progressEl = () => document.getElementById('sync-progress');
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // keep any incomplete trailing line
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let event;
+          try { event = JSON.parse(line); } catch(_) { continue; }
+
+          if (event.type === 'progress') {
+            const p = progressEl();
+            if (p) p.textContent =
+              `${event.processed}/${event.totalProducts} products — ` +
+              `written: ${event.synced}, skipped: ${event.skipped}, failed: ${event.failed}`;
+          } else if (event.type === 'done') {
+            finalData = event;
+          }
+        }
+      }
+
+      if (!finalData) throw new Error('Sync ended without a completion signal — check server logs.');
+      if (!finalData.success) throw new Error(finalData.error || 'Unknown error');
+
+      lastSyncLog = finalData.log || [];
+      showSyncLog(finalData.log, dryRun);
       document.getElementById('btn-download-sync-log').classList.remove('hidden');
 
+      const data = finalData;
       const overwriteNote = data.overwriteCount > 0
         ? `\n  ↳ ${data.newCount} new, ${data.overwriteCount} overwrites`
         : data.newCount > 0 ? `\n  ↳ ${data.newCount} new` : '';
@@ -1127,7 +1168,8 @@
       alert('Error: ' + e.message);
     } finally {
       document.getElementById('btn-sync').disabled = false;
-      document.getElementById('sync-spinner').classList.add('hidden');
+      syncSpinnerEl.innerHTML = '<span class="spinner"></span> Syncing…';
+      syncSpinnerEl.classList.add('hidden');
     }
   }
 
