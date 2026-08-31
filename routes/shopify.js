@@ -149,6 +149,24 @@ function parseSku(sku) {
   return { prodId: parts[1] || null, varId: parts[2] || null };
 }
 
+// ── Short human-readable label for a Shopify variant node ────────────────────
+// Uses the variant's title (Shopify combines selected option values into title,
+// e.g. "Brown / 2 Seater"). Falls back to selectedOptions, then SKU.
+function variantLabel(node) {
+  if (node.title && node.title !== 'Default Title') return node.title;
+  const opts = node.selectedOptions?.map(o => o.value).filter(Boolean);
+  if (opts?.length) return opts.join(' / ');
+  return node.sku || '?';
+}
+
+// ── Compact list of variant labels ──────────────────────────────────────────
+// Returns "A, B, C" for ≤3 nodes or "A, B, C + 2 more" beyond that.
+function variantList(nodes, max = 3) {
+  const labels = nodes.slice(0, max).map(variantLabel);
+  const extra  = nodes.length - max;
+  return extra > 0 ? `${labels.join(', ')} + ${extra} more` : labels.join(', ');
+}
+
 // Convert a variant SKU to its product-level reference SKU.
 // UD-{prodId}-{varId} → UD-{prodId}   (strips the variant ID tail)
 // Returns the original sku unchanged if it doesn't have 3+ segments.
@@ -358,7 +376,23 @@ router.post('/delete-variants-bulk', async (req, res) => {
         } catch (_) { /* dry-run lookup failure is non-fatal */ }
 
         for (const v of orphanedForProduct) {
-          log.push({ sku: v.variantSku, handle, status: 'dry_run', message: `[${action}] ${productTitle} / ${v.option1 || v.option2 || 'Default'}`, productCode: v.productCode || '' });
+          const shopNode = deletedNodes.find(n => n.sku === v.variantSku);
+          const label    = shopNode ? variantLabel(shopNode) : (v.option1 || v.option2 || v.variantSku);
+
+          let msg;
+          if (action.startsWith('set product to DRAFT')) {
+            msg = `Would set "${productTitle}" to DRAFT — all variants orphaned, deleting "${label}" (no CFS match)`;
+          } else if (action.startsWith('keep all')) {
+            msg = `Would keep "${label}" — all variants found in CFS feeds: ${productTitle}`;
+          } else if (remainingNodes.length > 0) {
+            // variant-only delete — list what's staying
+            const stayList = variantList(remainingNodes);
+            msg = `Would delete variant "${label}" — ${remainingNodes.length} remaining: ${stayList} · ${productTitle}`;
+          } else {
+            // mixed CFS-matched / unmatched
+            msg = `[${action}] Would delete "${label}": ${productTitle}`;
+          }
+          log.push({ sku: v.variantSku, handle, status: 'dry_run', message: msg, productCode: v.productCode || '' });
         }
 
         await sleep(150); // lighter pause during dry-run lookups
@@ -673,14 +707,23 @@ router.post('/publish-products', async (req, res) => {
 
       // ── Dry-run: report what would happen ────────────────────────────────
       if (dryRun) {
-        const action = remainingVariants.length > 0
-          ? `delete variant only - ${remainingVariants.length} other variant(s) remain on product`
-          : `delete variant & set product to ${targetStatus} (no other variants remain)`;
-        for (const v of variantsForProduct) {
-          log.push({ sku: v.variantSku, handle, status: 'dry_run', message: `Would ${action}: ${product.title}`, productCode: v.productCode || '' });
-        }
-        // Image dry-run
         const allImages = product.images.edges.map(e => e.node);
+
+        for (const v of variantsForProduct) {
+          const shopNode = variantsToDelete.find(n => n.sku === v.variantSku);
+          const label    = shopNode ? variantLabel(shopNode) : (v.option1 || v.option2 || v.variantSku);
+
+          let msg;
+          if (remainingVariants.length > 0) {
+            const stayList = variantList(remainingVariants);
+            msg = `Would delete variant "${label}" — ${remainingVariants.length} remaining: ${stayList} · ${product.title}`;
+          } else {
+            msg = `Would delete variant "${label}" & set product to ${targetStatus} — last variant, no others remain · ${product.title}`;
+          }
+          log.push({ sku: v.variantSku, handle, status: 'dry_run', message: msg, productCode: v.productCode || '' });
+        }
+
+        // Image dry-run
         const { logMessages: imgMsgs } = getOrphanedImageIds(allImages, variantsToDelete, remainingVariants);
         for (const msg of imgMsgs) {
           log.push({ sku: '-', handle, status: 'dry_run', message: `Images: would ${msg}: ${product.title}` });
