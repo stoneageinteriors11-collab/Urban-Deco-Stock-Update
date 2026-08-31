@@ -1014,7 +1014,7 @@
   // ── Download Dry Run Log as CSV ───────────────────────────────────────────
   function downloadDryRunLog() {
     if (!lastLog.length) return;
-    const headers = ['Type', 'SKU', 'Handle', 'Status', 'Message'];
+    const headers = ['Type', 'SKU', 'Handle', 'Status', 'Message', 'Product Code'];
     const rows = lastLog.map(l => {
       const type = l.sku === '-' ? 'Image' : 'Variant';
       return [
@@ -1023,6 +1023,7 @@
         `"${(l.handle || '').replace(/"/g, '""')}"`,
         l.status,
         `"${(l.message || '').replace(/"/g, '""')}"`,
+        l.productCode || '',
       ];
     });
     const csv  = [headers, ...rows].map(r => r.join(',')).join('\n');
@@ -1036,7 +1037,7 @@
   // ── Export Results CSV ────────────────────────────────────────────────────
   function exportCSV() {
     if (!allResults.length) return;
-    const headers = ['Handle','Product Title','Variant','SKU','Price','Inventory Qty','Status'];
+    const headers = ['Handle','Product Title','Variant','SKU','Price','Inventory Qty','Status','Product Code'];
     const rows = filtered.map(r => [
       r.handle,
       `"${(r.title||'').replace(/"/g,'""')}"`,
@@ -1045,6 +1046,7 @@
       r.price,
       r.inventoryQty,
       r.matchStatus,
+      r.productCode || '',
     ]);
     const csv  = [headers, ...rows].map(r => r.join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });

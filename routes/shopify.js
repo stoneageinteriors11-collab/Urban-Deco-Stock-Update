@@ -253,7 +253,9 @@ router.post('/delete-variants-bulk', async (req, res) => {
 
   // Step 2 — process one product at a time
   for (const [handle, orphanedForProduct] of byHandle) {
-    const orphanedSKUs = new Set(orphanedForProduct.map(v => v.variantSku));
+    const orphanedSKUs     = new Set(orphanedForProduct.map(v => v.variantSku));
+    // productCode lookup: request body variants carry productCode from compareVariants()
+    const productCodeBySku = new Map(orphanedForProduct.map(v => [v.variantSku, v.productCode || '']));
 
     try {
       if (dryRun) {
@@ -313,7 +315,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
         } catch (_) { /* dry-run lookup failure is non-fatal */ }
 
         for (const v of orphanedForProduct) {
-          log.push({ sku: v.variantSku, handle, status: 'dry_run', message: `[${action}] ${productTitle} / ${v.option1 || v.option2 || 'Default'}` });
+          log.push({ sku: v.variantSku, handle, status: 'dry_run', message: `[${action}] ${productTitle} / ${v.option1 || v.option2 || 'Default'}`, productCode: v.productCode || '' });
         }
 
         await sleep(150); // lighter pause during dry-run lookups
@@ -328,7 +330,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
 
       if (!product) {
         for (const v of orphanedForProduct) {
-          log.push({ sku: v.variantSku, handle, status: 'not_found', message: `Product handle "${handle}" not found on Shopify` });
+          log.push({ sku: v.variantSku, handle, status: 'not_found', message: `Product handle "${handle}" not found on Shopify`, productCode: v.productCode || '' });
           failed++;
         }
         continue;
@@ -342,7 +344,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
       // Match up log entries: report any SKUs from the CSV that weren't found on Shopify
       for (const v of orphanedForProduct) {
         if (!orphanedNodes.find(n => n.sku === v.variantSku)) {
-          log.push({ sku: v.variantSku, handle, status: 'not_found', message: `SKU ${v.variantSku} not found on Shopify product "${product.title}"` });
+          log.push({ sku: v.variantSku, handle, status: 'not_found', message: `SKU ${v.variantSku} not found on Shopify product "${product.title}"`, productCode: v.productCode || '' });
           failed++;
         }
       }
@@ -363,7 +365,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
         });
 
         for (const node of cfsMatched) {
-          log.push({ sku: node.sku, handle, status: 'kept', message: `Kept - found in CFS feeds: ${product.title} / ${node.title}` });
+          log.push({ sku: node.sku, handle, status: 'kept', message: `Kept - found in CFS feeds: ${product.title} / ${node.title}`, productCode: productCodeBySku.get(node.sku) || '' });
         }
 
         if (cfsMatched.length > 0 && cfsUnmatched.length > 0) {
@@ -375,12 +377,12 @@ router.post('/delete-variants-bulk', async (req, res) => {
           if (userErrors.length) {
             const errMsg = userErrors.map(e => e.message).join(', ');
             for (const node of cfsUnmatched) {
-              log.push({ sku: node.sku, handle, status: 'error', message: `Variant delete failed: ${errMsg}` });
+              log.push({ sku: node.sku, handle, status: 'error', message: `Variant delete failed: ${errMsg}`, productCode: productCodeBySku.get(node.sku) || '' });
               failed++;
             }
           } else {
             for (const node of cfsUnmatched) {
-              log.push({ sku: node.sku, handle, status: 'deleted', message: `Deleted: ${product.title} / ${node.title}` });
+              log.push({ sku: node.sku, handle, status: 'deleted', message: `Deleted: ${product.title} / ${node.title}`, productCode: productCodeBySku.get(node.sku) || '' });
               deleted++;
             }
             // Delete images orphaned by the removed variants
@@ -399,12 +401,12 @@ router.post('/delete-variants-bulk', async (req, res) => {
           if (userErrors.length) {
             const errMsg = userErrors.map(e => e.message).join(', ');
             for (const v of orphanedForProduct) {
-              log.push({ sku: v.variantSku, handle, status: 'error', message: `Set-to-draft failed: ${errMsg}` });
+              log.push({ sku: v.variantSku, handle, status: 'error', message: `Set-to-draft failed: ${errMsg}`, productCode: v.productCode || '' });
               failed++;
             }
           } else {
             for (const v of orphanedForProduct) {
-              log.push({ sku: v.variantSku, handle, status: 'drafted', message: `Product set to DRAFT: ${product.title}` });
+              log.push({ sku: v.variantSku, handle, status: 'drafted', message: `Product set to DRAFT: ${product.title}`, productCode: v.productCode || '' });
               deleted++;
             }
           }
@@ -418,12 +420,12 @@ router.post('/delete-variants-bulk', async (req, res) => {
         if (userErrors.length) {
           const errMsg = userErrors.map(e => e.message).join(', ');
           for (const node of orphanedNodes) {
-            log.push({ sku: node.sku, handle, status: 'error', message: `Variant delete failed: ${errMsg}` });
+            log.push({ sku: node.sku, handle, status: 'error', message: `Variant delete failed: ${errMsg}`, productCode: productCodeBySku.get(node.sku) || '' });
             failed++;
           }
         } else {
           for (const node of orphanedNodes) {
-            log.push({ sku: node.sku, handle, status: 'deleted', message: `Deleted: ${product.title} / ${node.title}` });
+            log.push({ sku: node.sku, handle, status: 'deleted', message: `Deleted: ${product.title} / ${node.title}`, productCode: productCodeBySku.get(node.sku) || '' });
             deleted++;
           }
           // Delete images orphaned by the removed variants
@@ -438,7 +440,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
     } catch (err) {
       const msg = err.response?.data?.errors || err.message;
       for (const v of orphanedForProduct) {
-        log.push({ sku: v.variantSku, handle, status: 'error', message: String(msg) });
+        log.push({ sku: v.variantSku, handle, status: 'error', message: String(msg), productCode: v.productCode || '' });
         failed++;
       }
     }
@@ -484,12 +486,14 @@ router.post('/set-draft', async (req, res) => {
   console.log(`▶ Setting ${byHandle.size} products to DRAFT (dryRun=${dryRun})`);
 
   for (const [handle, representative] of byHandle) {
-    const affectedSKUs = variants.filter(v => v.handle === handle).map(v => v.variantSku);
+    const variantsForHandle = variants.filter(v => v.handle === handle);
+    const affectedSKUs      = variantsForHandle.map(v => v.variantSku);
+    const productCodeBySku  = new Map(variantsForHandle.map(v => [v.variantSku, v.productCode || '']));
 
     try {
       if (dryRun) {
         for (const sku of affectedSKUs) {
-          log.push({ sku, handle, status: 'dry_run', message: `Would set product to DRAFT: ${representative.title || handle}` });
+          log.push({ sku, handle, status: 'dry_run', message: `Would set product to DRAFT: ${representative.title || handle}`, productCode: productCodeBySku.get(sku) || '' });
         }
         await sleep(150);
         continue;
@@ -501,7 +505,7 @@ router.post('/set-draft', async (req, res) => {
 
       if (!product) {
         for (const sku of affectedSKUs) {
-          log.push({ sku, handle, status: 'not_found', message: `Product handle "${handle}" not found on Shopify` });
+          log.push({ sku, handle, status: 'not_found', message: `Product handle "${handle}" not found on Shopify`, productCode: productCodeBySku.get(sku) || '' });
           failed++;
         }
         continue;
@@ -513,12 +517,12 @@ router.post('/set-draft', async (req, res) => {
       if (userErrors.length) {
         const errMsg = userErrors.map(e => e.message).join(', ');
         for (const sku of affectedSKUs) {
-          log.push({ sku, handle, status: 'error', message: `Set-to-draft failed: ${errMsg}` });
+          log.push({ sku, handle, status: 'error', message: `Set-to-draft failed: ${errMsg}`, productCode: productCodeBySku.get(sku) || '' });
           failed++;
         }
       } else {
         for (const sku of affectedSKUs) {
-          log.push({ sku, handle, status: 'drafted', message: `Set to DRAFT: ${product.title}` });
+          log.push({ sku, handle, status: 'drafted', message: `Set to DRAFT: ${product.title}`, productCode: productCodeBySku.get(sku) || '' });
           drafted++;
         }
       }
@@ -528,7 +532,7 @@ router.post('/set-draft', async (req, res) => {
     } catch (err) {
       const msg = err.response?.data?.errors || err.message;
       for (const sku of affectedSKUs) {
-        log.push({ sku, handle, status: 'error', message: String(msg) });
+        log.push({ sku, handle, status: 'error', message: String(msg), productCode: productCodeBySku.get(sku) || '' });
         failed++;
       }
     }
@@ -591,8 +595,9 @@ router.post('/publish-products', async (req, res) => {
   console.log(`▶ Promoting ${byHandle.size} CFS-product-match products (dryRun=${dryRun})`);
 
   for (const [handle, variantsForProduct] of byHandle) {
-    const affectedSKUs  = variantsForProduct.map(v => v.variantSku);
-    const skuSet        = new Set(affectedSKUs);
+    const affectedSKUs     = variantsForProduct.map(v => v.variantSku);
+    const skuSet           = new Set(affectedSKUs);
+    const productCodeBySku = new Map(variantsForProduct.map(v => [v.variantSku, v.productCode || '']));
 
     // CFS status for this product (inactive if any selected variant is inactive)
     const anyCfsInactive = variantsForProduct.some(v => v.cfsProductStatus === 'inactive');
@@ -605,7 +610,7 @@ router.post('/publish-products', async (req, res) => {
 
       if (!product) {
         for (const sku of affectedSKUs) {
-          log.push({ sku, status: 'not_found', message: `Product handle "${handle}" not found on Shopify` });
+          log.push({ sku, status: 'not_found', message: `Product handle "${handle}" not found on Shopify`, productCode: productCodeBySku.get(sku) || '' });
           failed++;
         }
         continue;
@@ -617,7 +622,7 @@ router.post('/publish-products', async (req, res) => {
 
       if (variantsToDelete.length === 0) {
         for (const sku of affectedSKUs) {
-          log.push({ sku, handle, status: 'not_found', message: `SKU not found on Shopify product "${product.title}"` });
+          log.push({ sku, handle, status: 'not_found', message: `SKU not found on Shopify product "${product.title}"`, productCode: productCodeBySku.get(sku) || '' });
           failed++;
         }
         continue;
@@ -629,7 +634,7 @@ router.post('/publish-products', async (req, res) => {
           ? `delete variant only - ${remainingVariants.length} other variant(s) remain on product`
           : `delete variant & set product to ${targetStatus} (no other variants remain)`;
         for (const v of variantsForProduct) {
-          log.push({ sku: v.variantSku, handle, status: 'dry_run', message: `Would ${action}: ${product.title}` });
+          log.push({ sku: v.variantSku, handle, status: 'dry_run', message: `Would ${action}: ${product.title}`, productCode: v.productCode || '' });
         }
         // Image dry-run
         const allImages = product.images.edges.map(e => e.node);
@@ -655,7 +660,7 @@ router.post('/publish-products', async (req, res) => {
       if (deleteErrors.length) {
         const errMsg = deleteErrors.map(e => e.message).join(', ');
         for (const sku of affectedSKUs) {
-          log.push({ sku, handle, status: 'error', message: `Variant delete failed: ${errMsg}` });
+          log.push({ sku, handle, status: 'error', message: `Variant delete failed: ${errMsg}`, productCode: productCodeBySku.get(sku) || '' });
           failed++;
         }
         await sleep(350);
@@ -678,6 +683,7 @@ router.post('/publish-products', async (req, res) => {
             handle,
             status: 'deleted',
             message: `Variant deleted; product status unchanged - ${remainingVariants.length} other variant(s) remain: ${product.title}`,
+            productCode: v.productCode || '',
           });
         }
         console.log(`  ↷ Skipping status update for "${product.title}" — ${remainingVariants.length} variant(s) still present`);
@@ -693,7 +699,7 @@ router.post('/publish-products', async (req, res) => {
         if (statusErrors.length) {
           const errMsg = statusErrors.map(e => e.message).join(', ');
           for (const sku of affectedSKUs) {
-            log.push({ sku, handle, status: 'error', message: `Status update failed: ${errMsg}` });
+            log.push({ sku, handle, status: 'error', message: `Status update failed: ${errMsg}`, productCode: productCodeBySku.get(sku) || '' });
             failed++;
           }
         } else {
@@ -705,6 +711,7 @@ router.post('/publish-products', async (req, res) => {
               handle,
               status: verb,
               message: `Variant deleted & product set to ${targetStatus} (CFS: ${cfsStatus}): ${product.title}`,
+              productCode: v.productCode || '',
             });
           }
           if (targetStatus === 'ACTIVE') published++;
@@ -718,7 +725,7 @@ router.post('/publish-products', async (req, res) => {
     } catch (err) {
       const msg = err.response?.data?.errors || err.message;
       for (const sku of affectedSKUs) {
-        log.push({ sku, handle, status: 'error', message: String(msg) });
+        log.push({ sku, handle, status: 'error', message: String(msg), productCode: productCodeBySku.get(sku) || '' });
         failed++;
       }
     }

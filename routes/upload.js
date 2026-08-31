@@ -2,7 +2,7 @@ const express = require('express');
 const multer  = require('multer');
 const path    = require('path');
 const fs      = require('fs');
-const { streamProductSKUs, streamVariantSKUs, streamShopifyVariants, streamProductIds, streamVariantAttrIds } = require('../utils/parseCSV');
+const { streamProductSKUs, streamVariantSKUs, streamShopifyVariants, streamProductIds, streamVariantAttrIds, streamProductCodes, streamVariantCodes } = require('../utils/parseCSV');
 const { compareVariants } = require('../utils/matchVariants');
 
 const router = express.Router();
@@ -76,19 +76,28 @@ router.post(
       const cfsProductIds = await streamProductIds(productFeedPath);
       console.log(`  ✓ ${cfsProductIds.size} raw CFS product IDs`);
 
-      // 2. Variant feed (optional)
-      let validVariantSKUs = new Set();
-      let cfsVariantAttrIds = new Set();
+      // 2. Product feed codes
+      const { bySku: productCodesBySku, byProdId: productCodesByProdId } = await streamProductCodes(productFeedPath);
+      console.log(`  ✓ ${productCodesBySku.size} product codes loaded`);
+
+      // 3. Variant feed (optional)
+      let validVariantSKUs    = new Set();
+      let cfsVariantAttrIds   = new Set();
+      let variantCodesBySku   = new Map();
+      let variantCodesByAttrId = new Map();
       if (variantFeedPath) {
         console.log('▶ Streaming CFS variant feed…');
-        validVariantSKUs = await streamVariantSKUs(variantFeedPath);
+        validVariantSKUs  = await streamVariantSKUs(variantFeedPath);
         cfsVariantAttrIds = await streamVariantAttrIds(variantFeedPath);
-        console.log(`  ✓ ${validVariantSKUs.size} variant SKUs, ${cfsVariantAttrIds.size} variant attr IDs`);
+        const vc = await streamVariantCodes(variantFeedPath);
+        variantCodesBySku    = vc.bySku;
+        variantCodesByAttrId = vc.byAttrId;
+        console.log(`  ✓ ${validVariantSKUs.size} variant SKUs, ${cfsVariantAttrIds.size} variant attr IDs, ${variantCodesBySku.size} variant codes`);
       } else {
         console.log('ℹ  No variant feed uploaded — using product feed only');
       }
 
-      // 3. Shopify export(s)
+      // 4. Shopify export(s)
       console.log('▶ Streaming Shopify export file 1…');
       const shopifyVariants = await streamShopifyVariants(shopifyFile1Path);
       console.log(`  ✓ ${shopifyVariants.length} variants from file 1`);
@@ -100,18 +109,21 @@ router.post(
         shopifyVariants.push(...variants2);
       }
 
-      // 4. Four-step compare (variant feed → product feed → raw CFS IDs → orphaned)
+      // 5. Four-step compare (variant feed → product feed → raw CFS IDs → orphaned)
       console.log(`▶ Comparing ${shopifyVariants.length} variants…`);
-      const { results, summary } = compareVariants(shopifyVariants, validVariantSKUs, validProductSKUs, cfsProductIds, cfsVariantAttrIds);
-      console.log(`  ✓ ${summary.orphaned} orphaned, ${summary.ok} OK, ${summary.draft} draft/archived (skipped), ${summary.cfsInactive} cfs-inactive`);
+      const { results, summary } = compareVariants(
+        shopifyVariants, validVariantSKUs, validProductSKUs, cfsProductIds, cfsVariantAttrIds,
+        productCodesBySku, productCodesByProdId, variantCodesBySku, variantCodesByAttrId,
+      );
+      console.log(`  ✓ ${summary.orphaned} orphaned, ${summary.ok} OK, ${summary.draft} draft/archived, ${summary.cfsInactive} cfs-inactive, ${summary.cfsProduct} cfs-product`);
 
       res.json({
         success: true,
         summary,
         results,
-        // Raw CFS IDs sent to the frontend so the delete endpoint can check CFS presence
-        // before setting an all-orphaned product to DRAFT.
-        cfsProductIds:    [...cfsProductIds],
+        // cfsProductIds is now a Map<prodId, 'active'|'inactive'>; send as entries array
+        // so the frontend can reconstruct the map for publish-products decisions.
+        cfsProductIds:    [...cfsProductIds.entries()],  // [[prodId, status], …]
         cfsVariantAttrIds: [...cfsVariantAttrIds],
       });
 

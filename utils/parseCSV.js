@@ -131,6 +131,39 @@ async function streamVariantAttrIds(filePath) {
   return ids;
 }
 
+// ── CFS Product feed → product code maps ─────────────────────────────────────
+// Returns { bySku: Map<shopifySku, code>, byProdId: Map<prodId, code> }
+// so compareVariants can look up the code regardless of which match path fired.
+async function streamProductCodes(filePath) {
+  const rows   = await getRows(filePath);
+  const bySku   = new Map();
+  const byProdId = new Map();
+  for (const row of rows) {
+    const sku  = String(row['Shopify SKU']  || '').trim();
+    const id   = String(row['Product Id']   || '').trim();
+    const code = String(row['Product Code'] || '').trim();
+    if (sku && code)  bySku.set(sku, code);
+    if (id  && code)  byProdId.set(id, code);
+  }
+  return { bySku, byProdId };
+}
+
+// ── CFS Variant feed → variant code maps ─────────────────────────────────────
+// Returns { bySku: Map<shopifySku, code>, byAttrId: Map<iProAttrId, code> }
+async function streamVariantCodes(filePath) {
+  const rows    = await getRows(filePath);
+  const bySku    = new Map();
+  const byAttrId = new Map();
+  for (const row of rows) {
+    const sku    = String(row['Shopify SKU'] || '').trim();
+    const attrId = String(row['iProAttrId']  || '').trim();
+    const code   = String(row['var_code']    || '').trim();
+    if (sku    && code) bySku.set(sku, code);
+    if (attrId && code) byAttrId.set(attrId, code);
+  }
+  return { bySku, byAttrId };
+}
+
 // ── Legacy helpers (kept for compatibility) ───────────────────────────────────
 function extractVariantSKUs(rows) {
   const skus = new Set();
@@ -169,6 +202,8 @@ module.exports = {
   streamShopifyVariants,
   streamProductIds,
   streamVariantAttrIds,
+  streamProductCodes,
+  streamVariantCodes,
   parseCSVFile,
   extractVariantSKUs,
   extractShopifyVariants,

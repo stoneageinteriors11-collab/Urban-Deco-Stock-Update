@@ -46,9 +46,13 @@ function parseSku(sku) {
 function compareVariants(
   shopifyVariants,
   validVariantSKUs,
-  validProductSKUs   = new Map(),
-  cfsProductIds      = new Set(),
-  cfsVariantAttrIds  = new Set(),
+  validProductSKUs     = new Map(),
+  cfsProductIds        = new Set(),
+  cfsVariantAttrIds    = new Set(),
+  productCodesBySku    = new Map(),
+  productCodesByProdId = new Map(),
+  variantCodesBySku    = new Map(),
+  variantCodesByAttrId = new Map(),
 ) {
   const results = [];
 
@@ -101,7 +105,17 @@ function compareVariants(
         ? (cfsProductIds.get(parseSku(v.variantSku).prodId) || 'active')
         : undefined;
 
-    results.push({ ...v, matchStatus, ...(cfsProductStatus !== undefined && { cfsProductStatus }) });
+    // Resolve CFS product code — try variant feed first, then product feed,
+    // then fall back to ID-based lookups for cases matched via raw IDs.
+    const { prodId, varId } = parseSku(sku);
+    const productCode =
+      variantCodesBySku.get(sku)          ||
+      productCodesBySku.get(sku)          ||
+      (varId  && variantCodesByAttrId.get(varId))  ||
+      (prodId && productCodesByProdId.get(prodId)) ||
+      '';
+
+    results.push({ ...v, matchStatus, productCode, ...(cfsProductStatus !== undefined && { cfsProductStatus }) });
   }
 
   const orphaned    = results.filter(r => r.matchStatus === 'orphaned').length;
