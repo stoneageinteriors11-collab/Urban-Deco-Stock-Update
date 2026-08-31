@@ -835,6 +835,8 @@ router.post('/sync-metafields', async (req, res) => {
 
   console.log(`▶ Syncing metafields for ${toSync.length} variants across ${byHandle.size} products (dryRun=${dryRun})`);
 
+  try { // ── outer try: catches anything that escapes per-product handlers ──────
+
   for (const [handle, variantsForProduct] of byHandle) {
     try {
       const productCodeVal = variantsForProduct.find(v => v.productCodeOnly)?.productCodeOnly || '';
@@ -986,6 +988,7 @@ router.post('/sync-metafields', async (req, res) => {
 
     } catch (err) {
       const msg = err.response?.data?.errors || err.message;
+      console.error(`  ✗ [${handle}] Error: ${String(msg)}`);
       for (const v of variantsForProduct) {
         log.push({ type: 'variant', sku: v.variantSku, handle, status: 'error', message: String(msg) });
         failed++;
@@ -995,6 +998,19 @@ router.post('/sync-metafields', async (req, res) => {
     // Send a progress heartbeat after every product so the connection stays alive
     processed++;
     send({ type: 'progress', processed, totalProducts, synced, newCount, overwriteCount, skipped, failed });
+
+    // Log to Render every 50 products so progress is visible in server logs
+    if (processed % 50 === 0 || processed === totalProducts) {
+      console.log(`  … ${processed}/${totalProducts} products done — synced: ${synced}, skipped: ${skipped}, failed: ${failed}`);
+    }
+  }
+
+  // ── outer catch: if something escaped the per-product handler, still close cleanly
+  } catch (outerErr) {
+    console.error(`  ✗ Unexpected outer error at product ${processed}/${totalProducts}:`, outerErr.message, outerErr.stack);
+    send({ type: 'done', success: false, error: `Server error at product ${processed}/${totalProducts}: ${outerErr.message}`, dryRun, synced, newCount, overwriteCount, skipped, failed, total: toSync.length, log });
+    res.end();
+    return;
   }
 
   console.log(`  ✓ Done — synced: ${synced} (new: ${newCount}, overwrites: ${overwriteCount}), skipped: ${skipped}, failed: ${failed}`);
