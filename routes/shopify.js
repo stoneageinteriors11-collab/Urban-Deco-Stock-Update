@@ -118,6 +118,20 @@ const METAFIELDS_SET_MUTATION = `
   }
 `;
 
+// Lightweight query for sync — only fetches what metafieldsSet needs (GIDs).
+// No images, no selectedOptions — much faster than PRODUCT_BY_HANDLE_QUERY.
+const PRODUCT_GIDS_QUERY = `
+  query getProductGids($handle: String!) {
+    productByHandle(handle: $handle) {
+      id
+      title
+      variants(first: 250) {
+        edges { node { id sku } }
+      }
+    }
+  }
+`;
+
 // ── SKU parser: UD-{prodId}-{varId} ──────────────────────────────────────────
 function parseSku(sku) {
   const parts = sku.split('-');
@@ -788,8 +802,26 @@ router.post('/sync-metafields', async (req, res) => {
 
   for (const [handle, variantsForProduct] of byHandle) {
     try {
-      // Fetch product to resolve GIDs
-      const data    = await gql(client, PRODUCT_BY_HANDLE_QUERY, { handle });
+      // Product code value: first non-empty productCodeOnly across all variants for this handle
+      const productCodeVal = variantsForProduct.find(v => v.productCodeOnly)?.productCodeOnly || '';
+
+      // ── Dry run — no API calls needed, all data already in hand ─────────
+      if (dryRun) {
+        const productTitle   = variantsForProduct[0].title || handle;
+        const repSku         = variantsForProduct[0]?.variantSku || '';
+        if (productCodeVal) {
+          log.push({ type: 'product', sku: repSku, handle, status: 'dry_run', message: `Would set custom.product_code = "${productCodeVal}" on product "${productTitle}"`, productCode: productCodeVal, variantCode: '' });
+        }
+        for (const v of variantsForProduct) {
+          if (!v.variantCode) continue;
+          log.push({ type: 'variant', sku: v.variantSku, handle, status: 'dry_run', message: `Would set custom.variant_code = "${v.variantCode}" on variant ${v.variantSku}`, productCode: v.productCodeOnly || '', variantCode: v.variantCode });
+        }
+        // No sleep — no API calls were made
+        continue;
+      }
+
+      // ── Live sync — fetch product to resolve GIDs ────────────────────────
+      const data    = await gql(client, PRODUCT_GIDS_QUERY, { handle });
       const product = data?.productByHandle;
 
       if (!product) {
@@ -802,28 +834,6 @@ router.post('/sync-metafields', async (req, res) => {
 
       const shopifyVariants = product.variants.edges.map(e => e.node);
       const gidBySku        = new Map(shopifyVariants.map(n => [n.sku, n.id]));
-
-      // Product code value: first non-empty productCodeOnly across all variants for this handle
-      const productCodeVal = variantsForProduct.find(v => v.productCodeOnly)?.productCodeOnly || '';
-
-      // ── Dry run ──────────────────────────────────────────────────────────
-      if (dryRun) {
-        if (productCodeVal) {
-          log.push({ sku: '', handle, status: 'dry_run', message: `Would set custom.product_code = "${productCodeVal}" on product "${product.title}"`, productCode: productCodeVal, variantCode: '' });
-        }
-        for (const v of variantsForProduct) {
-          if (!v.variantCode) continue;
-          const varGid = gidBySku.get(v.variantSku);
-          if (!varGid) {
-            log.push({ sku: v.variantSku, handle, status: 'not_found', message: `SKU ${v.variantSku} not found on Shopify`, productCode: v.productCodeOnly || '', variantCode: v.variantCode });
-            failed++;
-          } else {
-            log.push({ sku: v.variantSku, handle, status: 'dry_run', message: `Would set custom.variant_code = "${v.variantCode}" on variant ${v.variantSku}`, productCode: v.productCodeOnly || '', variantCode: v.variantCode });
-          }
-        }
-        await sleep(150);
-        continue;
-      }
 
       // ── Live sync ─────────────────────────────────────────────────────────
       const metafields = [];
@@ -870,18 +880,20 @@ router.post('/sync-metafields', async (req, res) => {
           const errMsg = userErrors.map(e => e.message).join(', ');
           for (const mf of batch) {
             const isProductLevel = mf.ownerId === product.id;
-            const sku = isProductLevel ? '' : (shopifyVariants.find(n => n.id === mf.ownerId)?.sku || '?');
-            log.push({ sku, handle, status: 'error', message: `metafieldsSet failed: ${errMsg}` });
+            const sku  = isProductLevel ? (shopifyVariants[0]?.sku || '') : (shopifyVariants.find(n => n.id === mf.ownerId)?.sku || '?');
+            const type = isProductLevel ? 'product' : 'variant';
+            log.push({ type, sku, handle, status: 'error', message: `metafieldsSet failed: ${errMsg}` });
             failed++;
           }
         } else {
-          const setMfs = result?.metafieldsSet?.metafields || [];
+          const setMfs  = result?.metafieldsSet?.metafields || [];
+          const firstSku = shopifyVariants[0]?.sku || '';
           for (const mf of setMfs) {
             if (mf.ownerId === product.id) {
-              log.push({ sku: '', handle, status: 'synced', message: `Set custom.product_code = "${mf.value}" on "${product.title}"`, productCode: mf.value, variantCode: '' });
+              log.push({ type: 'product', sku: firstSku, handle, status: 'synced', message: `Set custom.product_code = "${mf.value}" on "${product.title}"`, productCode: mf.value, variantCode: '' });
             } else {
               const varSku = shopifyVariants.find(n => n.id === mf.ownerId)?.sku || '';
-              log.push({ sku: varSku, handle, status: 'synced', message: `Set custom.variant_code = "${mf.value}" on variant ${varSku}`, productCode: '', variantCode: mf.value });
+              log.push({ type: 'variant', sku: varSku, handle, status: 'synced', message: `Set custom.variant_code = "${mf.value}" on variant ${varSku}`, productCode: '', variantCode: mf.value });
             }
             synced++;
           }

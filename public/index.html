@@ -1132,7 +1132,7 @@
                   : l.status === 'not_found' ? 'log-error'
                   : l.status === 'error'     ? 'log-error'
                   : 'log-ok';
-        const label = l.sku ? l.sku : '(product)';
+        const label = l.type === 'product' ? `(product) ${l.sku}` : (l.sku || '(product)');
         return `<p class="${cls}">[${l.status.toUpperCase()}] ${label} — ${l.message}</p>`;
       }).join('');
   }
@@ -1141,7 +1141,7 @@
     if (!lastSyncLog.length) return;
     const headers = ['Type', 'SKU', 'Handle', 'Status', 'Message', 'Product Code', 'Variant Code'];
     const rows = lastSyncLog.map(l => [
-      l.sku ? 'Variant' : 'Product',
+      l.type === 'product' ? 'Product' : 'Variant',
       l.sku || '',
       `"${(l.handle || '').replace(/"/g, '""')}"`,
       l.status,
