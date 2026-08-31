@@ -112,7 +112,7 @@ const DELETE_PRODUCT_IMAGES_MUTATION = `
 const METAFIELDS_SET_MUTATION = `
   mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
     metafieldsSet(metafields: $metafields) {
-      metafields { id namespace key value ownerId }
+      metafields { id namespace key value }
       userErrors { field message code }
     }
   }
@@ -945,7 +945,9 @@ router.post('/sync-metafields', async (req, res) => {
             failed++;
           }
         } else {
-          for (const mf of result?.metafieldsSet?.metafields || []) {
+          // Iterate the input batch (not the response) — ownerId is not returned
+          // by metafieldsSet on Shopify API 2024-04, but we know it from what we sent.
+          for (const mf of batch) {
             const isProduct = mf.ownerId === product.id;
             const oldVal    = overwriteMap.get(mf.ownerId); // undefined = new, string = overwrite
 
