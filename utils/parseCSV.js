@@ -67,14 +67,21 @@ async function streamVariantSKUs(filePath) {
   return skus;
 }
 
+// Column names for the Shopify metafield export columns (synced by the sync tool)
+const COL_SHOPIFY_PRODUCT_CODE = 'Metafield: custom.product_code [single_line_text_field]';
+const COL_SHOPIFY_VARIANT_CODE = 'Variant Metafield: custom.variant_code [single_line_text_field]';
+
 // ── Shopify export → array of variant objects ─────────────────────────────────
 // Status is only populated on the first row of each product in standard CSV
 // exports. We track the last-seen status per handle so every variant row
 // inherits its product's status correctly.
+// product_code is also only on the first row per product — we carry it forward
+// the same way.
 async function streamShopifyVariants(filePath) {
-  const rows          = await getRows(filePath);
-  const variants      = [];
-  const statusByHandle = {}; // handle → last seen non-empty status
+  const rows            = await getRows(filePath);
+  const variants        = [];
+  const statusByHandle  = {}; // handle → last seen non-empty status
+  const prodCodeByHandle = {}; // handle → last seen non-empty product_code metafield
 
   for (const row of rows) {
     const handle = String(row['Handle'] || '').trim();
@@ -83,6 +90,11 @@ async function streamShopifyVariants(filePath) {
     // Capture status whenever the row has one (even if no SKU)
     const rowStatus = String(row['Status'] || '').trim();
     if (rowStatus) statusByHandle[handle] = rowStatus;
+
+    // Capture product_code whenever the row has one — it only appears on the
+    // first variant row of each product in the Shopify metafield export.
+    const rowProdCode = String(row[COL_SHOPIFY_PRODUCT_CODE] || '').trim();
+    if (rowProdCode) prodCodeByHandle[handle] = rowProdCode;
 
     const sku = String(row['Variant SKU'] || '').trim();
     if (!sku) continue; // skip image-only / header rows
@@ -99,6 +111,9 @@ async function streamShopifyVariants(filePath) {
       inventoryQty: String(row['Variant Inventory Qty'] || '').trim(),
       // Use the captured status; fall back to the handle's inherited status
       status:       rowStatus || statusByHandle[handle] || '',
+      // Codes already written to Shopify metafields — used as a fallback match signal
+      shopifyVariantCode: String(row[COL_SHOPIFY_VARIANT_CODE] || '').trim(),
+      shopifyProductCode: rowProdCode || prodCodeByHandle[handle] || '',
     });
   }
   return variants;
@@ -132,36 +147,55 @@ async function streamVariantAttrIds(filePath) {
 }
 
 // ── CFS Product feed → product code maps ─────────────────────────────────────
-// Returns { bySku: Map<shopifySku, code>, byProdId: Map<prodId, code> }
-// so compareVariants can look up the code regardless of which match path fired.
+// Returns {
+//   bySku:    Map<shopifySku, code>,      — used to set the metafield value
+//   byProdId: Map<prodId, code>,          — fallback by raw product ID
+//   byCode:   Map<productCode, status>,   — reverse lookup: code → 'active'|'inactive'
+// }
+// The `byCode` map enables "deep search" matching: if a Shopify variant's
+// already-synced product_code metafield matches a code in the CFS product feed,
+// we treat the product as matched (even if the SKU no longer appears in the feed).
 async function streamProductCodes(filePath) {
-  const rows   = await getRows(filePath);
-  const bySku   = new Map();
+  const rows    = await getRows(filePath);
+  const bySku    = new Map();
   const byProdId = new Map();
+  const byCode   = new Map(); // Product Code → 'active' | 'inactive'
   for (const row of rows) {
-    const sku  = String(row['Shopify SKU']  || '').trim();
-    const id   = String(row['Product Id']   || '').trim();
-    const code = String(row['Product Code'] || '').trim();
-    if (sku && code)  bySku.set(sku, code);
-    if (id  && code)  byProdId.set(id, code);
+    const sku    = String(row['Shopify SKU']  || '').trim();
+    const id     = String(row['Product Id']   || '').trim();
+    const code   = String(row['Product Code'] || '').trim();
+    const status = String(row['Status']       || '').trim().toLowerCase();
+    const normStatus = status === 'inactive' ? 'inactive' : 'active';
+    if (sku  && code) bySku.set(sku, code);
+    if (id   && code) byProdId.set(id, code);
+    if (code)         byCode.set(code, normStatus);
   }
-  return { bySku, byProdId };
+  return { bySku, byProdId, byCode };
 }
 
 // ── CFS Variant feed → variant code maps ─────────────────────────────────────
-// Returns { bySku: Map<shopifySku, code>, byAttrId: Map<iProAttrId, code> }
+// Returns {
+//   bySku:    Map<shopifySku, code>,    — used to set the metafield value
+//   byAttrId: Map<iProAttrId, code>,   — fallback by raw attr ID
+//   codeSet:  Set<varCode>,            — all var_code values that exist in CFS
+// }
+// The `codeSet` enables "deep search" matching: if a Shopify variant's
+// already-synced variant_code metafield is in codeSet, we know the CFS feed
+// still carries that product code and the variant is not orphaned.
 async function streamVariantCodes(filePath) {
   const rows    = await getRows(filePath);
   const bySku    = new Map();
   const byAttrId = new Map();
+  const codeSet  = new Set(); // all var_code values present in CFS variant feed
   for (const row of rows) {
     const sku    = String(row['Shopify SKU'] || '').trim();
     const attrId = String(row['iProAttrId']  || '').trim();
     const code   = String(row['var_code']    || '').trim();
     if (sku    && code) bySku.set(sku, code);
     if (attrId && code) byAttrId.set(attrId, code);
+    if (code)           codeSet.add(code);
   }
-  return { bySku, byAttrId };
+  return { bySku, byAttrId, codeSet };
 }
 
 // ── Legacy helpers (kept for compatibility) ───────────────────────────────────

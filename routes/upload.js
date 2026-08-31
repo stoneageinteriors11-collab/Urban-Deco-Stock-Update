@@ -77,14 +77,15 @@ router.post(
       console.log(`  ✓ ${cfsProductIds.size} raw CFS product IDs`);
 
       // 2. Product feed codes
-      const { bySku: productCodesBySku, byProdId: productCodesByProdId } = await streamProductCodes(productFeedPath);
-      console.log(`  ✓ ${productCodesBySku.size} product codes loaded`);
+      const { bySku: productCodesBySku, byProdId: productCodesByProdId, byCode: cfsProductCodeToStatus } = await streamProductCodes(productFeedPath);
+      console.log(`  ✓ ${productCodesBySku.size} product codes loaded (${cfsProductCodeToStatus.size} unique Product Codes for deep-search)`);
 
       // 3. Variant feed (optional)
       let validVariantSKUs    = new Set();
       let cfsVariantAttrIds   = new Set();
       let variantCodesBySku   = new Map();
       let variantCodesByAttrId = new Map();
+      let cfsVarCodeSet        = new Set();
       if (variantFeedPath) {
         console.log('▶ Streaming CFS variant feed…');
         validVariantSKUs  = await streamVariantSKUs(variantFeedPath);
@@ -92,7 +93,8 @@ router.post(
         const vc = await streamVariantCodes(variantFeedPath);
         variantCodesBySku    = vc.bySku;
         variantCodesByAttrId = vc.byAttrId;
-        console.log(`  ✓ ${validVariantSKUs.size} variant SKUs, ${cfsVariantAttrIds.size} variant attr IDs, ${variantCodesBySku.size} variant codes`);
+        cfsVarCodeSet        = vc.codeSet;
+        console.log(`  ✓ ${validVariantSKUs.size} variant SKUs, ${cfsVariantAttrIds.size} variant attr IDs, ${variantCodesBySku.size} variant codes, ${cfsVarCodeSet.size} unique var_codes for deep-search`);
       } else {
         console.log('ℹ  No variant feed uploaded — using product feed only');
       }
@@ -114,6 +116,7 @@ router.post(
       const { results, summary } = compareVariants(
         shopifyVariants, validVariantSKUs, validProductSKUs, cfsProductIds, cfsVariantAttrIds,
         productCodesBySku, productCodesByProdId, variantCodesBySku, variantCodesByAttrId,
+        cfsVarCodeSet, cfsProductCodeToStatus,
       );
       console.log(`  ✓ ${summary.orphaned} orphaned, ${summary.ok} OK, ${summary.draft} draft/archived, ${summary.cfsInactive} cfs-inactive, ${summary.cfsProduct} cfs-product`);
 

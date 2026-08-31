@@ -17,10 +17,16 @@
  *      {varId}  found in cfsVariantAttrIds (iProAttrId column) → matchStatus = 'ok'
  *        (variant exists in CFS under a different SKU mapping — treat as matched)
  *      {prodId} found in cfsProductIds (Product Id column) → matchStatus = 'cfs-product'
- *        (CFS has this as a product entry but no matching variant — needs review
- *         to determine whether to keep as main product or restructure)
+ *        (CFS has this as a product entry but no matching variant — needs review)
  *
- *   d) Not found in any check → matchStatus = 'orphaned'
+ *   d) Deep search — Shopify metafield codes already synced to the product:
+ *      Shopify variant_code (custom.variant_code) found in cfsVarCodeSet
+ *        → matchStatus = 'ok'   (CFS variant feed still carries this code)
+ *      Shopify product_code (custom.product_code) found in cfsProductCodeToStatus
+ *        AND CFS status is 'active'   → matchStatus = 'ok'
+ *        AND CFS status is 'inactive' → matchStatus = 'cfs-inactive'
+ *
+ *   e) Not found in any check → matchStatus = 'orphaned'
  *
  * matchStatus values:
  *   'ok'          — variant is accounted for in CFS feeds; no action needed
@@ -30,11 +36,17 @@
  *                   not as a CFS variant — surface for review/restructuring
  *   'orphaned'    — not found anywhere in CFS; candidate for deletion/drafting
  *
- * @param {Array}  shopifyVariants    — from streamShopifyVariants()
- * @param {Set}    validVariantSKUs   — from streamVariantSKUs()     (full UD-x-y format)
- * @param {Map}    validProductSKUs   — from streamProductSKUs()     (short UD-x → 'active'|'inactive')
- * @param {Set}    cfsProductIds      — from streamProductIds()      (raw Product Id values)
- * @param {Set}    cfsVariantAttrIds  — from streamVariantAttrIds()  (raw iProAttrId values)
+ * @param {Array}  shopifyVariants       — from streamShopifyVariants()
+ * @param {Set}    validVariantSKUs      — from streamVariantSKUs()       (full UD-x-y format)
+ * @param {Map}    validProductSKUs      — from streamProductSKUs()       (short UD-x → 'active'|'inactive')
+ * @param {Set}    cfsProductIds         — from streamProductIds()        (raw Product Id values)
+ * @param {Set}    cfsVariantAttrIds     — from streamVariantAttrIds()    (raw iProAttrId values)
+ * @param {Map}    productCodesBySku     — from streamProductCodes().bySku
+ * @param {Map}    productCodesByProdId  — from streamProductCodes().byProdId
+ * @param {Map}    variantCodesBySku     — from streamVariantCodes().bySku
+ * @param {Map}    variantCodesByAttrId  — from streamVariantCodes().byAttrId
+ * @param {Set}    cfsVarCodeSet         — from streamVariantCodes().codeSet  (all var_code values)
+ * @param {Map}    cfsProductCodeToStatus— from streamProductCodes().byCode   (Product Code → status)
  */
 
 // Extract {prodId} and {varId} from UD-{prodId}-{varId}
@@ -46,13 +58,15 @@ function parseSku(sku) {
 function compareVariants(
   shopifyVariants,
   validVariantSKUs,
-  validProductSKUs     = new Map(),
-  cfsProductIds        = new Set(),
-  cfsVariantAttrIds    = new Set(),
-  productCodesBySku    = new Map(),
-  productCodesByProdId = new Map(),
-  variantCodesBySku    = new Map(),
-  variantCodesByAttrId = new Map(),
+  validProductSKUs        = new Map(),
+  cfsProductIds           = new Set(),
+  cfsVariantAttrIds       = new Set(),
+  productCodesBySku       = new Map(),
+  productCodesByProdId    = new Map(),
+  variantCodesBySku       = new Map(),
+  variantCodesByAttrId    = new Map(),
+  cfsVarCodeSet           = new Set(), // all var_code values from CFS variant feed
+  cfsProductCodeToStatus  = new Map(), // CFS Product Code → 'active'|'inactive'
 ) {
   const results = [];
 
@@ -92,8 +106,21 @@ function compareVariants(
         // Surface separately so it can be reviewed / promoted to main product.
         matchStatus = 'cfs-product';
 
+      } else if (v.shopifyVariantCode && cfsVarCodeSet.has(v.shopifyVariantCode)) {
+        // Deep search — Step 2d(i):
+        // The variant's already-synced custom.variant_code exists in the CFS variant
+        // feed's var_code column. SKU may have changed but the product is still live.
+        matchStatus = 'ok';
+
+      } else if (v.shopifyProductCode && cfsProductCodeToStatus.has(v.shopifyProductCode)) {
+        // Deep search — Step 2d(ii):
+        // The product's already-synced custom.product_code exists in the CFS product
+        // feed's Product Code column. Honour the CFS status for this product.
+        const cfsStatus = cfsProductCodeToStatus.get(v.shopifyProductCode);
+        matchStatus = cfsStatus === 'inactive' ? 'cfs-inactive' : 'ok';
+
       } else {
-        // Not found anywhere → truly orphaned
+        // Not found anywhere — SKU, raw IDs, and both code lookups all missed
         matchStatus = 'orphaned';
       }
     }
