@@ -642,6 +642,17 @@ const SET_PRODUCT_ACTIVE_MUTATION = `
   }
 `;
 
+// Updates a single variant's SKU in-place (used when promoting the last variant
+// to a product-level SKU instead of deleting it).
+const UPDATE_VARIANT_SKU_MUTATION = `
+  mutation updateVariantSku($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+    productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+      productVariants { id sku }
+      userErrors { field message }
+    }
+  }
+`;
+
 router.post('/publish-products', async (req, res) => {
   const { variants = [], dryRun = true } = req.body;
 
@@ -718,7 +729,16 @@ router.post('/publish-products', async (req, res) => {
             const stayList = variantList(remainingVariants);
             msg = `Would delete variant "${label}" — ${remainingVariants.length} remaining: ${stayList} · ${product.title}`;
           } else {
-            msg = `Would delete variant "${label}" & set product to ${targetStatus} — last variant, no others remain · ${product.title}`;
+            // Shopify forbids deleting the last variant — keep the first and update its SKU
+            // to the product-level format; delete any others before it.
+            const isKeeper = variantsToDelete[0]?.sku === v.variantSku;
+            const { prodId } = parseSku(v.variantSku);
+            const newSku = prodId ? `UD-${prodId}` : v.variantSku;
+            if (isKeeper) {
+              msg = `Would update SKU "${v.variantSku}" → "${newSku}" & set product to ${targetStatus} (last variant — promoted to main product) · ${product.title}`;
+            } else {
+              msg = `Would delete variant "${label}" (cleanup before SKU promotion) · ${product.title}`;
+            }
           }
           log.push({ sku: v.variantSku, handle, status: 'dry_run', message: msg, productCode: v.productCode || '' });
         }
@@ -735,75 +755,112 @@ router.post('/publish-products', async (req, res) => {
         continue;
       }
 
-      // ── Live: Step 1 — delete the selected variant(s) ────────────────────
-      const variantIds   = variantsToDelete.map(v => v.id);
-      const deleteResult = await gql(client, DELETE_VARIANTS_MUTATION, {
-        productId: product.id,
-        variantsIds: variantIds,
-      });
-      const deleteErrors = deleteResult?.productVariantsBulkDelete?.userErrors || [];
-
-      if (deleteErrors.length) {
-        const errMsg = deleteErrors.map(e => e.message).join(', ');
-        for (const sku of affectedSKUs) {
-          log.push({ sku, handle, status: 'error', message: `Variant delete failed: ${errMsg}`, productCode: productCodeBySku.get(sku) || '' });
-          failed++;
-        }
-        await sleep(350);
-        continue;
-      }
-
-      deleted += variantIds.length;
-      console.log(`  ✓ Deleted ${variantIds.length} variant(s) from "${product.title}"`);
-
-      // ── Step 1b — delete orphaned images ─────────────────────────────────
       const allImages = product.images.edges.map(e => e.node);
-      const { imageIdsToDelete } = getOrphanedImageIds(allImages, variantsToDelete, remainingVariants);
-      await deleteOrphanedImages(client, product.id, imageIdsToDelete, log, handle);
 
-      // ── Step 2 — update product status only if no other variants remain ──
-      if (remainingVariants.length > 0) {
+      if (remainingVariants.length === 0) {
+        // ── All variants on this product are cfs-product matches ────────────
+        // Shopify forbids deleting the absolute last variant on a product.
+        // Strategy: keep the first variant and update its SKU to the product-level
+        // format (UD-{prodId}); delete all others; then set the product status.
+
+        const keepNode   = variantsToDelete[0];
+        const deleteRest = variantsToDelete.slice(1);
+        const { prodId } = parseSku(keepNode.sku);
+        const newSku     = prodId ? `UD-${prodId}` : keepNode.sku;
+
+        // Step A — delete all variants except the one we're keeping
+        if (deleteRest.length > 0) {
+          const delResult  = await gql(client, DELETE_VARIANTS_MUTATION, {
+            productId: product.id, variantsIds: deleteRest.map(v => v.id),
+          });
+          const delErrors  = delResult?.productVariantsBulkDelete?.userErrors || [];
+          if (delErrors.length) {
+            const errMsg = delErrors.map(e => e.message).join(', ');
+            for (const node of deleteRest) {
+              log.push({ sku: node.sku, handle, status: 'error', message: `Variant delete failed: ${errMsg}`, productCode: productCodeBySku.get(node.sku) || '' });
+              failed++;
+            }
+            await sleep(350);
+            continue;
+          }
+          deleted += deleteRest.length;
+          for (const node of deleteRest) {
+            log.push({ sku: node.sku, handle, status: 'deleted', message: `Deleted (cleanup before SKU promotion): ${product.title} / ${variantLabel(node)}`, productCode: productCodeBySku.get(node.sku) || '' });
+          }
+        }
+
+        // Step B — update the kept variant's SKU to the product-level format
+        const updateResult = await gql(client, UPDATE_VARIANT_SKU_MUTATION, {
+          productId: product.id,
+          variants: [{ id: keepNode.id, sku: newSku }],
+        });
+        const updateErrors = updateResult?.productVariantsBulkUpdate?.userErrors || [];
+        if (updateErrors.length) {
+          const errMsg = updateErrors.map(e => e.message).join(', ');
+          log.push({ sku: keepNode.sku, handle, status: 'error', message: `SKU update failed: ${errMsg}`, productCode: productCodeBySku.get(keepNode.sku) || '' });
+          failed++;
+        } else {
+          log.push({ sku: newSku, handle, status: 'updated', message: `SKU promoted: "${keepNode.sku}" → "${newSku}" on "${product.title}"`, productCode: productCodeBySku.get(keepNode.sku) || '' });
+          console.log(`  ✓ SKU promoted: "${keepNode.sku}" → "${newSku}"`);
+        }
+
+        // Step C — delete orphaned images (treating all original variants as deleted)
+        const { imageIdsToDelete } = getOrphanedImageIds(allImages, variantsToDelete, []);
+        await deleteOrphanedImages(client, product.id, imageIdsToDelete, log, handle);
+
+        // Step D — set product status
+        const statusMutation = targetStatus === 'ACTIVE' ? SET_PRODUCT_ACTIVE_MUTATION : SET_PRODUCT_DRAFT_MUTATION;
+        const statusResult   = await gql(client, statusMutation, { productId: product.id });
+        const statusErrors   = statusResult?.productUpdate?.userErrors || [];
+        if (statusErrors.length) {
+          const errMsg = statusErrors.map(e => e.message).join(', ');
+          log.push({ sku: newSku, handle, status: 'error', message: `Status update failed: ${errMsg}`, productCode: productCodeBySku.get(keepNode.sku) || '' });
+          failed++;
+        } else {
+          const verb      = targetStatus === 'ACTIVE' ? 'published' : 'drafted';
+          const cfsStatus = anyCfsInactive ? 'inactive' : 'active';
+          log.push({ sku: newSku, handle, status: verb, message: `Promoted to main product & set to ${targetStatus} (CFS: ${cfsStatus}): ${product.title}`, productCode: productCodeBySku.get(keepNode.sku) || '' });
+          if (targetStatus === 'ACTIVE') published++;
+          else drafted++;
+          console.log(`  ✓ "${product.title}" → ${targetStatus} as main product (CFS: ${cfsStatus})`);
+        }
+
+      } else {
+        // ── Some variants remain — delete the selected ones only ─────────────
+        const variantIds   = variantsToDelete.map(v => v.id);
+        const deleteResult = await gql(client, DELETE_VARIANTS_MUTATION, {
+          productId: product.id,
+          variantsIds: variantIds,
+        });
+        const deleteErrors = deleteResult?.productVariantsBulkDelete?.userErrors || [];
+
+        if (deleteErrors.length) {
+          const errMsg = deleteErrors.map(e => e.message).join(', ');
+          for (const sku of affectedSKUs) {
+            log.push({ sku, handle, status: 'error', message: `Variant delete failed: ${errMsg}`, productCode: productCodeBySku.get(sku) || '' });
+            failed++;
+          }
+          await sleep(350);
+          continue;
+        }
+
+        deleted += variantIds.length;
+        console.log(`  ✓ Deleted ${variantIds.length} variant(s) from "${product.title}"`);
+
+        // Delete orphaned images
+        const { imageIdsToDelete } = getOrphanedImageIds(allImages, variantsToDelete, remainingVariants);
+        await deleteOrphanedImages(client, product.id, imageIdsToDelete, log, handle);
+
         for (const v of variantsForProduct) {
           log.push({
             sku: v.variantSku,
             handle,
             status: 'deleted',
-            message: `Variant deleted; product status unchanged - ${remainingVariants.length} other variant(s) remain: ${product.title}`,
+            message: `Variant deleted; product status unchanged — ${remainingVariants.length} other variant(s) remain: ${product.title}`,
             productCode: v.productCode || '',
           });
         }
         console.log(`  ↷ Skipping status update for "${product.title}" — ${remainingVariants.length} variant(s) still present`);
-
-      } else {
-        const statusMutation = targetStatus === 'ACTIVE'
-          ? SET_PRODUCT_ACTIVE_MUTATION
-          : SET_PRODUCT_DRAFT_MUTATION;
-
-        const statusResult = await gql(client, statusMutation, { productId: product.id });
-        const statusErrors = statusResult?.productUpdate?.userErrors || [];
-
-        if (statusErrors.length) {
-          const errMsg = statusErrors.map(e => e.message).join(', ');
-          for (const sku of affectedSKUs) {
-            log.push({ sku, handle, status: 'error', message: `Status update failed: ${errMsg}`, productCode: productCodeBySku.get(sku) || '' });
-            failed++;
-          }
-        } else {
-          const verb      = targetStatus === 'ACTIVE' ? 'published' : 'drafted';
-          const cfsStatus = anyCfsInactive ? 'inactive' : 'active';
-          for (const v of variantsForProduct) {
-            log.push({
-              sku: v.variantSku,
-              handle,
-              status: verb,
-              message: `Variant deleted & product set to ${targetStatus} (CFS: ${cfsStatus}): ${product.title}`,
-              productCode: v.productCode || '',
-            });
-          }
-          if (targetStatus === 'ACTIVE') published++;
-          else drafted++;
-          console.log(`  ✓ Product "${product.title}" → ${targetStatus} (CFS was ${cfsStatus})`);
-        }
       }
 
       await sleep(350);
