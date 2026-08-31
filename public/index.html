@@ -241,10 +241,12 @@
       display: none; margin-top: 16px;
     }
     #log-panel p { margin: 3px 0; }
-    .log-deleted { color: var(--danger); }
-    .log-dry     { color: var(--warning); }
-    .log-error   { color: #f97316; }
-    .log-ok      { color: var(--success); }
+    .log-deleted   { color: var(--danger); }
+    .log-dry       { color: var(--warning); }
+    .log-error     { color: #f97316; }
+    .log-ok        { color: var(--success); }
+    .log-match     { color: var(--text-muted); }
+    .log-overwrite { color: #f59e0b; }
 
     /* ── Spinner ── */
     .spinner {
@@ -1102,16 +1104,24 @@
 
       lastSyncLog = data.log || [];
       showSyncLog(data.log, dryRun);
+      document.getElementById('btn-download-sync-log').classList.remove('hidden');
 
-      if (dryRun) {
-        document.getElementById('btn-download-sync-log').classList.remove('hidden');
-      }
-
+      const overwriteNote = data.overwriteCount > 0
+        ? `\n  ↳ ${data.newCount} new, ${data.overwriteCount} overwrites`
+        : data.newCount > 0 ? `\n  ↳ ${data.newCount} new` : '';
+      const dryRunConflictSummary = dryRun
+        ? (() => {
+            const ow = (data.log||[]).filter(l=>l.status==='overwrite').length;
+            const mt = (data.log||[]).filter(l=>l.status==='match').length;
+            const nw = (data.log||[]).filter(l=>l.status==='dry_run').length;
+            return `\nWould write: ${nw} new, ${ow} overwrites\nAlready matching: ${mt} (would skip)`;
+          })()
+        : '';
       alert(
-        `Done!\n` +
-        `Metafields synced: ${data.synced}\n` +
-        `Failed: ${data.failed}\n` +
-        `Dry run: ${dryRun}`
+        `Done! ${dryRun ? '(DRY RUN)' : ''}\n` +
+        (dryRun
+          ? dryRunConflictSummary
+          : `Metafields written: ${data.synced}${overwriteNote}\nSkipped (already matched): ${data.skipped}\nFailed: ${data.failed}`)
       );
     } catch(e) {
       alert('Error: ' + e.message);
@@ -1129,6 +1139,8 @@
       log.map(l => {
         const cls = l.status === 'synced'    ? 'log-ok'
                   : l.status === 'dry_run'   ? 'log-dry'
+                  : l.status === 'match'     ? 'log-match'
+                  : l.status === 'overwrite' ? 'log-overwrite'
                   : l.status === 'not_found' ? 'log-error'
                   : l.status === 'error'     ? 'log-error'
                   : 'log-ok';
