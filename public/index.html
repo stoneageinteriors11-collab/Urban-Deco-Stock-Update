@@ -1110,7 +1110,7 @@
         throw new Error(msg);
       }
 
-      // Read NDJSON stream line by line
+      // Read SSE stream (text/event-stream — each event is "data: JSON\n\n")
       const reader  = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer      = '';
@@ -1122,12 +1122,16 @@
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop(); // keep any incomplete trailing line
-        for (const line of lines) {
-          if (!line.trim()) continue;
+        // SSE events are separated by double newlines
+        const events = buffer.split('\n\n');
+        buffer = events.pop(); // keep any incomplete trailing event
+        for (const block of events) {
+          if (!block.trim()) continue;
+          // Find the "data: " line in this event block
+          const dataLine = block.split('\n').find(l => l.startsWith('data: '));
+          if (!dataLine) continue;
           let event;
-          try { event = JSON.parse(line); } catch(_) { continue; }
+          try { event = JSON.parse(dataLine.slice(6)); } catch(_) { continue; }
 
           if (event.type === 'progress') {
             lastProgress = event;

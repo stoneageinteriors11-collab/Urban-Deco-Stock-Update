@@ -807,14 +807,17 @@ router.post('/sync-metafields', async (req, res) => {
     return res.status(400).json({ error: err.message });
   }
 
-  // ── Stream NDJSON so long syncs don't hit proxy/Render timeouts ───────────
-  // Each line is a JSON object. The last line is { type:'done', ... } with the
-  // full log and counters. Intermediate lines are { type:'progress', ... }.
-  res.setHeader('Content-Type', 'application/x-ndjson');
+  // ── Stream as SSE (text/event-stream) ────────────────────────────────────
+  // nginx recognises this content-type and never buffers it, unlike NDJSON.
+  // Each event is:  data: <JSON>\n\n
+  // The last event carries { type:'done', ... } with the full log + counters.
+  res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('X-Accel-Buffering', 'no'); // tell nginx/Render not to buffer
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (res.socket) res.socket.setNoDelay(true); // disable Nagle buffering
   res.flushHeaders();
-  const send = obj => res.write(JSON.stringify(obj) + '\n');
+  const send = obj => res.write(`data: ${JSON.stringify(obj)}\n\n`);
 
   const log  = [];
   let synced         = 0;  // total metafields written (new + overwrites)
@@ -828,6 +831,19 @@ router.post('/sync-metafields', async (req, res) => {
   for (const v of toSync) {
     if (!byHandle.has(v.handle)) byHandle.set(v.handle, []);
     byHandle.get(v.handle).push(v);
+  }
+
+  // Count how many handles each variant SKU appears on in the input data.
+  // The CFS Froogle feed maps one variant to multiple Shopify colour-products
+  // (e.g. the same "qty-2" variant appears on both the black-velvet and grey-velvet
+  // products). On Shopify, each variant belongs to exactly one product, so when we
+  // try that SKU on the second handle it won't be there. Track this so we can count
+  // those as "skipped" (handled on the correct handle) instead of "failed".
+  const skuHandleCount = new Map();
+  for (const v of toSync) {
+    if (v.variantCode) {
+      skuHandleCount.set(v.variantSku, (skuHandleCount.get(v.variantSku) || 0) + 1);
+    }
   }
 
   let processed = 0;
@@ -853,7 +869,7 @@ router.post('/sync-metafields', async (req, res) => {
           log.push({ type: 'variant', sku: v.variantSku, handle, status: 'not_found', message: `Product "${handle}" not found on Shopify`, productCode: v.productCodeOnly || '', variantCode: v.variantCode || '' });
           failed++;
         }
-        await sleep(dryRun ? 50 : 350);
+        await sleep(dryRun ? 50 : 100);
         continue;
       }
 
@@ -882,8 +898,15 @@ router.post('/sync-metafields', async (req, res) => {
         }
         for (const v of variantsForProduct) {
           if (!v.variantCode) continue;
+          // If this SKU doesn't exist on this product but is on multiple handles,
+          // it belongs to a different Shopify colour-product — skip silently in dry-run too.
+          if (!gidBySku.has(v.variantSku) && (skuHandleCount.get(v.variantSku) || 1) > 1) continue;
           const existing = existingVarCode.get(v.variantSku) || '';
-          if (!existing) {
+          if (!gidBySku.has(v.variantSku)) {
+            log.push({ type: 'variant', sku: v.variantSku, handle, status: 'not_found',
+              message: `SKU ${v.variantSku} not found on Shopify product "${product.title}"`,
+              productCode: v.productCodeOnly || '', variantCode: v.variantCode });
+          } else if (!existing) {
             log.push({ type: 'variant', sku: v.variantSku, handle, status: 'dry_run',
               message: `Would set custom.variant_code = "${v.variantCode}" on variant ${v.variantSku} (new — no existing value)`,
               productCode: v.productCodeOnly || '', variantCode: v.variantCode });
@@ -923,10 +946,17 @@ router.post('/sync-metafields', async (req, res) => {
         if (!v.variantCode) continue;
         const varGid = gidBySku.get(v.variantSku);
         if (!varGid) {
-          log.push({ type: 'variant', sku: v.variantSku, handle, status: 'not_found',
-            message: `SKU ${v.variantSku} not found on Shopify product "${product.title}"`,
-            productCode: v.productCodeOnly || '', variantCode: v.variantCode });
-          failed++;
+          // If this SKU appears on multiple handles in the input data, it's a CFS ↔ Shopify
+          // colour-product mismatch: the variant lives on a different Shopify product and will
+          // be (or already was) set there. Count as skipped, not failed.
+          if ((skuHandleCount.get(v.variantSku) || 1) > 1) {
+            skipped++;
+          } else {
+            log.push({ type: 'variant', sku: v.variantSku, handle, status: 'not_found',
+              message: `SKU ${v.variantSku} not found on Shopify product "${product.title}"`,
+              productCode: v.productCodeOnly || '', variantCode: v.variantCode });
+            failed++;
+          }
           continue;
         }
         const existing = existingVarCode.get(v.variantSku) || '';
@@ -941,7 +971,7 @@ router.post('/sync-metafields', async (req, res) => {
         metafields.push({ ownerId: varGid, namespace: 'custom', key: 'variant_code', value: v.variantCode, type: 'single_line_text_field' });
       }
 
-      if (!metafields.length) { await sleep(350); continue; }
+      if (!metafields.length) { await sleep(80); continue; }
 
       // Batch: metafieldsSet accepts max 25 per call
       const BATCH_SIZE = 25;
@@ -984,7 +1014,7 @@ router.post('/sync-metafields', async (req, res) => {
         }
       }
 
-      await sleep(350);
+      await sleep(180);
 
     } catch (err) {
       const msg = err.response?.data?.errors || err.message;
