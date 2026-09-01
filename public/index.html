@@ -1450,16 +1450,17 @@
           if (evt.type === 'progress') {
             const pct = evt.totalProducts > 0 ? Math.round((evt.processed / evt.totalProducts) * 100) : 0;
             bar.style.width = pct + '%';
-            progressText.textContent = `${evt.processed} / ${evt.totalProducts} products — synced: ${evt.synced}, skipped: ${evt.skipped}, failed: ${evt.failed}`;
+            progressText.textContent = `${evt.processed} / ${evt.totalProducts} products — new: ${evt.newCount}, updated: ${evt.updatedCount}, skipped: ${evt.skipped}, failed: ${evt.failed}`;
             tiles.innerHTML = `
-              <div class="tile ok-count"><div class="num">${evt.synced}</div><div class="lbl">Synced</div></div>
-              <div class="tile"><div class="num">${evt.skipped}</div><div class="lbl">Skipped (no CFS data)</div></div>
+              <div class="tile ok-count"><div class="num">${evt.newCount}</div><div class="lbl">New</div></div>
+              <div class="tile cfs-product-count"><div class="num">${evt.updatedCount}</div><div class="lbl">Updated</div></div>
+              <div class="tile draft-count"><div class="num">${evt.skipped}</div><div class="lbl">Skipped (no change)</div></div>
               <div class="tile ${evt.failed > 0 ? 'orphaned' : ''}"><div class="num">${evt.failed}</div><div class="lbl">Failed</div></div>
             `;
           } else if (evt.type === 'done') {
             bar.style.width = '100%';
             progressText.textContent = evt.success
-              ? `Done — ${evt.synced} synced, ${evt.skipped} skipped, ${evt.failed} failed`
+              ? `Done — ${evt.newCount} new, ${evt.updatedCount} updated, ${evt.skipped} skipped (already correct), ${evt.failed} failed`
               : `Error: ${evt.error}`;
 
             lastStockSyncLog = evt.log || [];
@@ -1485,15 +1486,21 @@
     if (!log.length) { panel.innerHTML = ''; return; }
     const header = `<p style="color:var(--text-muted);margin-bottom:8px">${dryRun ? 'DRY RUN' : 'STOCK SYNC'} LOG — ${new Date().toLocaleTimeString()}</p>`;
     const rows = log.map(l => {
-      const cls = l.status === 'synced'   ? 'log-ok'
+      const cls = l.status === 'new'      ? 'log-ok'
+                : l.status === 'updated'  ? 'log-overwrite'
                 : l.status === 'dry_run'  ? 'log-dry'
                 : l.status === 'skipped'  ? 'log-match'
                 : l.status === 'warning'  ? 'log-overwrite'
                 : l.status === 'failed'   ? 'log-error'
                 : 'log-ok';
-      // Replace newlines in message with <br>
-      const msg = (l.message || '').replace(/\n/g, '<br>');
-      return `<p class="${cls}">[${l.status.toUpperCase()}] ${l.sku || '-'} — ${msg}</p>`;
+      // Split message into header line + detail lines
+      const lines  = (l.message || '').split('\n');
+      const first  = lines[0] || '';
+      const detail = lines.slice(1).join('\n');
+      const detailHtml = detail
+        ? `<span style="display:block;margin-top:3px;padding-left:12px;font-size:11px;opacity:.75;white-space:pre-wrap;font-family:monospace">${detail}</span>`
+        : '';
+      return `<p class="${cls}">[${l.status.toUpperCase()}] <strong>${l.sku || '-'}</strong> — ${first}${detailHtml}</p>`;
     }).join('');
     panel.style.display = 'block';
     panel.innerHTML = header + `<div class="log-panel">${rows}</div>`;
