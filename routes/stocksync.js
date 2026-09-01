@@ -328,9 +328,11 @@ router.post(
       let processed    = 0;
 
       // Warn once in the log if inventory sync is unavailable
-      if (!dryRun && !hasLocations) {
+      if (!hasLocations) {
         log.push({ sku: '-', handle: '-', status: 'warning',
-          message: 'Inventory sync skipped — Shopify access token is missing the read_locations scope. Metafields will still be synced.' });
+          message: 'Cannot read inventory quantities — the stored Shopify token is missing the read_locations scope.\n' +
+            'Fix: click "Disconnect", re-authenticate via "Connect to Shopify" (OAuth) to get a new token, then update SHOPIFY_ACCESS_TOKEN in Render.\n' +
+            'inoutstock metafields will still be synced; inventory qty changes will be skipped until the token is refreshed.' });
       }
 
       const byHandle = new Map();
@@ -369,17 +371,16 @@ router.post(
             continue;
           }
 
-          const { deliveryTime, inOutStock, onHand, dueDate } = prodStock;
+          const { deliveryTime, inOutStock, onHand } = prodStock;
           const isShortLead = deliveryTimeIsShort(deliveryTime);
-          const stockStatus = isShortLead ? (inOutStock || 'In Stock') : 'Out Of Stock';
+          const stockStatus = isShortLead ? 'In Stock' : 'Out Of Stock';
 
           // ── Fetch current Shopify values ───────────────────────────────────
-          // Dry run  → metafields-only query (no locationId, no read_locations needed)
-          // Live     → full query with inventory level (if locationId available)
-          //            falls back to metafields-only if locationId is null
+          // Always use the inventory query when we have a location so dry-run
+          // can show the real current qty. Falls back to metafields-only when
+          // locationId is null (read_locations scope missing).
           let productData;
           if (locationId) {
-            // Use the inventory query whenever we have a location — reads current qty for dry run diffs too
             productData = await gql(client, GET_PRODUCT_STOCK_QUERY, { handle, locationId });
           } else {
             productData = await gql(client, GET_PRODUCT_METAFIELDS_QUERY, { handle });
@@ -397,21 +398,15 @@ router.post(
           const shopifyNodes = product.variants.edges.map(e => e.node);
           const existingProd = metafieldMap(product.metafields);
 
-          // ── Product-level metafields ───────────────────────────────────────
+          // ── Product-level metafield: inoutstock only ───────────────────────
           const prodMfToWrite = [];
-          function checkProd(key, newValue) {
-            const cur     = existingProd[key] ?? null;
-            const changed = cur !== newValue;
-            if (changed) {
-              prodMfToWrite.push({
-                ownerId: product.id, namespace: 'custom', key,
-                value: newValue, type: 'single_line_text_field',
-              });
-            }
-            return { cur, newValue, changed, isNew: cur === null };
+          const prodInoutCur  = existingProd['inoutstock'] ?? null;
+          if (prodInoutCur !== stockStatus) {
+            prodMfToWrite.push({
+              ownerId: product.id, namespace: 'custom', key: 'inoutstock',
+              value: stockStatus, type: 'single_line_text_field',
+            });
           }
-          checkProd('inoutstock', stockStatus);
-          checkProd('duedate',    dueDate || '');
 
           if (!dryRun && prodMfToWrite.length > 0) {
             const mfResult = await gql(client, METAFIELDS_SET_MUTATION, { metafields: prodMfToWrite });
@@ -427,43 +422,49 @@ router.post(
             const varSku = shopNode.sku;
             if (!varSku) continue;
 
-            const { varId }   = parseSku(varSku);
-            const varStock    = varStockBySku.get(varSku)
-                             || (varId ? varStockByAttrId.get(varId) : null);
+            const { varId } = parseSku(varSku);
+            const varStock  = varStockBySku.get(varSku)
+                           || (varId ? varStockByAttrId.get(varId) : null);
 
-            const vNotifTitle   = varStock?.vNotificationTitle || '';
-            const vOnHand       = varStock ? varStock.vOnHand : onHand;
-            const vDueDate      = varStock?.vDueDate   || dueDate;
-            const vInOutStock   = varStock?.vinOutStock || stockStatus;
-            const effVariantQty = isShortLead ? Math.max(vOnHand, 2) : 0;
+            // Variant inoutstock: use variant feed value if present, else product-level
+            const vInOutStock = varStock?.vinOutStock || stockStatus;
 
             const existingVar = metafieldMap(shopNode.metafields);
-            // currentQty is null when using metafields-only query (dry run or no scope)
+            // currentQty is null when locationId is missing (no read_locations scope)
             const currentQty  = shopNode.inventoryItem?.inventoryLevel?.available ?? null;
             const invItemId   = shopNode.inventoryItem?.id;
 
-            // Compare metafields
-            const varMfToWrite = [];
-            function checkVar(key, newValue) {
-              const cur     = existingVar[key] ?? null;
-              const changed = cur !== newValue;
-              if (changed) {
-                varMfToWrite.push({
-                  ownerId: shopNode.id, namespace: 'custom', key,
-                  value: newValue, type: 'single_line_text_field',
-                });
-              }
-              return { cur, newValue, changed, isNew: cur === null };
+            // ── Inoutstock metafield ──────────────────────────────────────
+            const varMfToWrite  = [];
+            const vInoutCur     = existingVar['inoutstock'] ?? null;
+            const vInoutChanged = vInoutCur !== vInOutStock;
+            if (vInoutChanged) {
+              varMfToWrite.push({
+                ownerId: shopNode.id, namespace: 'custom', key: 'inoutstock',
+                value: vInOutStock, type: 'single_line_text_field',
+              });
             }
 
-            const v_inout = checkVar('inoutstock',         vInOutStock);
-            const v_due   = checkVar('duedate',            vDueDate || '');
-            const v_notif = vNotifTitle
-              ? checkVar('vnotificationtitle', vNotifTitle)
-              : { cur: existingVar['vnotificationtitle'] ?? null, newValue: null, changed: false, isNew: false };
-
-            // Inventory: only compare if we have the current qty (live + locationId)
-            const qtyChanged = locationId !== null && currentQty !== effVariantQty;
+            // ── Inventory quantity logic ──────────────────────────────────
+            // OUT OF STOCK: always set qty to 0
+            // IN STOCK:     set qty to 2 ONLY if currently 0; otherwise no change
+            let targetQty;
+            let shouldWriteInv;
+            if (!isShortLead) {
+              // OUT OF STOCK
+              targetQty    = 0;
+              shouldWriteInv = locationId !== null && currentQty !== 0;
+            } else {
+              // IN STOCK
+              if (currentQty === 0) {
+                targetQty    = 2;
+                shouldWriteInv = locationId !== null;
+              } else {
+                // qty > 0 or unknown — do not touch inventory
+                targetQty    = currentQty;
+                shouldWriteInv = false;
+              }
+            }
 
             // ── Live: write if changed ─────────────────────────────────────
             if (!dryRun) {
@@ -476,11 +477,11 @@ router.post(
                 }
               }
 
-              if (invItemId && locationId && qtyChanged) {
+              if (invItemId && locationId && shouldWriteInv) {
                 const invResult = await gql(client, INVENTORY_SET_MUTATION, {
                   input: {
                     name: 'available', reason: 'correction',
-                    quantities: [{ inventoryItemId: invItemId, locationId, quantity: effVariantQty }],
+                    quantities: [{ inventoryItemId: invItemId, locationId, quantity: targetQty }],
                   },
                 });
                 const invErrors = invResult?.inventorySetQuantities?.userErrors || [];
@@ -491,42 +492,44 @@ router.post(
               }
             }
 
-            // ── Build log entry with old→new diffs ─────────────────────────
-            const anyMfChanged  = v_inout.changed || v_due.changed || v_notif.changed;
-            const anyInvChanged = qtyChanged;
-            const anyChanged    = anyMfChanged || anyInvChanged;
+            // ── Build log entry ────────────────────────────────────────────
+            const anyChanged = vInoutChanged || shouldWriteInv;
 
             if (!anyChanged && currentQty !== null) {
-              // Everything matches (and we could verify qty) — truly skipped
+              // Everything already correct and we could verify — truly skipped
               skipped++;
               log.push({ sku: varSku, handle, status: 'skipped',
-                message: 'All values already correct — no changes needed\n' +
-                  `  inoutstock:  "${vInOutStock}" (no change)\n` +
-                  `  duedate:     "${vDueDate || ''}" (no change)\n` +
-                  `  qty:         ${currentQty} (no change)` +
-                  (vNotifTitle ? `\n  vnotificationtitle: "${vNotifTitle}" (no change)` : ''),
+                message: `All values already correct — no changes needed\n` +
+                  `  inoutstock: "${vInOutStock}" (no change)\n` +
+                  `  qty:        ${currentQty} (no change)`,
               });
             } else {
-              const isNew    = v_inout.isNew || v_due.isNew || (vNotifTitle && v_notif.isNew) || currentQty === null;
-              const status   = dryRun ? 'dry_run' : (isNew ? 'new' : 'updated');
-              const rule     = `${isShortLead ? 'IN STOCK' : 'OUT OF STOCK'} (delivery: "${deliveryTime || 'n/a'}")`;
+              const isNew  = vInoutCur === null || currentQty === null;
+              const status = dryRun ? 'dry_run' : (isNew ? 'new' : 'updated');
+              const rule   = `${isShortLead ? 'IN STOCK' : 'OUT OF STOCK'} (delivery: "${deliveryTime || 'n/a'}")`;
 
               const lines = [`Rule: ${rule}`];
-              lines.push(`  inoutstock:  ${diffStr(v_inout.cur, vInOutStock)}`);
-              lines.push(`  duedate:     ${diffStr(v_due.cur,   vDueDate || '')}`);
+              lines.push(`  inoutstock: ${diffStr(vInoutCur, vInOutStock)}`);
 
-              // Inventory line — show "(no read_locations scope)" when we can't compare
+              // Inventory line
               if (locationId !== null) {
-                lines.push(`  qty:         ${diffQty(currentQty, effVariantQty)}`);
+                if (!isShortLead) {
+                  // OUT OF STOCK: always targeting 0
+                  lines.push(`  qty:        ${diffQty(currentQty, 0)}`);
+                } else if (currentQty === 0) {
+                  // IN STOCK and was 0 → set to 2
+                  lines.push(`  qty:        0 → 2`);
+                } else {
+                  // IN STOCK and already > 0 → no change
+                  lines.push(`  qty:        ${currentQty} (no change — already > 0)`);
+                }
               } else {
-                lines.push(`  qty:         would set to ${effVariantQty} (current value unknown — read_locations scope missing)`);
-              }
-
-              // Only log vnotificationtitle when the CFS feed provides a value for this variant.
-              // If vNotifTitle is empty (variant not in feed / no variant feed uploaded),
-              // no write is queued so don't show a misleading "→ ''" line.
-              if (vNotifTitle) {
-                lines.push(`  vnotificationtitle: ${diffStr(v_notif.cur, vNotifTitle)}`);
+                // No read_locations scope
+                if (!isShortLead) {
+                  lines.push(`  qty:        would set to 0 — reconnect Shopify via OAuth to enable inventory reads`);
+                } else {
+                  lines.push(`  qty:        would set to 2 if currently 0 — reconnect Shopify via OAuth to enable inventory reads`);
+                }
               }
 
               if (!dryRun) {
