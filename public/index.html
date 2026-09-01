@@ -612,6 +612,9 @@
       <button class="btn btn-primary" id="btn-ss-run" onclick="runStockSync()">
         📊 Run Stock Sync
       </button>
+      <button class="btn btn-danger hidden" id="btn-ss-stop" onclick="stopStockSync()">
+        ⛔ Stop Sync
+      </button>
       <button class="btn btn-warning hidden" id="btn-ss-download-log" onclick="downloadStockSyncLog()">
         📋 Download Log
       </button>
@@ -1352,6 +1355,7 @@
   // ── Stock Sync (Step 5) ───────────────────────────────────────────────────
 
   let lastStockSyncLog = [];
+  let stockSyncReader  = null; // holds the active SSE reader so Stop can cancel it
 
   // Wire up the four stock sync upload zones
   ['product','variant','shop1','shop2'].forEach(id => {
@@ -1384,6 +1388,19 @@
     b.style.borderColor = on ? '' : 'rgba(239,68,68,.3)';
   }
 
+  function ssSetRunning(running) {
+    document.getElementById('btn-ss-run').disabled  = running;
+    document.getElementById('btn-ss-stop').classList.toggle('hidden', !running);
+    document.getElementById('ss-spinner').classList.toggle('hidden', !running);
+  }
+
+  async function stopStockSync() {
+    // Tell the server to stop after the current product
+    try { await fetch('/api/stock/cancel', { method: 'POST' }); } catch(_) {}
+    // Also cancel the client-side stream reader
+    if (stockSyncReader) { try { stockSyncReader.cancel(); } catch(_) {} }
+  }
+
   async function runStockSync() {
     const productFile = document.getElementById('ss-input-product').files[0];
     const shop1File   = document.getElementById('ss-input-shop1').files[0];
@@ -1395,12 +1412,8 @@
 
     const dryRun = document.getElementById('ss-dry-run-toggle').checked;
 
-    const btnRun  = document.getElementById('btn-ss-run');
-    const spinner = document.getElementById('ss-spinner');
-    const dlBtn   = document.getElementById('btn-ss-download-log');
-    btnRun.disabled = true;
-    spinner.classList.remove('hidden');
-    dlBtn.classList.add('hidden');
+    ssSetRunning(true);
+    document.getElementById('btn-ss-download-log').classList.add('hidden');
 
     const progressWrap = document.getElementById('ss-progress-wrap');
     const tiles        = document.getElementById('ss-tiles');
@@ -1413,6 +1426,7 @@
     progressText.textContent = 'Starting…';
     logPanel.innerHTML = '';
     lastStockSyncLog = [];
+    stockSyncReader  = null;
 
     const fd = new FormData();
     fd.append('productFeed',  productFile);
@@ -1431,12 +1445,14 @@
         throw new Error(err.error || `HTTP ${res.status}`);
       }
 
-      const reader  = res.body.getReader();
-      const decoder = new TextDecoder();
-      let   buf     = '';
+      stockSyncReader   = res.body.getReader();
+      const decoder     = new TextDecoder();
+      let   buf         = '';
 
       while (true) {
-        const { done, value } = await reader.read();
+        let chunk;
+        try { chunk = await stockSyncReader.read(); } catch(_) { break; } // cancelled
+        const { done, value } = chunk;
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         const parts = buf.split('\n\n');
@@ -1458,14 +1474,19 @@
               <div class="tile ${evt.failed > 0 ? 'orphaned' : ''}"><div class="num">${evt.failed}</div><div class="lbl">Failed</div></div>
             `;
           } else if (evt.type === 'done') {
-            bar.style.width = '100%';
-            progressText.textContent = evt.success
-              ? `Done — ${evt.newCount} new, ${evt.updatedCount} updated, ${evt.skipped} skipped (already correct), ${evt.failed} failed`
-              : `Error: ${evt.error}`;
+            if (evt.cancelled) {
+              bar.style.background = 'var(--warning)';
+              progressText.textContent = `⛔ Stopped at ${evt.newCount + evt.updatedCount + evt.skipped + evt.failed} products — new: ${evt.newCount}, updated: ${evt.updatedCount}, skipped: ${evt.skipped}, failed: ${evt.failed}`;
+            } else {
+              bar.style.width = '100%';
+              progressText.textContent = evt.success
+                ? `✅ Done — ${evt.newCount} new, ${evt.updatedCount} updated, ${evt.skipped} skipped, ${evt.failed} failed`
+                : `❌ Error: ${evt.error}`;
+            }
 
             lastStockSyncLog = evt.log || [];
             if (lastStockSyncLog.length) {
-              dlBtn.classList.remove('hidden');
+              document.getElementById('btn-ss-download-log').classList.remove('hidden');
               showStockSyncLog(lastStockSyncLog, dryRun);
             }
           }
@@ -1476,8 +1497,8 @@
       progressText.textContent = 'Error: ' + err.message;
       logPanel.innerHTML = `<p style="color:var(--danger);margin-top:8px">${err.message}</p>`;
     } finally {
-      btnRun.disabled = false;
-      spinner.classList.add('hidden');
+      ssSetRunning(false);
+      stockSyncReader = null;
     }
   }
 
