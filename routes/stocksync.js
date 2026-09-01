@@ -293,19 +293,26 @@ router.post(
       try {
         const locData = await gql(client, GET_LOCATIONS_QUERY);
         const locs    = (locData?.locations?.edges || []).map(e => e.node);
+        console.log(`  ℹ Locations found: ${locs.map(l => `"${l.name}"`).join(', ') || 'none'}`);
         const loc     = locs.find(l => /^shop$/i.test(l.name))
                      || locs.find(l => /shop|warehouse|main/i.test(l.name))
                      || locs[0];
         if (loc) {
           locationId   = loc.id;
           hasLocations = true;
-          console.log(`  ✓ Location: "${loc.name}" (${loc.id})`);
+          console.log(`  ✓ Using location: "${loc.name}" (${loc.id})`);
         } else {
-          console.warn('  ⚠ No locations found — inventory sync will be skipped');
+          console.warn('  ⚠ No locations returned by Shopify — inventory sync will be skipped');
+          log.push({ sku: '-', handle: '-', status: 'warning',
+            message: 'Shopify returned 0 locations — inventory sync skipped.' });
         }
       } catch (locErr) {
-        // read_locations scope missing — metafields will still sync, inventory skipped
-        console.warn('  ⚠ Cannot read locations (missing read_locations scope) — inventory sync will be skipped');
+        const locErrMsg = locErr.response?.data
+          ? JSON.stringify(locErr.response.data)
+          : locErr.message;
+        console.warn('  ⚠ Location fetch failed:', locErrMsg);
+        log.push({ sku: '-', handle: '-', status: 'warning',
+          message: `Location fetch error: ${locErrMsg}` });
       }
 
       // Reset cancel flag for this run
