@@ -8,7 +8,7 @@ const router = express.Router();
 function graphqlClient() {
   const store   = process.env.SHOPIFY_STORE;
   const token   = process.env.SHOPIFY_ACCESS_TOKEN || process.env.SHOPIFY_API_TOKEN;
-  const version = process.env.SHOPIFY_API_VERSION || '2024-04';
+  const version = process.env.SHOPIFY_API_VERSION || '2026-07';
 
   if (!store || !token) {
     throw new Error('Not connected to Shopify. Please click "Connect to Shopify" first.');
