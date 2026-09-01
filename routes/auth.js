@@ -91,6 +91,18 @@ router.get('/status', (req, res) => {
   res.json({ connected: !!token });
 });
 
+// ── GET /auth/token ───────────────────────────────────────────────────────────
+// Returns the current access token so it can be copied into Render env vars.
+// Only the first/last 4 chars are sent by default; pass ?reveal=1 to get full token.
+router.get('/token', (req, res) => {
+  const token = loadToken();
+  if (!token) return res.json({ token: null });
+  if (req.query.reveal === '1') return res.json({ token });
+  // Masked preview so user can confirm it loaded without exposing it in screenshots
+  const masked = token.slice(0, 4) + '•'.repeat(Math.max(0, token.length - 8)) + token.slice(-4);
+  res.json({ token: masked });
+});
+
 // ── GET /auth/disconnect ──────────────────────────────────────────────────────
 router.get('/disconnect', (req, res) => {
   try { fs.unlinkSync(TOKEN_FILE); } catch (_) {}
