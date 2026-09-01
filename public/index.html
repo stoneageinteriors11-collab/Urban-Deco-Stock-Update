@@ -384,14 +384,8 @@
           </span>
           <button class="btn btn-outline" style="font-size:12px;padding:7px 12px;" onclick="disconnect()">Disconnect</button>
           <button class="btn btn-outline" style="font-size:12px;padding:7px 12px;" onclick="testConnection()">Test Connection</button>
-          <button class="btn btn-outline" style="font-size:12px;padding:7px 12px;" onclick="copyTokenToRender()" title="Copy token to add to Render env vars so it survives deploys">📋 Copy Token for Render</button>
         </div>
         <div id="conn-status" class="hidden" style="font-size:13px;padding:6px 12px;border-radius:7px;"></div>
-        <div id="token-copy-msg" class="hidden" style="font-size:12px;margin-top:8px;padding:10px 14px;border-radius:8px;background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.3);color:var(--text);">
-          <strong>Add this to Render → Environment Variables:</strong><br>
-          <code style="display:block;margin-top:6px;font-size:11px;word-break:break-all;user-select:all;" id="token-display"></code>
-          <span style="font-size:11px;color:var(--text-muted);margin-top:6px;display:block;">Name: <code>SHOPIFY_ACCESS_TOKEN</code> — paste the value above. Once saved in Render, the token survives all future deploys.</span>
-        </div>
       </div>
 
       <div style="padding-bottom:2px;">
@@ -730,20 +724,7 @@
     document.getElementById('token-copy-msg').classList.add('hidden');
   }
 
-  async function copyTokenToRender() {
-    try {
-      const r = await fetch('/auth/token?reveal=1');
-      const d = await r.json();
-      if (!d.token) { alert('No token found — please connect to Shopify first.'); return; }
-      await navigator.clipboard.writeText(d.token);
-      document.getElementById('token-display').textContent = d.token;
-      document.getElementById('token-copy-msg').classList.remove('hidden');
-    } catch(e) {
-      alert('Could not copy token: ' + e.message);
-    }
-  }
-
-  async function testConnection() {
+async function testConnection() {
     const el = document.getElementById('conn-status');
     el.style.cssText = 'font-size:13px;padding:6px 12px;border-radius:7px;background:rgba(99,102,241,.12);color:var(--accent)';
     el.textContent = '⏳ Testing…'; el.classList.remove('hidden');
