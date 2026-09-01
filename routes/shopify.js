@@ -44,10 +44,22 @@ async function gql(client, query, variables = {}, attempt = 1) {
   } catch (err) {
     const status = err.response?.status;
 
-    // Retry on rate limit (429) or transient server errors (5xx)
-    if ((status === 429 || (status >= 500 && status < 600)) && attempt <= 3) {
+    // Network-level failures (socket hang up, ECONNRESET, ETIMEDOUT) have no
+    // err.response — detect them by error code or message.
+    const isNetworkError = !err.response && (
+      err.code === 'ECONNRESET' ||
+      err.code === 'ETIMEDOUT'  ||
+      err.code === 'ENOTFOUND'  ||
+      err.code === 'ECONNABORTED' ||
+      err.message?.includes('socket hang up') ||
+      err.message?.includes('timeout')
+    );
+
+    // Retry on rate limit (429), transient server errors (5xx), or network errors
+    if ((status === 429 || (status >= 500 && status < 600) || isNetworkError) && attempt <= 3) {
       const delay = attempt * 2000; // 2s, 4s, 6s
-      console.warn(`  ⚠ HTTP ${status} — retrying in ${delay}ms (attempt ${attempt}/3)`);
+      const reason = isNetworkError ? `network error (${err.code || err.message})` : `HTTP ${status}`;
+      console.warn(`  ⚠ ${reason} — retrying in ${delay}ms (attempt ${attempt}/3)`);
       await sleep(delay);
       return gql(client, query, variables, attempt + 1);
     }
