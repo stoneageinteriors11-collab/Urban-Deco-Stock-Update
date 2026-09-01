@@ -361,10 +361,16 @@ router.post(
 
         try {
           // ── CFS stock lookup ───────────────────────────────────────────────
-          const repSku     = variantsForProduct[0].variantSku;
-          const { prodId } = parseSku(repSku);
-          const prodStock  = prodStockBySku.get(repSku)
-                          || (prodId ? prodStockByProdId.get(prodId) : null);
+          const repSku          = variantsForProduct[0].variantSku;
+          const { prodId }      = parseSku(repSku);
+          // Reconstruct the product-level SKU (e.g. "UD-1243174" from "UD-1243174-17228984")
+          // The product froogle's Shopify SKU column uses this shorter form, not the full variant SKU.
+          const skuParts        = repSku.split('-');
+          const productLevelSku = skuParts.length >= 2 ? `${skuParts[0]}-${skuParts[1]}` : null;
+
+          const prodStock  = prodStockBySku.get(repSku)                                   // exact variant SKU (rarely matches)
+                          || (productLevelSku ? prodStockBySku.get(productLevelSku) : null) // product-level SKU e.g. UD-1243174
+                          || (prodId ? prodStockByProdId.get(prodId) : null);              // Product Id column fallback
 
           if (!prodStock) {
             skipped += variantsForProduct.length;
@@ -377,7 +383,7 @@ router.post(
 
           const { deliveryTime, inOutStock, onHand } = prodStock;
           const isShortLead = deliveryTimeIsShort(deliveryTime);
-          const stockStatus = isShortLead ? 'In Stock' : 'Out Of Stock';
+          const stockStatus = isShortLead ? 'IN STOCK' : 'OUT OF STOCK';
 
           // ── Fetch current Shopify values ───────────────────────────────────
           // Always use the inventory query when we have a location so dry-run
@@ -437,11 +443,11 @@ router.post(
             if (varStock) {
               vDeliveryTime = varStock.vNotificationTitle;
               vIsShortLead  = deliveryTimeIsShort(vDeliveryTime);
-              vInOutStock   = varStock.vinOutStock || (vIsShortLead ? 'In Stock' : 'Out Of Stock');
+              vInOutStock   = (varStock.vinOutStock || (vIsShortLead ? 'IN STOCK' : 'OUT OF STOCK')).toUpperCase();
             } else {
               vDeliveryTime = deliveryTime;
               vIsShortLead  = isShortLead;
-              vInOutStock   = stockStatus;
+              vInOutStock   = stockStatus; // already uppercased above
             }
 
             const existingVar = metafieldMap(shopNode.metafields);
