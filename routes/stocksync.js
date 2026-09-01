@@ -198,19 +198,19 @@ function deliveryTimeIsShort(deliveryTime) {
   return false;
 }
 
-// Format a metafield diff: "old" → "new", (not set) → "new", or "val" (no change)
+// Format a metafield diff in plain readable language
 function diffStr(oldVal, newVal) {
   const old = oldVal ?? null;
-  if (old === newVal) return `"${newVal}" (no change)`;
-  if (old === null || old === '') return `(not set) → "${newVal}"`;
-  return `"${old}" → "${newVal}"`;
+  if (old === newVal) return `currently "${newVal}" (no change)`;
+  if (old === null || old === '') return `not yet set — will set to "${newVal}"`;
+  return `currently "${old}" — will change to "${newVal}"`;
 }
 
-// Format an inventory diff. currentQty=null means unknown (no read_locations scope).
+// Format an inventory diff in plain readable language
 function diffQty(currentQty, newQty) {
-  if (currentQty === null) return `(unknown) → ${newQty}`;
-  if (currentQty === newQty) return `${newQty} (no change)`;
-  return `${currentQty} → ${newQty}`;
+  if (currentQty === null) return `current value unknown — will set to ${newQty}`;
+  if (currentQty === newQty) return `currently ${newQty} (no change)`;
+  return `currently ${currentQty} — will set to ${newQty}`;
 }
 
 // ── POST /api/stock/sync ──────────────────────────────────────────────────────
@@ -360,6 +360,17 @@ router.post(
         }
 
         try {
+          // ── Skip non-active Shopify products ───────────────────────────────
+          const productStatus = (variantsForProduct[0].status || '').toLowerCase();
+          if (productStatus && productStatus !== 'active') {
+            skipped += variantsForProduct.length;
+            log.push({ sku: variantsForProduct[0].variantSku, handle, status: 'skipped',
+              message: `Shopify product is ${productStatus.toUpperCase()} — skipped (only ACTIVE products are synced)` });
+            processed++;
+            send({ type: 'progress', processed, totalProducts, newCount, updatedCount, skipped, failed });
+            continue;
+          }
+
           // ── CFS stock lookup ───────────────────────────────────────────────
           const repSku          = variantsForProduct[0].variantSku;
           const { prodId }      = parseSku(repSku);
@@ -540,10 +551,10 @@ router.post(
                   lines.push(`  qty:        ${diffQty(currentQty, 0)}`);
                 } else if (currentQty === 0) {
                   // IN STOCK and was 0 → set to 2
-                  lines.push(`  qty:        0 → 2`);
+                  lines.push(`  qty:        currently 0 — will set to 2`);
                 } else {
                   // IN STOCK and already > 0 → no change
-                  lines.push(`  qty:        ${currentQty} (no change — already > 0)`);
+                  lines.push(`  qty:        currently ${currentQty} (no change — already > 0)`);
                 }
               } else {
                 // No read_locations scope

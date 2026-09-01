@@ -213,8 +213,8 @@ async function streamProductStockData(filePath) {
     const onHand       = parseInt(String(row['OnHand'] || '0')) || 0;
     const dueDate      = String(row['DueDate']       || '').trim();
     const data = { deliveryTime, inOutStock, onHand, dueDate };
-    if (sku)    bySku.set(sku, data);
-    if (prodId) byProdId.set(prodId, data);
+    if (sku    && !bySku.has(sku))       bySku.set(sku, data);       // first occurrence wins
+    if (prodId && !byProdId.has(prodId)) byProdId.set(prodId, data); // first occurrence wins
   }
   return { bySku, byProdId };
 }
