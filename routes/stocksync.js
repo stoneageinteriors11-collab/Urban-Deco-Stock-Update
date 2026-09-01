@@ -13,6 +13,15 @@ const {
 
 const router = express.Router();
 
+// ── Cancel flag ───────────────────────────────────────────────────────────────
+let cancelRequested = false;
+
+router.post('/cancel', (req, res) => {
+  cancelRequested = true;
+  console.log('  ⛔ Stock sync cancel requested');
+  res.json({ ok: true });
+});
+
 // ── File upload ───────────────────────────────────────────────────────────────
 const ALLOWED_EXTS = ['.csv', '.xlsx', '.xls'];
 
@@ -77,27 +86,24 @@ const GET_LOCATIONS_QUERY = `
 `;
 
 // ── Metafields-only query (no locationId required) ────────────────────────────
-// Used for dry run, and as fallback when read_locations scope is missing.
-// Returns current metafield values so we can show old→new diffs.
+// Uses connection format (compatible with all API versions).
+// Fetches the "custom" namespace; keys are filtered client-side.
 const GET_PRODUCT_METAFIELDS_QUERY = `
   query getProductMetafields($handle: String!) {
     productByHandle(handle: $handle) {
       id
       title
-      metafields(identifiers: [
-        { namespace: "custom", key: "inoutstock" },
-        { namespace: "custom", key: "duedate"    }
-      ]) { key value }
+      metafields(first: 20, namespace: "custom") {
+        edges { node { key value } }
+      }
       variants(first: 250) {
         edges {
           node {
             id
             sku
-            metafields(identifiers: [
-              { namespace: "custom", key: "inoutstock"         },
-              { namespace: "custom", key: "duedate"            },
-              { namespace: "custom", key: "vnotificationtitle" }
-            ]) { key value }
+            metafields(first: 20, namespace: "custom") {
+              edges { node { key value } }
+            }
             inventoryItem { id }
           }
         }
@@ -107,26 +113,22 @@ const GET_PRODUCT_METAFIELDS_QUERY = `
 `;
 
 // ── Full query including inventory level (requires read_locations scope) ───────
-// Used for live mode when locationId is available.
 const GET_PRODUCT_STOCK_QUERY = `
   query getProductStock($handle: String!, $locationId: ID!) {
     productByHandle(handle: $handle) {
       id
       title
-      metafields(identifiers: [
-        { namespace: "custom", key: "inoutstock" },
-        { namespace: "custom", key: "duedate"    }
-      ]) { key value }
+      metafields(first: 20, namespace: "custom") {
+        edges { node { key value } }
+      }
       variants(first: 250) {
         edges {
           node {
             id
             sku
-            metafields(identifiers: [
-              { namespace: "custom", key: "inoutstock"         },
-              { namespace: "custom", key: "duedate"            },
-              { namespace: "custom", key: "vnotificationtitle" }
-            ]) { key value }
+            metafields(first: 20, namespace: "custom") {
+              edges { node { key value } }
+            }
             inventoryItem {
               id
               inventoryLevel(locationId: $locationId) {
@@ -167,9 +169,13 @@ function parseSku(sku) {
   return { prodId: parts[1] || null, varId: parts[2] || null };
 }
 
+// Accepts connection format { edges: [{node}] } or plain array [{key,value}]
 function metafieldMap(metafields) {
   const map = {};
-  for (const mf of (metafields || [])) {
+  const nodes = metafields?.edges
+    ? metafields.edges.map(e => e.node)
+    : (metafields || []);
+  for (const mf of nodes) {
     if (mf && mf.key) map[mf.key] = mf.value ?? '';
   }
   return map;
@@ -188,7 +194,6 @@ function deliveryTimeIsShort(deliveryTime) {
   return false;
 }
 
-// Format a metafield diff: "old" → "new", (not set) → "new", or "val" (no change)
 function diffStr(oldVal, newVal) {
   const old = oldVal ?? null;
   if (old === newVal) return `"${newVal}" (no change)`;
@@ -196,7 +201,6 @@ function diffStr(oldVal, newVal) {
   return `"${old}" → "${newVal}"`;
 }
 
-// Format an inventory diff. currentQty=null means unknown (no read_locations scope).
 function diffQty(currentQty, newQty) {
   if (currentQty === null) return `(unknown) → ${newQty}`;
   if (currentQty === newQty) return `${newQty} (no change)`;
@@ -204,17 +208,6 @@ function diffQty(currentQty, newQty) {
 }
 
 // ── POST /api/stock/sync ──────────────────────────────────────────────────────
-//
-// Required uploads: productFeed, shopifyFile1
-// Optional uploads: variantFeed, shopifyFile2
-// Body field:       dryRun (boolean, default true)
-//
-// Dry run  — always reads current metafields (old→new diff in log); no writes.
-//            Inventory diff shown as "would set to X" if read_locations missing.
-// Live run — tries to get location for inventory comparison; if read_locations
-//            scope is missing, metafields are still synced, inventory is skipped
-//            with a one-time warning in the log.
-//
 router.post(
   '/sync',
   upload.fields([
@@ -269,9 +262,9 @@ router.post(
       }
       console.log(`  ✓ ${shopifyVariants.length} Shopify variants`);
 
-      // ── Shopify client (always needed) ────────────────────────────────────
+      // ── Shopify client ────────────────────────────────────────────────────
       let client     = null;
-      let locationId = null;      // null = read_locations scope missing
+      let locationId = null;
       let hasLocations = false;
       try {
         client = graphqlClient();
@@ -279,8 +272,6 @@ router.post(
         return res.status(400).json({ error: err.message });
       }
 
-      // Try to get location — optional, only strictly needed for inventory writes.
-      // Dry run skips this entirely to avoid the permission error.
       if (!dryRun) {
         try {
           const locData = await gql(client, GET_LOCATIONS_QUERY);
@@ -296,10 +287,12 @@ router.post(
             console.warn('  ⚠ No locations found — inventory sync will be skipped');
           }
         } catch (locErr) {
-          // read_locations scope missing — metafields will still sync, inventory skipped
           console.warn('  ⚠ Cannot read locations (missing read_locations scope) — inventory sync will be skipped');
         }
       }
+
+      // Reset cancel flag for this run
+      cancelRequested = false;
 
       // ── SSE setup ─────────────────────────────────────────────────────────
       res.setHeader('Content-Type', 'text/event-stream');
@@ -317,10 +310,9 @@ router.post(
       let failed       = 0;
       let processed    = 0;
 
-      // Warn once in the log if inventory sync is unavailable
       if (!dryRun && !hasLocations) {
         log.push({ sku: '-', handle: '-', status: 'warning',
-          message: 'Inventory sync skipped — Shopify access token is missing the read_locations scope. Metafields will still be synced.' });
+          message: 'Inventory sync skipped — missing read_locations scope. Metafields will still be synced.' });
       }
 
       const byHandle = new Map();
@@ -331,11 +323,19 @@ router.post(
       const totalProducts = byHandle.size;
       console.log(`▶ Processing ${shopifyVariants.length} variants across ${totalProducts} products (dryRun=${dryRun}, inventory=${hasLocations ? 'yes' : 'no'})`);
 
-      try { // outer try
+      try {
 
       for (const [handle, variantsForProduct] of byHandle) {
+        // ── Cancel check ──────────────────────────────────────────────────────
+        if (cancelRequested) {
+          console.log(`  ⛔ Sync cancelled at product ${processed + 1}/${totalProducts}`);
+          send({ type: 'done', success: true, cancelled: true, dryRun,
+            newCount, updatedCount, skipped, failed, total: shopifyVariants.length, log });
+          res.end();
+          return;
+        }
+
         try {
-          // ── CFS stock lookup ───────────────────────────────────────────────
           const repSku     = variantsForProduct[0].variantSku;
           const { prodId } = parseSku(repSku);
           const prodStock  = prodStockBySku.get(repSku)
@@ -354,10 +354,6 @@ router.post(
           const isShortLead = deliveryTimeIsShort(deliveryTime);
           const stockStatus = isShortLead ? (inOutStock || 'In Stock') : 'Out Of Stock';
 
-          // ── Fetch current Shopify values ───────────────────────────────────
-          // Dry run  → metafields-only query (no locationId, no read_locations needed)
-          // Live     → full query with inventory level (if locationId available)
-          //            falls back to metafields-only if locationId is null
           let productData;
           if (!dryRun && locationId) {
             productData = await gql(client, GET_PRODUCT_STOCK_QUERY, { handle, locationId });
@@ -377,7 +373,6 @@ router.post(
           const shopifyNodes = product.variants.edges.map(e => e.node);
           const existingProd = metafieldMap(product.metafields);
 
-          // ── Product-level metafields ───────────────────────────────────────
           const prodMfToWrite = [];
           function checkProd(key, newValue) {
             const cur     = existingProd[key] ?? null;
@@ -402,27 +397,24 @@ router.post(
             }
           }
 
-          // ── Per-variant ────────────────────────────────────────────────────
           for (const shopNode of shopifyNodes) {
             const varSku = shopNode.sku;
             if (!varSku) continue;
 
-            const { varId }   = parseSku(varSku);
-            const varStock    = varStockBySku.get(varSku)
-                             || (varId ? varStockByAttrId.get(varId) : null);
+            const { varId } = parseSku(varSku);
+            const varStock  = varStockBySku.get(varSku)
+                           || (varId ? varStockByAttrId.get(varId) : null);
 
-            const vNotifTitle   = varStock?.vNotificationTitle || '';
-            const vOnHand       = varStock ? varStock.vOnHand : onHand;
-            const vDueDate      = varStock?.vDueDate   || dueDate;
-            const vInOutStock   = varStock?.vinOutStock || stockStatus;
+            const vNotifTitle = varStock?.vNotificationTitle || '';
+            const vOnHand     = varStock ? varStock.vOnHand : onHand;
+            const vDueDate    = varStock?.vDueDate   || dueDate;
+            const vInOutStock = varStock?.vinOutStock || stockStatus;
             const effVariantQty = isShortLead ? Math.max(vOnHand, 2) : 0;
 
             const existingVar = metafieldMap(shopNode.metafields);
-            // currentQty is null when using metafields-only query (dry run or no scope)
             const currentQty  = shopNode.inventoryItem?.inventoryLevel?.available ?? null;
             const invItemId   = shopNode.inventoryItem?.id;
 
-            // Compare metafields
             const varMfToWrite = [];
             function checkVar(key, newValue) {
               const cur     = existingVar[key] ?? null;
@@ -442,10 +434,8 @@ router.post(
               ? checkVar('vnotificationtitle', vNotifTitle)
               : { cur: existingVar['vnotificationtitle'] ?? null, newValue: null, changed: false, isNew: false };
 
-            // Inventory: only compare if we have the current qty (live + locationId)
             const qtyChanged = locationId !== null && currentQty !== effVariantQty;
 
-            // ── Live: write if changed ─────────────────────────────────────
             if (!dryRun) {
               if (varMfToWrite.length > 0) {
                 const vmfResult = await gql(client, METAFIELDS_SET_MUTATION, { metafields: varMfToWrite });
@@ -471,13 +461,10 @@ router.post(
               }
             }
 
-            // ── Build log entry with old→new diffs ─────────────────────────
             const anyMfChanged  = v_inout.changed || v_due.changed || v_notif.changed;
-            const anyInvChanged = qtyChanged;
-            const anyChanged    = anyMfChanged || anyInvChanged;
+            const anyChanged    = anyMfChanged || qtyChanged;
 
             if (!anyChanged && currentQty !== null) {
-              // Everything matches (and we could verify qty) — truly skipped
               skipped++;
               log.push({ sku: varSku, handle, status: 'skipped',
                 message: 'All values already correct — no changes needed\n' +
@@ -487,31 +474,23 @@ router.post(
                   (vNotifTitle ? `\n  vnotificationtitle: "${vNotifTitle}" (no change)` : ''),
               });
             } else {
-              const isNew    = v_inout.isNew || v_due.isNew || (vNotifTitle && v_notif.isNew) || currentQty === null;
-              const status   = dryRun ? 'dry_run' : (isNew ? 'new' : 'updated');
-              const rule     = `${isShortLead ? 'IN STOCK' : 'OUT OF STOCK'} (delivery: "${deliveryTime || 'n/a'}")`;
+              const isNew  = v_inout.isNew || v_due.isNew || (vNotifTitle && v_notif.isNew) || currentQty === null;
+              const status = dryRun ? 'dry_run' : (isNew ? 'new' : 'updated');
+              const rule   = `${isShortLead ? 'IN STOCK' : 'OUT OF STOCK'} (delivery: "${deliveryTime || 'n/a'}")`;
 
               const lines = [`Rule: ${rule}`];
               lines.push(`  inoutstock:  ${diffStr(v_inout.cur, vInOutStock)}`);
               lines.push(`  duedate:     ${diffStr(v_due.cur,   vDueDate || '')}`);
-
-              // Inventory line — show "(no read_locations scope)" when we can't compare
               if (locationId !== null) {
                 lines.push(`  qty:         ${diffQty(currentQty, effVariantQty)}`);
               } else {
                 lines.push(`  qty:         would set to ${effVariantQty} (current value unknown — read_locations scope missing)`);
               }
-
               if (vNotifTitle || v_notif.cur) {
                 lines.push(`  vnotificationtitle: ${diffStr(v_notif.cur, vNotifTitle || '')}`);
               }
 
-              if (!dryRun) {
-                if (isNew) newCount++; else updatedCount++;
-              } else {
-                if (isNew) newCount++; else updatedCount++;
-              }
-
+              if (isNew) newCount++; else updatedCount++;
               log.push({ sku: varSku, handle, status, message: lines.join('\n') });
             }
           }
