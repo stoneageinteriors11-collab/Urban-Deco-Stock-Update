@@ -430,8 +430,19 @@ router.post(
             const varStock  = varStockBySku.get(varSku)
                            || (varId ? varStockByAttrId.get(varId) : null);
 
-            // Variant inoutstock: use variant feed value if present, else product-level
-            const vInOutStock = varStock?.vinOutStock || stockStatus;
+            // Strict feed separation:
+            // - Variant found in variant feed → use ONLY variant feed values
+            // - Variant not in variant feed   → fall back to product feed values
+            let vDeliveryTime, vIsShortLead, vInOutStock;
+            if (varStock) {
+              vDeliveryTime = varStock.vNotificationTitle;
+              vIsShortLead  = deliveryTimeIsShort(vDeliveryTime);
+              vInOutStock   = varStock.vinOutStock || (vIsShortLead ? 'In Stock' : 'Out Of Stock');
+            } else {
+              vDeliveryTime = deliveryTime;
+              vIsShortLead  = isShortLead;
+              vInOutStock   = stockStatus;
+            }
 
             const existingVar = metafieldMap(shopNode.metafields);
             // currentQty is null when locationId is missing (no read_locations scope)
@@ -455,7 +466,7 @@ router.post(
             // IN STOCK:     set qty to 2 ONLY if currently 0; otherwise no change
             let targetQty;
             let shouldWriteInv;
-            if (!isShortLead) {
+            if (!vIsShortLead) {
               // OUT OF STOCK
               targetQty    = 0;
               shouldWriteInv = locationId !== null && currentQty !== 0;
@@ -511,14 +522,14 @@ router.post(
             } else {
               const isNew  = vInoutCur === null || currentQty === null;
               const status = dryRun ? 'dry_run' : (isNew ? 'new' : 'updated');
-              const rule   = `${isShortLead ? 'IN STOCK' : 'OUT OF STOCK'} (delivery: "${deliveryTime || 'n/a'}")`;
+              const rule   = `${vIsShortLead ? 'IN STOCK' : 'OUT OF STOCK'} (delivery: "${vDeliveryTime || 'n/a'}")`;
 
               const lines = [`Rule: ${rule}`];
               lines.push(`  inoutstock: ${diffStr(vInoutCur, vInOutStock)}`);
 
               // Inventory line
               if (locationId !== null) {
-                if (!isShortLead) {
+                if (!vIsShortLead) {
                   // OUT OF STOCK: always targeting 0
                   lines.push(`  qty:        ${diffQty(currentQty, 0)}`);
                 } else if (currentQty === 0) {
@@ -530,7 +541,7 @@ router.post(
                 }
               } else {
                 // No read_locations scope
-                if (!isShortLead) {
+                if (!vIsShortLead) {
                   lines.push(`  qty:        would set to 0 — reconnect Shopify via OAuth to enable inventory reads`);
                 } else {
                   lines.push(`  qty:        would set to 2 if currently 0 — reconnect Shopify via OAuth to enable inventory reads`);
