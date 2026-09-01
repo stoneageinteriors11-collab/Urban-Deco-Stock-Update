@@ -280,8 +280,8 @@ router.post(
       console.log(`  ✓ ${shopifyVariants.length} Shopify variants`);
 
       // ── Shopify client (always needed) ────────────────────────────────────
-      let client     = null;
-      let locationId = null;      // null = read_locations scope missing
+      let client       = null;
+      let locationId   = null;   // null = read_locations scope missing
       let hasLocations = false;
       try {
         client = graphqlClient();
@@ -303,16 +303,12 @@ router.post(
           console.log(`  ✓ Using location: "${loc.name}" (${loc.id})`);
         } else {
           console.warn('  ⚠ No locations returned by Shopify — inventory sync will be skipped');
-          log.push({ sku: '-', handle: '-', status: 'warning',
-            message: 'Shopify returned 0 locations — inventory sync skipped.' });
         }
       } catch (locErr) {
         const locErrMsg = locErr.response?.data
           ? JSON.stringify(locErr.response.data)
           : locErr.message;
         console.warn('  ⚠ Location fetch failed:', locErrMsg);
-        log.push({ sku: '-', handle: '-', status: 'warning',
-          message: `Location fetch error: ${locErrMsg}` });
       }
 
       // Reset cancel flag for this run
@@ -337,9 +333,10 @@ router.post(
       // Warn once in the log if inventory sync is unavailable
       if (!hasLocations) {
         log.push({ sku: '-', handle: '-', status: 'warning',
-          message: 'Cannot read inventory quantities — the stored Shopify token is missing the read_locations scope.\n' +
-            'Fix: click "Disconnect", re-authenticate via "Connect to Shopify" (OAuth) to get a new token, then update SHOPIFY_ACCESS_TOKEN in Render.\n' +
-            'inoutstock metafields will still be synced; inventory qty changes will be skipped until the token is refreshed.' });
+          message: 'Inventory sync disabled — token missing read_locations scope.\n' +
+            'Fix: in Shopify Admin go to Settings → Apps & sales channels → find this app → Uninstall it.\n' +
+            'Then click "Connect to Shopify" here to re-authorise and get a fresh token with the correct scopes.\n' +
+            'inoutstock metafields will still be synced this run.' });
       }
 
       const byHandle = new Map();
