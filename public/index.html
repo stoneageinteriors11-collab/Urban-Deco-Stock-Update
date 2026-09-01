@@ -378,7 +378,7 @@
           </a>
           <span style="font-size:13px;color:var(--text-muted)">You'll be redirected to Shopify to approve — then brought back here automatically.</span>
         </div>
-        <div id="shopify-connected" class="hidden" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+        <div id="shopify-connected" class="hidden" style="align-items:center;gap:12px;flex-wrap:wrap;display:flex;">
           <span style="background:rgba(34,197,94,.12);color:var(--success);padding:7px 14px;border-radius:8px;font-size:13px;font-weight:600;">
             ✅ Connected to Shopify
           </span>
@@ -720,8 +720,8 @@
   }
 
   function setConnected(yes) {
-    document.getElementById('shopify-disconnected').style.display = yes ? 'none' : 'flex';
-    document.getElementById('shopify-connected').style.display    = yes ? 'flex' : 'none';
+    document.getElementById('shopify-disconnected').classList.toggle('hidden',  yes);
+    document.getElementById('shopify-connected').classList.toggle('hidden',    !yes);
   }
 
   async function disconnect() {
