@@ -198,6 +198,48 @@ async function streamVariantCodes(filePath) {
   return { bySku, byAttrId, codeSet };
 }
 
+// ── CFS Product feed → stock / delivery data ──────────────────────────────────
+// Returns { bySku: Map<shopifySku, data>, byProdId: Map<prodId, data> }
+// data = { deliveryTime, inOutStock, onHand, dueDate }
+async function streamProductStockData(filePath) {
+  const rows    = await getRows(filePath);
+  const bySku    = new Map();
+  const byProdId = new Map();
+  for (const row of rows) {
+    const sku          = String(row['Shopify SKU']   || '').trim();
+    const prodId       = String(row['Product Id']    || '').trim();
+    const deliveryTime = String(row['Delivery Time'] || '').trim();
+    const inOutStock   = String(row['inOutStock']    || '').trim();
+    const onHand       = parseInt(String(row['OnHand'] || '0')) || 0;
+    const dueDate      = String(row['DueDate']       || '').trim();
+    const data = { deliveryTime, inOutStock, onHand, dueDate };
+    if (sku)    bySku.set(sku, data);
+    if (prodId) byProdId.set(prodId, data);
+  }
+  return { bySku, byProdId };
+}
+
+// ── CFS Variant feed → variant stock data ─────────────────────────────────────
+// Returns { bySku: Map<shopifySku, data>, byAttrId: Map<iProAttrId, data> }
+// data = { vNotificationTitle, vOnHand, vDueDate, vinOutStock }
+async function streamVariantStockData(filePath) {
+  const rows    = await getRows(filePath);
+  const bySku    = new Map();
+  const byAttrId = new Map();
+  for (const row of rows) {
+    const sku                = String(row['Shopify SKU']        || '').trim();
+    const attrId             = String(row['iProAttrId']         || '').trim();
+    const vNotificationTitle = String(row['vNotificationTitle'] || '').trim();
+    const vOnHand            = parseInt(String(row['vOnHand']   || '0')) || 0;
+    const vDueDate           = String(row['vDueDate']           || '').trim();
+    const vinOutStock        = String(row['vinOutStock']        || '').trim();
+    const data = { vNotificationTitle, vOnHand, vDueDate, vinOutStock };
+    if (sku)    bySku.set(sku, data);
+    if (attrId) byAttrId.set(attrId, data);
+  }
+  return { bySku, byAttrId };
+}
+
 // ── Legacy helpers (kept for compatibility) ───────────────────────────────────
 function extractVariantSKUs(rows) {
   const skus = new Set();
@@ -238,6 +280,8 @@ module.exports = {
   streamVariantAttrIds,
   streamProductCodes,
   streamVariantCodes,
+  streamProductStockData,
+  streamVariantStockData,
   parseCSVFile,
   extractVariantSKUs,
   extractShopifyVariants,

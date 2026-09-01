@@ -15,6 +15,8 @@ const PORT = process.env.PORT || 3000;
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 
+const stockSyncRoutes  = require('./routes/stocksync'); 
+
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -28,6 +30,7 @@ loadToken();
 app.use('/auth', authRoutes);
 app.use('/api', uploadRoutes);
 app.use('/api/shopify', shopifyRoutes);
+app.use('/api/stock', stockSyncRoutes);
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));

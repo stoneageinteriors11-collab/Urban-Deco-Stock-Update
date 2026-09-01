@@ -527,6 +527,109 @@
     <div id="sync-log-panel" style="margin-top:16px;"></div>
   </div>
 
+  <!-- ── Step 5: Stock Sync ── -->
+  <div class="card" id="stock-sync-card">
+    <div class="card-title">Step 5 — Stock Sync (Delivery Time, Inventory &amp; Metafields)</div>
+
+    <p style="font-size:13px;color:var(--text-muted);margin-bottom:18px;line-height:1.6">
+      Upload CFS product &amp; variant feeds to sync <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.inoutstock</code>,
+      <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.duedate</code>,
+      <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.vnotificationtitle</code> and inventory quantity.
+      Rule: delivery ≤ 6 weeks → <strong style="color:var(--success)">IN STOCK</strong> (qty min 2);
+      &gt; 6 weeks → <strong style="color:var(--danger)">OUT OF STOCK</strong> (qty 0).
+    </p>
+
+    <div class="upload-group">
+      <div class="upload-group-label">CFS Feeds</div>
+      <div class="grid-2">
+        <!-- CFS Product Feed -->
+        <div>
+          <div class="upload-zone-label">
+            CFS Product Feed <span class="req">*</span>
+          </div>
+          <div class="upload-zone" id="ss-zone-product">
+            <input type="file" id="ss-input-product" accept=".csv,.xlsx,.xls" />
+            <div class="icon">📦</div>
+            <div class="label" id="ss-slot-product">Drop file or click to browse</div>
+            <div class="sub">Delivery Time · inOutStock · OnHand · DueDate</div>
+            <div class="file-name hidden" id="ss-fname-product"></div>
+          </div>
+        </div>
+        <!-- CFS Variant Feed -->
+        <div>
+          <div class="upload-zone-label">
+            CFS Variant Feed <span class="opt">(optional)</span>
+          </div>
+          <div class="upload-zone" id="ss-zone-variant">
+            <input type="file" id="ss-input-variant" accept=".csv,.xlsx,.xls" />
+            <div class="icon">🔀</div>
+            <div class="label" id="ss-slot-variant">Drop file or click to browse</div>
+            <div class="sub">vNotificationTitle · vOnHand · vDueDate · vinOutStock</div>
+            <div class="file-name hidden" id="ss-fname-variant"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="upload-group">
+      <div class="upload-group-label">Shopify Exports</div>
+      <div class="grid-2">
+        <div>
+          <div class="upload-zone-label">Shopify Export 1 <span class="req">*</span></div>
+          <div class="upload-zone" id="ss-zone-shop1">
+            <input type="file" id="ss-input-shop1" accept=".csv,.xlsx,.xls" />
+            <div class="icon">🛍</div>
+            <div class="label" id="ss-slot-shop1">Drop file or click to browse</div>
+            <div class="sub">Standard Shopify product export with variant SKUs</div>
+            <div class="file-name hidden" id="ss-fname-shop1"></div>
+          </div>
+        </div>
+        <div>
+          <div class="upload-zone-label">Shopify Export 2 <span class="opt">(optional)</span></div>
+          <div class="upload-zone" id="ss-zone-shop2">
+            <input type="file" id="ss-input-shop2" accept=".csv,.xlsx,.xls" />
+            <div class="icon">🛍</div>
+            <div class="label" id="ss-slot-shop2">Drop file or click to browse</div>
+            <div class="sub">Second export file if products are split</div>
+            <div class="file-name hidden" id="ss-fname-shop2"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="padding-bottom:2px;margin-bottom:16px;">
+      <div class="toggle-wrap">
+        <label class="toggle">
+          <input type="checkbox" id="ss-dry-run-toggle" checked onchange="updateSsDryBadge()" />
+          <span class="slider"></span>
+        </label>
+        <label for="ss-dry-run-toggle" style="cursor:pointer">Dry Run</label>
+        <span class="dry-badge" id="ss-dry-badge">ON — No changes will be made</span>
+      </div>
+    </div>
+
+    <div class="actions-row">
+      <button class="btn btn-primary" id="btn-ss-run" onclick="runStockSync()">
+        📊 Run Stock Sync
+      </button>
+      <button class="btn btn-warning hidden" id="btn-ss-download-log" onclick="downloadStockSyncLog()">
+        📋 Download Log
+      </button>
+      <span id="ss-spinner" class="hidden"><span class="spinner"></span> Syncing stock…</span>
+    </div>
+
+    <!-- Progress + summary tiles -->
+    <div id="ss-progress-wrap" class="hidden" style="margin-top:18px;">
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px;" id="ss-tiles"></div>
+      <div id="ss-progress-bar-wrap" style="background:var(--surface2);border-radius:6px;height:6px;overflow:hidden;">
+        <div id="ss-progress-bar" style="height:100%;background:var(--accent);width:0%;transition:width .3s;"></div>
+      </div>
+      <p id="ss-progress-text" style="font-size:12px;color:var(--text-muted);margin-top:6px;"></p>
+    </div>
+
+    <div id="ss-log-panel" style="margin-top:16px;"></div>
+  </div>
+
 </div>
 
 <script>
@@ -1243,6 +1346,173 @@
     const a    = document.createElement('a');
     a.href     = URL.createObjectURL(blob);
     a.download = `dry-run-log-${Date.now()}.csv`;
+    a.click();
+  }
+
+  // ── Stock Sync (Step 5) ───────────────────────────────────────────────────
+
+  let lastStockSyncLog = [];
+
+  // Wire up the four stock sync upload zones
+  ['product','variant','shop1','shop2'].forEach(id => {
+    const input = document.getElementById(`ss-input-${id}`);
+    const zone  = document.getElementById(`ss-zone-${id}`);
+    const fname = document.getElementById(`ss-fname-${id}`);
+    if (!input) return;
+
+    function markFile(file) {
+      zone.classList.add('has-file');
+      fname.textContent = file.name;
+      fname.classList.remove('hidden');
+    }
+    input.addEventListener('change', () => { if (input.files[0]) markFile(input.files[0]); });
+    zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+    zone.addEventListener('drop', e => {
+      e.preventDefault(); zone.classList.remove('drag-over');
+      const file = e.dataTransfer.files[0];
+      if (file) { const dt = new DataTransfer(); dt.items.add(file); input.files = dt.files; markFile(file); }
+    });
+  });
+
+  function updateSsDryBadge() {
+    const on = document.getElementById('ss-dry-run-toggle').checked;
+    const b  = document.getElementById('ss-dry-badge');
+    b.textContent = on ? 'ON — No changes will be made' : 'OFF — Will update Shopify';
+    b.style.background = on ? '' : 'rgba(239,68,68,.12)';
+    b.style.color      = on ? '' : 'var(--danger)';
+    b.style.borderColor = on ? '' : 'rgba(239,68,68,.3)';
+  }
+
+  async function runStockSync() {
+    const productFile = document.getElementById('ss-input-product').files[0];
+    const shop1File   = document.getElementById('ss-input-shop1').files[0];
+
+    if (!productFile || !shop1File) {
+      alert('Please upload the CFS product feed and at least one Shopify export file.');
+      return;
+    }
+
+    const dryRun = document.getElementById('ss-dry-run-toggle').checked;
+
+    const btnRun  = document.getElementById('btn-ss-run');
+    const spinner = document.getElementById('ss-spinner');
+    const dlBtn   = document.getElementById('btn-ss-download-log');
+    btnRun.disabled = true;
+    spinner.classList.remove('hidden');
+    dlBtn.classList.add('hidden');
+
+    const progressWrap = document.getElementById('ss-progress-wrap');
+    const tiles        = document.getElementById('ss-tiles');
+    const bar          = document.getElementById('ss-progress-bar');
+    const progressText = document.getElementById('ss-progress-text');
+    const logPanel     = document.getElementById('ss-log-panel');
+    progressWrap.classList.remove('hidden');
+    tiles.innerHTML = '';
+    bar.style.width = '0%';
+    progressText.textContent = 'Starting…';
+    logPanel.innerHTML = '';
+    lastStockSyncLog = [];
+
+    const fd = new FormData();
+    fd.append('productFeed',  productFile);
+    fd.append('shopifyFile1', shop1File);
+    fd.append('dryRun',       dryRun ? 'true' : 'false');
+    const variantFile = document.getElementById('ss-input-variant').files[0];
+    const shop2File   = document.getElementById('ss-input-shop2').files[0];
+    if (variantFile) fd.append('variantFeed',  variantFile);
+    if (shop2File)   fd.append('shopifyFile2', shop2File);
+
+    try {
+      const res = await fetch('/api/stock/sync', { method: 'POST', body: fd });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder();
+      let   buf     = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split('\n\n');
+        buf = parts.pop();
+        for (const part of parts) {
+          const line = part.startsWith('data: ') ? part.slice(6) : part;
+          if (!line.trim()) continue;
+          let evt;
+          try { evt = JSON.parse(line); } catch { continue; }
+
+          if (evt.type === 'progress') {
+            const pct = evt.totalProducts > 0 ? Math.round((evt.processed / evt.totalProducts) * 100) : 0;
+            bar.style.width = pct + '%';
+            progressText.textContent = `${evt.processed} / ${evt.totalProducts} products — synced: ${evt.synced}, skipped: ${evt.skipped}, failed: ${evt.failed}`;
+            tiles.innerHTML = `
+              <div class="tile ok-count"><div class="num">${evt.synced}</div><div class="lbl">Synced</div></div>
+              <div class="tile"><div class="num">${evt.skipped}</div><div class="lbl">Skipped (no CFS data)</div></div>
+              <div class="tile ${evt.failed > 0 ? 'orphaned' : ''}"><div class="num">${evt.failed}</div><div class="lbl">Failed</div></div>
+            `;
+          } else if (evt.type === 'done') {
+            bar.style.width = '100%';
+            progressText.textContent = evt.success
+              ? `Done — ${evt.synced} synced, ${evt.skipped} skipped, ${evt.failed} failed`
+              : `Error: ${evt.error}`;
+
+            lastStockSyncLog = evt.log || [];
+            if (lastStockSyncLog.length) {
+              dlBtn.classList.remove('hidden');
+              showStockSyncLog(lastStockSyncLog, dryRun);
+            }
+          }
+        }
+      }
+
+    } catch (err) {
+      progressText.textContent = 'Error: ' + err.message;
+      logPanel.innerHTML = `<p style="color:var(--danger);margin-top:8px">${err.message}</p>`;
+    } finally {
+      btnRun.disabled = false;
+      spinner.classList.add('hidden');
+    }
+  }
+
+  function showStockSyncLog(log, dryRun) {
+    const panel = document.getElementById('ss-log-panel');
+    if (!log.length) { panel.innerHTML = ''; return; }
+    const header = `<p style="color:var(--text-muted);margin-bottom:8px">${dryRun ? 'DRY RUN' : 'STOCK SYNC'} LOG — ${new Date().toLocaleTimeString()}</p>`;
+    const rows = log.map(l => {
+      const cls = l.status === 'synced'   ? 'log-ok'
+                : l.status === 'dry_run'  ? 'log-dry'
+                : l.status === 'skipped'  ? 'log-match'
+                : l.status === 'warning'  ? 'log-overwrite'
+                : l.status === 'failed'   ? 'log-error'
+                : 'log-ok';
+      // Replace newlines in message with <br>
+      const msg = (l.message || '').replace(/\n/g, '<br>');
+      return `<p class="${cls}">[${l.status.toUpperCase()}] ${l.sku || '-'} — ${msg}</p>`;
+    }).join('');
+    panel.style.display = 'block';
+    panel.innerHTML = header + `<div class="log-panel">${rows}</div>`;
+  }
+
+  function downloadStockSyncLog() {
+    if (!lastStockSyncLog.length) return;
+    const headers = ['SKU', 'Handle', 'Status', 'Message'];
+    const rows = lastStockSyncLog.map(l => [
+      l.sku || '',
+      `"${(l.handle || '').replace(/"/g, '""')}"`,
+      l.status,
+      `"${(l.message || '').replace(/\n/g, ' ').replace(/"/g, '""')}"`,
+    ]);
+    const csv  = [headers, ...rows].map(r => r.join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const a    = document.createElement('a');
+    a.href     = URL.createObjectURL(blob);
+    a.download = `stock-sync-log-${Date.now()}.csv`;
     a.click();
   }
 
