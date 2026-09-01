@@ -135,7 +135,7 @@ const GET_PRODUCT_STOCK_QUERY = `
             inventoryItem {
               id
               inventoryLevel(locationId: $locationId) {
-                available
+                quantities(names: ["available"]) { name quantity }
               }
             }
           }
@@ -435,7 +435,8 @@ router.post(
 
             const existingVar = metafieldMap(shopNode.metafields);
             // currentQty is null when locationId is missing (no read_locations scope)
-            const currentQty  = shopNode.inventoryItem?.inventoryLevel?.available ?? null;
+            const invLevel    = shopNode.inventoryItem?.inventoryLevel;
+            const currentQty  = invLevel?.quantities?.find(q => q.name === 'available')?.quantity ?? null;
             const invItemId   = shopNode.inventoryItem?.id;
 
             // ── Inoutstock metafield ──────────────────────────────────────
