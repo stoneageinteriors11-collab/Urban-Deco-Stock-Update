@@ -970,8 +970,6 @@ router.post('/sync-metafields', async (req, res) => {
   }, 20000);
   const endStream = () => { clearInterval(keepAliveTimer); res.end(); };
 
-  // log buffer — flushed to the client on every progress event so the server
-  // never holds thousands of entries in memory waiting for the final 'done'.
   const log  = [];
   let synced         = 0;  // total metafields written (new + overwrites)
   let newCount       = 0;  // written because no prior value existed
@@ -1178,12 +1176,9 @@ router.post('/sync-metafields', async (req, res) => {
       failed++;
     }
 
-    // Progress heartbeat after every unique SKU.
-    // Include any new log entries accumulated since the last heartbeat so the
-    // client can display them immediately and we can clear the server-side buffer.
+    // Progress heartbeat after every unique SKU
     processed++;
-    const recentLog = log.splice(0); // drain the buffer — client accumulates
-    send({ type: 'progress', processed, totalProducts, synced, newCount, overwriteCount, skipped, failed, recentLog });
+    send({ type: 'progress', processed, totalProducts, synced, newCount, overwriteCount, skipped, failed });
 
     if (processed % 50 === 0 || processed === totalProducts) {
       console.log(`  … ${processed}/${totalProducts} SKUs done — synced: ${synced}, skipped: ${skipped}, failed: ${failed}`);
