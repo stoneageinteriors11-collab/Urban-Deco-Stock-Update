@@ -960,6 +960,18 @@ router.post('/sync-metafields', async (req, res) => {
   res.flushHeaders();
   const send = obj => res.write(`data: ${JSON.stringify(obj)}\n\n`);
 
+  // ── Keepalive ping every 20s ──────────────────────────────────────────────
+  // Render's nginx proxy_read_timeout is ~60s. If a Shopify API call (including
+  // retries) takes longer, nginx closes the connection silently — no Render log
+  // entry, just the client seeing the stream end. Sending an SSE comment every
+  // 20s keeps the connection alive regardless of how slow any single call is.
+  const keepAliveTimer = setInterval(() => {
+    if (!res.writableEnded) res.write(': keepalive\n\n');
+  }, 20000);
+  const endStream = () => { clearInterval(keepAliveTimer); res.end(); };
+
+  // log buffer — flushed to the client on every progress event so the server
+  // never holds thousands of entries in memory waiting for the final 'done'.
   const log  = [];
   let synced         = 0;  // total metafields written (new + overwrites)
   let newCount       = 0;  // written because no prior value existed
@@ -1166,9 +1178,12 @@ router.post('/sync-metafields', async (req, res) => {
       failed++;
     }
 
-    // Progress heartbeat after every unique SKU
+    // Progress heartbeat after every unique SKU.
+    // Include any new log entries accumulated since the last heartbeat so the
+    // client can display them immediately and we can clear the server-side buffer.
     processed++;
-    send({ type: 'progress', processed, totalProducts, synced, newCount, overwriteCount, skipped, failed });
+    const recentLog = log.splice(0); // drain the buffer — client accumulates
+    send({ type: 'progress', processed, totalProducts, synced, newCount, overwriteCount, skipped, failed, recentLog });
 
     if (processed % 50 === 0 || processed === totalProducts) {
       console.log(`  … ${processed}/${totalProducts} SKUs done — synced: ${synced}, skipped: ${skipped}, failed: ${failed}`);
@@ -1182,13 +1197,14 @@ router.post('/sync-metafields', async (req, res) => {
     console.error(`  ✗ Unexpected outer error at SKU ${processed}/${totalProducts}:`, outerErr.message, outerErr.stack);
     send({ type: 'done', success: false, error: `Server error at SKU ${processed}/${totalProducts}: ${outerErr.message}`,
       dryRun, synced, newCount, overwriteCount, skipped, failed, total: toSync.length, log });
-    res.end();
+    endStream();
     return;
   }
 
   console.log(`  ✓ Done — synced: ${synced} (new: ${newCount}, overwrites: ${overwriteCount}), skipped: ${skipped}, failed: ${failed}`);
+  // log[] here only contains entries from the very last SKU (already drained by recentLog above)
   send({ type: 'done', success: true, dryRun, synced, newCount, overwriteCount, skipped, failed, total: toSync.length, log });
-  res.end();
+  endStream();
 });
 
 

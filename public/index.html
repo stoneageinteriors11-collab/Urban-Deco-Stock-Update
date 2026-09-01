@@ -1221,8 +1221,9 @@ async function testConnection() {
       const reader  = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer      = '';
-      let finalData   = null;
-      let lastProgress = null;
+      let finalData      = null;
+      let lastProgress   = null;
+      let accumulatedLog = [];   // built from recentLog in each progress event
       const progressEl = () => document.getElementById('sync-progress');
 
       while (true) {
@@ -1242,6 +1243,11 @@ async function testConnection() {
 
           if (event.type === 'progress') {
             lastProgress = event;
+            // Accumulate streamed log entries — server drains its buffer each tick
+            // so we never wait for a giant 'done' payload to see the full log.
+            if (Array.isArray(event.recentLog)) {
+              accumulatedLog.push(...event.recentLog);
+            }
             const p = progressEl();
             if (p) p.textContent =
               `${event.processed}/${event.totalProducts} products — ` +
@@ -1261,8 +1267,10 @@ async function testConnection() {
       }
       if (!finalData.success) throw new Error(finalData.error || 'Unknown server error');
 
-      lastSyncLog = finalData.log || [];
-      showSyncLog(finalData.log, dryRun);
+      // Merge any stragglers from the final 'done' event with the accumulated log
+      const fullLog = [...accumulatedLog, ...(finalData.log || [])];
+      lastSyncLog = fullLog;
+      showSyncLog(fullLog, dryRun);
       document.getElementById('btn-download-sync-log').classList.remove('hidden');
 
       const data = finalData;
