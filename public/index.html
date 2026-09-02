@@ -241,6 +241,14 @@
       display: none; margin-top: 16px;
     }
     #log-panel p { margin: 3px 0; }
+    /* Shared dark terminal log box — used by Steps 3, 4, 5 */
+    .log-box {
+      background: #0a0c12; border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px;
+      max-height: 300px; overflow-y: auto; font-family: monospace; font-size: 12px;
+      margin-top: 16px;
+    }
+    .log-box p { margin: 3px 0; }
     .log-deleted   { color: var(--danger); }
     .log-dry       { color: var(--warning); }
     .log-error     { color: #f97316; }
@@ -1172,7 +1180,9 @@ async function testConnection() {
     document.getElementById('btn-sync').disabled = true;
     document.getElementById('sync-spinner').classList.remove('hidden');
     document.getElementById('btn-download-sync-log').classList.add('hidden');
-    document.getElementById('sync-log-panel').style.display = 'none';
+    const slp = document.getElementById('sync-log-panel');
+    slp.classList.remove('log-box');
+    slp.innerHTML = '';
 
     try {
       const res = await fetch('/api/shopify/sync-metafields-from-api', {
@@ -1279,7 +1289,7 @@ async function testConnection() {
 
   function showSyncLog(log, dryRun) {
     const panel = document.getElementById('sync-log-panel');
-    panel.style.display = 'block';
+    panel.classList.add('log-box');
     panel.innerHTML =
       `<p style="color:var(--text-muted);margin-bottom:8px">${dryRun ? 'DRY RUN SYNC LOG' : 'SYNC LOG'} — ${new Date().toLocaleTimeString()}</p>` +
       log.map(l => {
@@ -1486,7 +1496,8 @@ async function testConnection() {
 
   function showStockSyncLog(log, dryRun) {
     const panel = document.getElementById('ss-log-panel');
-    if (!log.length) { panel.innerHTML = ''; return; }
+    if (!log.length) { panel.classList.remove('log-box'); panel.innerHTML = ''; return; }
+    panel.classList.add('log-box');
     const header = `<p style="color:var(--text-muted);margin-bottom:8px">${dryRun ? 'DRY RUN' : 'STOCK SYNC'} LOG — ${new Date().toLocaleTimeString()}</p>`;
     const rows = log.map(l => {
       const cls = l.status === 'new'      ? 'log-ok'
@@ -1501,12 +1512,11 @@ async function testConnection() {
       const first  = lines[0] || '';
       const detail = lines.slice(1).join('\n');
       const detailHtml = detail
-        ? `<span style="display:block;margin-top:3px;padding-left:12px;font-size:11px;opacity:.75;white-space:pre-wrap;font-family:monospace">${detail}</span>`
+        ? `<span style="display:block;margin-top:3px;padding-left:12px;font-size:11px;opacity:.75;white-space:pre-wrap;">${detail}</span>`
         : '';
       return `<p class="${cls}">[${l.status.toUpperCase()}] <strong>${l.sku || '-'}</strong> — ${first}${detailHtml}</p>`;
     }).join('');
-    panel.style.display = 'block';
-    panel.innerHTML = header + `<div class="log-panel">${rows}</div>`;
+    panel.innerHTML = header + rows;
   }
 
   function downloadStockSyncLog() {
