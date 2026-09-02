@@ -5,11 +5,8 @@ const fs      = require('fs');
 const axios   = require('axios');
 require('dotenv').config();
 
-const {
-  streamShopifyVariants,
-  streamProductStockData,
-  streamVariantStockData,
-} = require('../utils/parseCSV');
+const { streamShopifyVariants } = require('../utils/parseCSV');
+const { fetchCfsProducts, buildStockData } = require('../utils/cfsApi');
 
 const router = express.Router();
 
@@ -215,9 +212,11 @@ function diffQty(currentQty, newQty) {
 
 // ── POST /api/stock/sync ──────────────────────────────────────────────────────
 //
-// Required uploads: productFeed, shopifyFile1
-// Optional uploads: variantFeed, shopifyFile2
+// Required uploads: shopifyFile1
+// Optional uploads: shopifyFile2
 // Body field:       dryRun (boolean, default true)
+//
+// CFS stock data is fetched directly from the CFS API — no file uploads needed.
 //
 // Dry run  — always reads current metafields (old→new diff in log); no writes.
 //            Inventory diff shown as "would set to X" if read_locations missing.
@@ -228,8 +227,6 @@ function diffQty(currentQty, newQty) {
 router.post(
   '/sync',
   upload.fields([
-    { name: 'productFeed',  maxCount: 1 },
-    { name: 'variantFeed',  maxCount: 1 },
     { name: 'shopifyFile1', maxCount: 1 },
     { name: 'shopifyFile2', maxCount: 1 },
   ]),
@@ -240,35 +237,25 @@ router.post(
       const files  = req.files || {};
       const dryRun = req.body?.dryRun !== 'false' && req.body?.dryRun !== false;
 
-      if (!files.productFeed || !files.shopifyFile1) {
+      if (!files.shopifyFile1) {
         return res.status(400).json({
-          error: 'Please upload the CFS product feed and at least one Shopify export file.',
+          error: 'Please upload at least one Shopify export file.',
         });
       }
 
-      const productFeedPath  = files.productFeed[0].path;
-      const variantFeedPath  = files.variantFeed?.[0]?.path || null;
       const shopifyFile1Path = files.shopifyFile1[0].path;
       const shopifyFile2Path = files.shopifyFile2?.[0]?.path || null;
 
-      uploadedPaths.push(productFeedPath, shopifyFile1Path);
-      if (variantFeedPath)  uploadedPaths.push(variantFeedPath);
+      uploadedPaths.push(shopifyFile1Path);
       if (shopifyFile2Path) uploadedPaths.push(shopifyFile2Path);
 
-      // ── Parse CFS feeds ───────────────────────────────────────────────────
-      console.log('▶ Stock sync — parsing feeds…');
-      const { bySku: prodStockBySku, byProdId: prodStockByProdId } =
-        await streamProductStockData(productFeedPath);
-      console.log(`  ✓ ${prodStockBySku.size} product stock records`);
-
-      let varStockBySku    = new Map();
-      let varStockByAttrId = new Map();
-      if (variantFeedPath) {
-        const vs = await streamVariantStockData(variantFeedPath);
-        varStockBySku    = vs.bySku;
-        varStockByAttrId = vs.byAttrId;
-        console.log(`  ✓ ${varStockBySku.size} variant stock records`);
-      }
+      // ── Fetch CFS stock data from API ─────────────────────────────────────
+      console.log('▶ Stock sync — fetching CFS data from API…');
+      const cfsProducts = await fetchCfsProducts();
+      const { prodStockBySku, prodStockByProdId, varStockBySku, varStockByAttrId } =
+        buildStockData(cfsProducts);
+      console.log(`  ✓ ${cfsProducts.length} products from CFS API`);
+      console.log(`  ✓ ${prodStockBySku.size} product stock records, ${varStockBySku.size} variant stock records`);
 
       // ── Parse Shopify exports ─────────────────────────────────────────────
       console.log('▶ Streaming Shopify export…');

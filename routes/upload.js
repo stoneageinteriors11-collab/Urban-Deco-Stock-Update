@@ -2,8 +2,9 @@ const express = require('express');
 const multer  = require('multer');
 const path    = require('path');
 const fs      = require('fs');
-const { streamProductSKUs, streamVariantSKUs, streamShopifyVariants, streamProductIds, streamVariantAttrIds, streamProductCodes, streamVariantCodes } = require('../utils/parseCSV');
-const { compareVariants } = require('../utils/matchVariants');
+const { streamShopifyVariants } = require('../utils/parseCSV');
+const { compareVariants }       = require('../utils/matchVariants');
+const { fetchCfsProducts, buildCompareData } = require('../utils/cfsApi');
 
 const router = express.Router();
 
@@ -29,18 +30,15 @@ function tryUnlink(filePath) {
 }
 
 // ── POST /api/compare ────────────────────────────────────────────────────────
-// Required:  productFeed, shopifyFile1
-// Optional:  variantFeed, shopifyFile2
+// Required uploads: shopifyFile1
+// Optional uploads: shopifyFile2
 //
-// Matching (two-step):
-//   1. Full SKU vs variant feed (exact)
-//   2. Product-ID portion vs product feed (fallback)
-//   Orphaned only if BOTH checks fail.
+// CFS product/variant data is now fetched directly from the CFS API —
+// no file uploads required for the CFS feeds.
+//
 router.post(
   '/compare',
   upload.fields([
-    { name: 'productFeed',  maxCount: 1 },
-    { name: 'variantFeed',  maxCount: 1 },
     { name: 'shopifyFile1', maxCount: 1 },
     { name: 'shopifyFile2', maxCount: 1 },
   ]),
@@ -50,56 +48,45 @@ router.post(
     try {
       const files = req.files || {};
 
-      if (!files.productFeed || !files.shopifyFile1) {
+      if (!files.shopifyFile1) {
         return res.status(400).json({
-          error: 'Please upload the CFS product feed and at least one Shopify export file.',
+          error: 'Please upload at least one Shopify export file.',
         });
       }
 
-      const productFeedPath  = files.productFeed[0].path;
-      const variantFeedPath  = files.variantFeed?.[0]?.path  || null;
       const shopifyFile1Path = files.shopifyFile1[0].path;
       const shopifyFile2Path = files.shopifyFile2?.[0]?.path || null;
 
-      uploadedPaths.push(productFeedPath, shopifyFile1Path);
-      if (variantFeedPath)  uploadedPaths.push(variantFeedPath);
+      uploadedPaths.push(shopifyFile1Path);
       if (shopifyFile2Path) uploadedPaths.push(shopifyFile2Path);
 
-      // 1. Product feed (required)
-      console.log('▶ Streaming CFS product feed…');
-      const validProductSKUs = await streamProductSKUs(productFeedPath);
+      // 1. Fetch CFS product/variant data from the API
+      console.log('▶ Fetching CFS product data from API…');
+      const cfsProducts = await fetchCfsProducts();
+      console.log(`  ✓ ${cfsProducts.length} products from CFS API`);
+
+      // 2. Build all comparison data structures from the API response
+      const {
+        validProductSKUs,
+        cfsProductIds,
+        validVariantSKUs,
+        cfsVariantAttrIds,
+        productCodesBySku,
+        productCodesByProdId,
+        cfsProductCodeToStatus,
+        variantCodesBySku,
+        variantCodesByAttrId,
+        cfsVarCodeSet,
+      } = buildCompareData(cfsProducts);
+
       const activeCount   = [...validProductSKUs.values()].filter(s => s === 'active').length;
       const inactiveCount = validProductSKUs.size - activeCount;
       console.log(`  ✓ ${validProductSKUs.size} product SKUs (${activeCount} active, ${inactiveCount} inactive)`);
-
-      // Also extract raw Product IDs for the all-variants-orphaned CFS presence check
-      const cfsProductIds = await streamProductIds(productFeedPath);
       console.log(`  ✓ ${cfsProductIds.size} raw CFS product IDs`);
+      console.log(`  ✓ ${productCodesBySku.size} product codes loaded`);
+      console.log(`  ✓ ${validVariantSKUs.size} variant SKUs, ${cfsVariantAttrIds.size} variant attr IDs`);
 
-      // 2. Product feed codes
-      const { bySku: productCodesBySku, byProdId: productCodesByProdId, byCode: cfsProductCodeToStatus } = await streamProductCodes(productFeedPath);
-      console.log(`  ✓ ${productCodesBySku.size} product codes loaded (${cfsProductCodeToStatus.size} unique Product Codes for deep-search)`);
-
-      // 3. Variant feed (optional)
-      let validVariantSKUs    = new Set();
-      let cfsVariantAttrIds   = new Set();
-      let variantCodesBySku   = new Map();
-      let variantCodesByAttrId = new Map();
-      let cfsVarCodeSet        = new Set();
-      if (variantFeedPath) {
-        console.log('▶ Streaming CFS variant feed…');
-        validVariantSKUs  = await streamVariantSKUs(variantFeedPath);
-        cfsVariantAttrIds = await streamVariantAttrIds(variantFeedPath);
-        const vc = await streamVariantCodes(variantFeedPath);
-        variantCodesBySku    = vc.bySku;
-        variantCodesByAttrId = vc.byAttrId;
-        cfsVarCodeSet        = vc.codeSet;
-        console.log(`  ✓ ${validVariantSKUs.size} variant SKUs, ${cfsVariantAttrIds.size} variant attr IDs, ${variantCodesBySku.size} variant codes, ${cfsVarCodeSet.size} unique var_codes for deep-search`);
-      } else {
-        console.log('ℹ  No variant feed uploaded — using product feed only');
-      }
-
-      // 4. Shopify export(s)
+      // 3. Parse Shopify export(s)
       console.log('▶ Streaming Shopify export file 1…');
       const shopifyVariants = await streamShopifyVariants(shopifyFile1Path);
       console.log(`  ✓ ${shopifyVariants.length} variants from file 1`);
@@ -111,7 +98,7 @@ router.post(
         shopifyVariants.push(...variants2);
       }
 
-      // 5. Four-step compare (variant feed → product feed → raw CFS IDs → orphaned)
+      // 4. Four-step compare (variant feed → product feed → raw CFS IDs → orphaned)
       console.log(`▶ Comparing ${shopifyVariants.length} variants…`);
       const { results, summary } = compareVariants(
         shopifyVariants, validVariantSKUs, validProductSKUs, cfsProductIds, cfsVariantAttrIds,
@@ -124,7 +111,7 @@ router.post(
         success: true,
         summary,
         results,
-        // cfsProductIds is now a Map<prodId, 'active'|'inactive'>; send as entries array
+        // cfsProductIds is a Map<prodId, 'active'|'inactive'>; send as entries array
         // so the frontend can reconstruct the map for publish-products decisions.
         cfsProductIds:    [...cfsProductIds.entries()],  // [[prodId, status], …]
         cfsVariantAttrIds: [...cfsVariantAttrIds],

@@ -292,39 +292,18 @@
   <div class="card">
     <div class="card-title">Step 1 — Upload Files</div>
 
-    <!-- CFS (Non-Shopify) feeds -->
+    <!-- CFS data (fetched from API automatically) -->
     <div class="upload-group">
-      <div class="upload-group-label">Choice Furniture Superstore — Non-Shopify Feeds</div>
-      <div class="grid-2">
-
+      <div class="upload-group-label">Choice Furniture Superstore — Product &amp; Variant Data</div>
+      <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);border-radius:var(--radius);">
+        <span style="font-size:22px;">🌐</span>
         <div>
-          <div class="upload-zone-label">Product Feed <span class="req">*</span></div>
-          <div class="upload-slot" id="slot-product">
-            <div class="upload-zone" id="zone-product" onclick="document.getElementById('input-product').click()">
-              <input type="file" id="input-product" accept=".csv,.xlsx,.xls" />
-              <div class="icon">📋</div>
-              <div class="label">215_Froogle_Product_*</div>
-              <div class="sub">CSV or Excel · SKU: UD-{ProductId}</div>
-              <div class="file-name" id="fname-product"></div>
-            </div>
-            <button class="remove-btn" onclick="clearFile('product')">✕ Remove file</button>
+          <div style="font-size:13px;font-weight:600;color:var(--success);">Fetched automatically from CFS API</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">
+            No file upload required — CFS product &amp; variant data is fetched live from
+            <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">productVariantStockJsonCFS.php?brandId=215</code>
           </div>
         </div>
-
-        <div>
-          <div class="upload-zone-label">Variant Feed <span class="opt">(optional)</span></div>
-          <div class="upload-slot" id="slot-variant">
-            <div class="upload-zone" id="zone-variant" onclick="document.getElementById('input-variant').click()">
-              <input type="file" id="input-variant" accept=".csv,.xlsx,.xls" />
-              <div class="icon">📄</div>
-              <div class="label">215_Froogle_Variant_*</div>
-              <div class="sub">CSV or Excel · SKU: UD-{ProductId}-{VariantId}</div>
-              <div class="file-name" id="fname-variant"></div>
-            </div>
-            <button class="remove-btn" onclick="clearFile('variant')">✕ Remove file</button>
-          </div>
-        </div>
-
       </div>
     </div>
 
@@ -504,10 +483,15 @@
   </div>
 
   <!-- ── Step 4: Sync CFS Codes to Shopify Metafields ── -->
-  <div class="card hidden" id="sync-card">
+  <div class="card" id="sync-card">
     <div class="card-title">Step 4 — Sync CFS Codes to Shopify Metafields</div>
 
-    <div id="sync-summary" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:16px;"></div>
+    <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;line-height:1.6">
+      Fetches the latest CFS product &amp; variant data directly from the API, then writes
+      <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.product_code</code> and
+      <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.variant_code</code>
+      to every matching Shopify product/variant — no compare required.
+    </p>
 
     <div class="actions-row">
       <button class="btn btn-purple" id="btn-sync" onclick="syncCodes()">
@@ -516,12 +500,11 @@
       <button class="btn btn-warning hidden" id="btn-download-sync-log" onclick="downloadSyncLog()">
         📋 Download Sync Log
       </button>
-      <span id="sync-spinner" class="hidden"><span class="spinner"></span> Syncing…</span>
+      <span id="sync-spinner" class="hidden"><span class="spinner"></span> <span id="sync-progress">Starting…</span></span>
     </div>
 
     <p style="font-size:12px;color:var(--text-muted);margin-top:12px;line-height:1.6">
-      Uses the global <strong>Dry Run</strong> toggle. Writes <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.product_code</code> on products
-      and <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.variant_code</code> on variants — upsert, safe to run multiple times.
+      Uses the global <strong>Dry Run</strong> toggle. Upsert — safe to run multiple times.
     </p>
 
     <div id="sync-log-panel" style="margin-top:16px;"></div>
@@ -532,40 +515,24 @@
     <div class="card-title">Step 5 — Stock Sync (Delivery Time, Inventory &amp; Metafields)</div>
 
     <p style="font-size:13px;color:var(--text-muted);margin-bottom:18px;line-height:1.6">
-      Upload CFS product &amp; variant feeds to sync <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.inoutstock</code>,
+      Syncs <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.inoutstock</code>,
       <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.duedate</code>,
       <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.vnotificationtitle</code> and inventory quantity.
       Rule: delivery ≤ 6 weeks → <strong style="color:var(--success)">IN STOCK</strong> (qty min 2);
       &gt; 6 weeks → <strong style="color:var(--danger)">OUT OF STOCK</strong> (qty 0).
+      CFS stock data is fetched automatically from the API.
     </p>
 
+    <!-- CFS data (fetched from API) -->
     <div class="upload-group">
-      <div class="upload-group-label">CFS Feeds</div>
-      <div class="grid-2">
-        <!-- CFS Product Feed -->
+      <div class="upload-group-label">Choice Furniture Superstore — Stock Data</div>
+      <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);border-radius:var(--radius);">
+        <span style="font-size:22px;">🌐</span>
         <div>
-          <div class="upload-zone-label">
-            CFS Product Feed <span class="req">*</span>
-          </div>
-          <div class="upload-zone" id="ss-zone-product">
-            <input type="file" id="ss-input-product" accept=".csv,.xlsx,.xls" />
-            <div class="icon">📦</div>
-            <div class="label" id="ss-slot-product">Drop file or click to browse</div>
-            <div class="sub">Delivery Time · inOutStock · OnHand · DueDate</div>
-            <div class="file-name hidden" id="ss-fname-product"></div>
-          </div>
-        </div>
-        <!-- CFS Variant Feed -->
-        <div>
-          <div class="upload-zone-label">
-            CFS Variant Feed <span class="opt">(optional)</span>
-          </div>
-          <div class="upload-zone" id="ss-zone-variant">
-            <input type="file" id="ss-input-variant" accept=".csv,.xlsx,.xls" />
-            <div class="icon">🔀</div>
-            <div class="label" id="ss-slot-variant">Drop file or click to browse</div>
-            <div class="sub">vNotificationTitle · vOnHand · vDueDate · vinOutStock</div>
-            <div class="file-name hidden" id="ss-fname-variant"></div>
+          <div style="font-size:13px;font-weight:600;color:var(--success);">Fetched automatically from CFS API</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">
+            Delivery time, stock status, onHand and dueDate are fetched live —
+            <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">productVariantStockJsonCFS.php?brandId=215</code>
           </div>
         </div>
       </div>
@@ -745,13 +712,11 @@ async function testConnection() {
 
   // ── Run comparison ─────────────────────────────────────────────────────────
   async function runCompare() {
-    const productFile = document.getElementById('input-product').files[0];
-    const variantFile = document.getElementById('input-variant').files[0];
-    const shopFile1   = document.getElementById('input-shop1').files[0];
-    const shopFile2   = document.getElementById('input-shop2').files[0];
+    const shopFile1 = document.getElementById('input-shop1').files[0];
+    const shopFile2 = document.getElementById('input-shop2').files[0];
 
-    if (!productFile || !shopFile1) {
-      alert('Please upload the CFS product feed and at least one Shopify export file.');
+    if (!shopFile1) {
+      alert('Please upload at least one Shopify export file.');
       return;
     }
 
@@ -760,8 +725,6 @@ async function testConnection() {
     document.getElementById('btn-download-log').classList.add('hidden');
 
     const form = new FormData();
-    form.append('productFeed',  productFile);
-    if (variantFile) form.append('variantFeed', variantFile);
     form.append('shopifyFile1', shopFile1);
     if (shopFile2) form.append('shopifyFile2', shopFile2);
 
@@ -1149,64 +1112,31 @@ async function testConnection() {
   // ── Sync CFS Codes to Shopify Metafields ─────────────────────────────────
 
   function updateSyncCard() {
-    const withProductCode = allResults.filter(r => r.productCodeOnly).length;
-    const withVariantCode = allResults.filter(r => r.variantCode).length;
-    const card = document.getElementById('sync-card');
-
-    if (!withProductCode && !withVariantCode) {
-      card.classList.add('hidden');
-      return;
-    }
-
-    card.classList.remove('hidden');
-
-    const uniqueProducts = new Set(
-      allResults.filter(r => r.productCodeOnly).map(r => r.handle)
-    ).size;
-
-    document.getElementById('sync-summary').innerHTML = `
-      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 20px;min-width:130px">
-        <div style="font-size:24px;font-weight:700;color:var(--accent)">${uniqueProducts.toLocaleString()}</div>
-        <div style="font-size:12px;color:var(--text-muted);margin-top:3px">Products with code<br>
-          <code style="font-size:10px">custom.product_code</code></div>
-      </div>
-      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px 20px;min-width:130px">
-        <div style="font-size:24px;font-weight:700;color:var(--accent)">${withVariantCode.toLocaleString()}</div>
-        <div style="font-size:12px;color:var(--text-muted);margin-top:3px">Variants with code<br>
-          <code style="font-size:10px">custom.variant_code</code></div>
-      </div>
-    `;
+    // Step 4 is always visible — CFS codes come from the API, not from compare results.
+    // This function is kept as a no-op so existing callers (e.g. after runCompare) still work.
   }
 
   async function syncCodes() {
     const dryRun = document.getElementById('dry-run-toggle').checked;
-    const toSync = allResults.filter(r => r.productCodeOnly || r.variantCode);
-
-    if (!toSync.length) {
-      alert('No variants with CFS codes to sync. Make sure the CFS feeds contain Product Code / var_code columns.');
-      return;
-    }
 
     const msg = dryRun
-      ? `DRY RUN: Simulate syncing CFS codes for ${toSync.length} variants (no actual changes).`
-      : `Sync CFS codes to Shopify metafields for ${toSync.length} variants?\n\n` +
+      ? `DRY RUN: Simulate syncing CFS codes (fetches live from CFS API — no actual Shopify changes).`
+      : `Sync CFS codes to Shopify metafields?\n\n` +
         `Sets:\n  • custom.product_code on products\n  • custom.variant_code on variants\n\n` +
-        `This is an upsert — safe to run multiple times. Continue?`;
+        `CFS data is fetched live from the API. This is an upsert — safe to run multiple times. Continue?`;
 
     if (!confirm(msg)) return;
 
     document.getElementById('btn-sync').disabled = true;
-    const syncSpinnerEl = document.getElementById('sync-spinner');
-    syncSpinnerEl.innerHTML = '<span class="spinner"></span> <span id="sync-progress">Starting…</span>';
-    syncSpinnerEl.classList.remove('hidden');
+    document.getElementById('sync-spinner').classList.remove('hidden');
     document.getElementById('btn-download-sync-log').classList.add('hidden');
     document.getElementById('sync-log-panel').style.display = 'none';
 
     try {
-      const res = await fetch('/api/shopify/sync-metafields', {
+      const res = await fetch('/api/shopify/sync-metafields-from-api', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ variants: toSync, dryRun }),
+        body: JSON.stringify({ dryRun }),
       });
 
       if (!res.ok) {
@@ -1244,7 +1174,11 @@ async function testConnection() {
             lastProgress = event;
             const p = progressEl();
             if (p) {
-              if (event.phase === 'scan') {
+              if (event.phase === 'fetch') {
+                p.textContent = event.skuCount
+                  ? `CFS API loaded — ${event.skuCount.toLocaleString()} SKU mappings`
+                  : 'Fetching CFS product data…';
+              } else if (event.phase === 'scan') {
                 p.textContent = `Scanning Shopify catalog… ${event.scannedVariants.toLocaleString()} variants scanned, ${event.matchedProducts} products matched`;
               } else {
                 p.textContent = `Writing metafields — ${event.processed}/${event.totalProducts} products — ` +
@@ -1297,8 +1231,7 @@ async function testConnection() {
       alert('Error: ' + e.message);
     } finally {
       document.getElementById('btn-sync').disabled = false;
-      syncSpinnerEl.innerHTML = '<span class="spinner"></span> Syncing…';
-      syncSpinnerEl.classList.add('hidden');
+      document.getElementById('sync-spinner').classList.add('hidden');
     }
   }
 
@@ -1368,8 +1301,8 @@ async function testConnection() {
   let lastStockSyncLog = [];
   let stockSyncReader  = null; // holds the active SSE reader so Stop can cancel it
 
-  // Wire up the four stock sync upload zones
-  ['product','variant','shop1','shop2'].forEach(id => {
+  // Wire up the two stock sync upload zones (Shopify exports only — CFS from API)
+  ['shop1','shop2'].forEach(id => {
     const input = document.getElementById(`ss-input-${id}`);
     const zone  = document.getElementById(`ss-zone-${id}`);
     const fname = document.getElementById(`ss-fname-${id}`);
@@ -1413,11 +1346,10 @@ async function testConnection() {
   }
 
   async function runStockSync() {
-    const productFile = document.getElementById('ss-input-product').files[0];
-    const shop1File   = document.getElementById('ss-input-shop1').files[0];
+    const shop1File = document.getElementById('ss-input-shop1').files[0];
 
-    if (!productFile || !shop1File) {
-      alert('Please upload the CFS product feed and at least one Shopify export file.');
+    if (!shop1File) {
+      alert('Please upload at least one Shopify export file.');
       return;
     }
 
@@ -1440,13 +1372,10 @@ async function testConnection() {
     stockSyncReader  = null;
 
     const fd = new FormData();
-    fd.append('productFeed',  productFile);
     fd.append('shopifyFile1', shop1File);
     fd.append('dryRun',       dryRun ? 'true' : 'false');
-    const variantFile = document.getElementById('ss-input-variant').files[0];
-    const shop2File   = document.getElementById('ss-input-shop2').files[0];
-    if (variantFile) fd.append('variantFeed',  variantFile);
-    if (shop2File)   fd.append('shopifyFile2', shop2File);
+    const shop2File = document.getElementById('ss-input-shop2').files[0];
+    if (shop2File) fd.append('shopifyFile2', shop2File);
 
     try {
       const res = await fetch('/api/stock/sync', { method: 'POST', body: fd });

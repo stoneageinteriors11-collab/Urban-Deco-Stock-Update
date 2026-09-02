@@ -2,6 +2,8 @@ const express = require('express');
 const axios   = require('axios');
 require('dotenv').config();
 
+const { fetchCfsProducts, buildSkuCodeMap } = require('../utils/cfsApi');
+
 const router = express.Router();
 
 // ── Shopify GraphQL client ────────────────────────────────────────────────────
@@ -1273,6 +1275,302 @@ router.post('/sync-metafields', async (req, res) => {
 
   console.log(`  ✓ Done — synced: ${synced} (new: ${newCount}, overwrites: ${overwriteCount}), skipped: ${skipped}, failed: ${failed}`);
   send({ type: 'done', success: true, dryRun, synced, newCount, overwriteCount, skipped, failed, total: toSync.length, log });
+  endStream();
+});
+
+
+// ── POST /api/shopify/sync-metafields-from-api ───────────────────────────────
+//
+// Body: { dryRun: bool }
+//
+// Identical logic to sync-metafields above, but builds skuCodeMap directly
+// from the CFS API (no variants[] body needed — no prior compare required).
+//
+// Phase 1: scan all Shopify variants (250/page), match SKUs against CFS data.
+// Phase 2: upsert custom.product_code (product) + custom.variant_code (variant).
+//
+router.post('/sync-metafields-from-api', async (req, res) => {
+  const { dryRun = true } = req.body;
+
+  let client;
+  try {
+    client = graphqlClient();
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  // ── Stream as SSE ─────────────────────────────────────────────────────────
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (res.socket) res.socket.setNoDelay(true);
+  res.flushHeaders();
+  const send = obj => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+
+  const keepAliveTimer = setInterval(() => {
+    if (!res.writableEnded) res.write(': keepalive\n\n');
+  }, 20000);
+  const endStream = () => { clearInterval(keepAliveTimer); res.end(); };
+
+  const log          = [];
+  let synced         = 0;
+  let newCount       = 0;
+  let overwriteCount = 0;
+  let skipped        = 0;
+  let failed         = 0;
+
+  // ── Fetch CFS data from API ───────────────────────────────────────────────
+  send({ type: 'progress', phase: 'fetch', message: 'Fetching CFS product data from API…' });
+  let skuCodeMap;
+  try {
+    console.log('▶ sync-metafields-from-api: fetching CFS API…');
+    const cfsProducts = await fetchCfsProducts();
+    skuCodeMap = buildSkuCodeMap(cfsProducts);
+    console.log(`  ✓ ${cfsProducts.length} products, ${skuCodeMap.size} SKU mappings from CFS API`);
+    send({ type: 'progress', phase: 'fetch', skuCount: skuCodeMap.size });
+  } catch (fetchErr) {
+    console.error('  ✗ CFS API fetch failed:', fetchErr.message);
+    send({ type: 'done', success: false, error: `CFS API fetch failed: ${fetchErr.message}`,
+      dryRun, synced, newCount, overwriteCount, skipped, failed, total: 0, log });
+    endStream();
+    return;
+  }
+
+  // ── Build prodIdsWithSubVariants (same logic as sync-metafields) ──────────
+  const prodIdsWithSubVariants = new Set();
+  for (const sku of skuCodeMap.keys()) {
+    const parts = sku.split('-');
+    if (parts.length >= 3 && parts[0] === 'UD') {
+      prodIdsWithSubVariants.add(`${parts[0]}-${parts[1]}`);
+    }
+  }
+
+  function resolveVarCode(sku, codes) {
+    if (codes.variantCode) return codes.variantCode;
+    const parts = sku ? sku.split('-') : [];
+    if (parts.length === 2 && parts[0] === 'UD' && !prodIdsWithSubVariants.has(sku)) {
+      return codes.productCode || '';
+    }
+    return '';
+  }
+
+  const productCodeWritten = new Set();
+  const totalCfsSkus = skuCodeMap.size;
+
+  console.log(`▶ sync-metafields-from-api: ${totalCfsSkus} CFS SKUs, bulk scan mode (dryRun=${dryRun})`);
+  console.log(`  product-level SKUs with sub-variants: ${prodIdsWithSubVariants.size}`);
+
+  // ════════════════════════════════════════════════════════════════════════
+  // PHASE 1 — Scan all Shopify variants (250 per page)
+  // ════════════════════════════════════════════════════════════════════════
+  send({ type: 'progress', phase: 'scan', scannedVariants: 0, matchedProducts: 0 });
+
+  const matchedByProduct = new Map();
+  let scanCursor      = null;
+  let scanHasMore     = true;
+  let scannedVariants = 0;
+  let scannedPages    = 0;
+
+  try {
+    while (scanHasMore) {
+      const data     = await gql(client, ALL_VARIANTS_SCAN_QUERY, { after: scanCursor });
+      const edges    = data?.productVariants?.edges    || [];
+      const pageInfo = data?.productVariants?.pageInfo || {};
+      scannedPages++;
+      scannedVariants += edges.length;
+
+      for (const { node } of edges) {
+        if (!node.sku || !skuCodeMap.has(node.sku)) continue;
+        const pid = node.product.id;
+        if (!matchedByProduct.has(pid)) {
+          matchedByProduct.set(pid, { productNode: node.product, variants: [] });
+        }
+        matchedByProduct.get(pid).variants.push(node);
+      }
+
+      scanHasMore = pageInfo.hasNextPage;
+      scanCursor  = pageInfo.endCursor || null;
+
+      send({ type: 'progress', phase: 'scan', scannedVariants, matchedProducts: matchedByProduct.size });
+
+      if (scannedPages % 10 === 0) {
+        console.log(`  … scan page ${scannedPages}: ${scannedVariants} variants scanned, ${matchedByProduct.size} products matched`);
+      }
+    }
+  } catch (scanErr) {
+    console.error('  ✗ Scan phase error:', scanErr.message);
+    send({ type: 'done', success: false, error: `Scan failed after ${scannedVariants} variants: ${scanErr.message}`,
+      dryRun, synced, newCount, overwriteCount, skipped, failed, total: totalCfsSkus, log });
+    endStream();
+    return;
+  }
+
+  console.log(`  ✓ Scan complete — ${scannedVariants} variants scanned, ${scannedPages} pages, ${matchedByProduct.size} products matched`);
+
+  // ════════════════════════════════════════════════════════════════════════
+  // PHASE 2 — Write metafields for each matched product
+  // ════════════════════════════════════════════════════════════════════════
+  const totalProducts = matchedByProduct.size;
+  let processed = 0;
+
+  send({ type: 'progress', phase: 'write', processed: 0, totalProducts, synced, newCount, overwriteCount, skipped, failed });
+
+  try {
+    for (const [pid, { productNode, variants }] of matchedByProduct) {
+      const handle           = productNode.handle;
+      const title            = productNode.title;
+      const existingProdCode = productNode.metafield?.value || '';
+
+      const productCode = variants
+        .map(v => skuCodeMap.get(v.sku)?.productCode)
+        .find(c => c) || '';
+
+      try {
+        if (dryRun) {
+          if (productCode && !productCodeWritten.has(pid)) {
+            if (!existingProdCode) {
+              log.push({ type: 'product', sku: variants[0].sku, handle, status: 'dry_run',
+                message: `Would set custom.product_code = "${productCode}" on "${title}" (new)`,
+                productCode, variantCode: '' });
+            } else if (existingProdCode === productCode) {
+              log.push({ type: 'product', sku: variants[0].sku, handle, status: 'match',
+                message: `custom.product_code already "${productCode}" on "${title}" — no change needed`,
+                productCode, variantCode: '' });
+            } else {
+              log.push({ type: 'product', sku: variants[0].sku, handle, status: 'overwrite',
+                message: `Would overwrite custom.product_code: "${existingProdCode}" → "${productCode}" on "${title}"`,
+                productCode, variantCode: '' });
+            }
+            productCodeWritten.add(pid);
+          }
+
+          for (const varNode of variants) {
+            const codes   = skuCodeMap.get(varNode.sku) || {};
+            const varCode = resolveVarCode(varNode.sku, codes);
+            if (!varCode) continue;
+            const existing = varNode.metafield?.value || '';
+            if (!existing) {
+              log.push({ type: 'variant', sku: varNode.sku, handle, status: 'dry_run',
+                message: `Would set custom.variant_code = "${varCode}" on variant ${varNode.sku} in "${title}" (new)`,
+                productCode: codes.productCode, variantCode: varCode });
+            } else if (existing === varCode) {
+              log.push({ type: 'variant', sku: varNode.sku, handle, status: 'match',
+                message: `custom.variant_code already "${varCode}" on variant ${varNode.sku} in "${title}" — no change needed`,
+                productCode: codes.productCode, variantCode: varCode });
+            } else {
+              log.push({ type: 'variant', sku: varNode.sku, handle, status: 'overwrite',
+                message: `Would overwrite custom.variant_code: "${existing}" → "${varCode}" on variant ${varNode.sku} in "${title}"`,
+                productCode: codes.productCode, variantCode: varCode });
+            }
+          }
+
+        } else {
+          const metafields   = [];
+          const overwriteMap = new Map();
+
+          if (productCode && !productCodeWritten.has(pid)) {
+            if (existingProdCode === productCode) {
+              log.push({ type: 'product', sku: variants[0].sku, handle, status: 'match',
+                message: `custom.product_code already "${productCode}" on "${title}" — skipped`,
+                productCode, variantCode: '' });
+              skipped++;
+            } else {
+              if (existingProdCode) overwriteMap.set(pid, existingProdCode);
+              metafields.push({ ownerId: pid, namespace: 'custom', key: 'product_code',
+                value: productCode, type: 'single_line_text_field' });
+            }
+          }
+
+          for (const varNode of variants) {
+            const codes   = skuCodeMap.get(varNode.sku) || {};
+            const varCode = resolveVarCode(varNode.sku, codes);
+            if (!varCode) continue;
+            const existing = varNode.metafield?.value || '';
+            if (existing === varCode) {
+              log.push({ type: 'variant', sku: varNode.sku, handle, status: 'match',
+                message: `custom.variant_code already "${varCode}" on variant ${varNode.sku} in "${title}" — skipped`,
+                productCode: codes.productCode, variantCode: varCode });
+              skipped++;
+              continue;
+            }
+            if (existing) overwriteMap.set(varNode.id, existing);
+            metafields.push({ ownerId: varNode.id, namespace: 'custom', key: 'variant_code',
+              value: varCode, type: 'single_line_text_field' });
+          }
+
+          if (metafields.length) {
+            const BATCH_SIZE = 25;
+            for (let i = 0; i < metafields.length; i += BATCH_SIZE) {
+              const batch      = metafields.slice(i, i + BATCH_SIZE);
+              const result     = await gql(client, METAFIELDS_SET_MUTATION, { metafields: batch });
+              const userErrors = result?.metafieldsSet?.userErrors || [];
+
+              if (userErrors.length) {
+                const errMsg = userErrors.map(e => e.message).join(', ');
+                for (const mf of batch) {
+                  const isProduct = mf.ownerId === pid;
+                  const varSku    = isProduct ? variants[0].sku : (variants.find(v => v.id === mf.ownerId)?.sku || '-');
+                  log.push({ type: isProduct ? 'product' : 'variant', sku: varSku, handle,
+                    status: 'error', message: `metafieldsSet failed: ${errMsg}` });
+                  failed++;
+                }
+              } else {
+                for (const mf of batch) {
+                  const isProduct = mf.ownerId === pid;
+                  const oldVal    = overwriteMap.get(mf.ownerId);
+                  const varSku    = isProduct ? variants[0].sku : (variants.find(v => v.id === mf.ownerId)?.sku || '-');
+                  if (isProduct) {
+                    productCodeWritten.add(pid);
+                    const msg = oldVal
+                      ? `Overwrote custom.product_code: "${oldVal}" → "${mf.value}" on "${title}"`
+                      : `Set custom.product_code = "${mf.value}" on "${title}" (new)`;
+                    log.push({ type: 'product', sku: varSku, handle,
+                      status: oldVal ? 'overwrite' : 'synced', message: msg, productCode: mf.value, variantCode: '' });
+                  } else {
+                    const msg = oldVal
+                      ? `Overwrote custom.variant_code: "${oldVal}" → "${mf.value}" on variant ${varSku} in "${title}"`
+                      : `Set custom.variant_code = "${mf.value}" on variant ${varSku} in "${title}" (new)`;
+                    log.push({ type: 'variant', sku: varSku, handle,
+                      status: oldVal ? 'overwrite' : 'synced', message: msg, productCode: '', variantCode: mf.value });
+                  }
+                  synced++;
+                  if (oldVal) overwriteCount++; else newCount++;
+                }
+              }
+            }
+            await sleep(180);
+          }
+
+          productCodeWritten.add(pid);
+        }
+      } catch (err) {
+        const msg = err.response?.data?.errors || err.message;
+        console.error(`  ✗ [${handle}] Error: ${String(msg)}`);
+        log.push({ type: 'product', sku: variants[0]?.sku || '-', handle,
+          status: 'error', message: String(msg) });
+        failed++;
+      }
+
+      processed++;
+      send({ type: 'progress', phase: 'write', processed, totalProducts, synced, newCount, overwriteCount, skipped, failed });
+
+      if (processed % 50 === 0 || processed === totalProducts) {
+        console.log(`  … write ${processed}/${totalProducts} products — synced: ${synced}, skipped: ${skipped}, failed: ${failed}`);
+      }
+
+      if (dryRun) await sleep(30);
+    }
+  } catch (outerErr) {
+    console.error(`  ✗ Write phase error at product ${processed}/${totalProducts}:`, outerErr.message);
+    send({ type: 'done', success: false, error: `Write error at product ${processed}/${totalProducts}: ${outerErr.message}`,
+      dryRun, synced, newCount, overwriteCount, skipped, failed, total: totalCfsSkus, log });
+    endStream();
+    return;
+  }
+
+  console.log(`  ✓ Done — synced: ${synced} (new: ${newCount}, overwrites: ${overwriteCount}), skipped: ${skipped}, failed: ${failed}`);
+  send({ type: 'done', success: true, dryRun, synced, newCount, overwriteCount, skipped, failed, total: totalCfsSkus, log });
   endStream();
 });
 
