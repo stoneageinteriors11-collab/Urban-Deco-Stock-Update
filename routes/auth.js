@@ -11,15 +11,30 @@ const router   = express.Router();
 const TOKEN_FILE = path.join(__dirname, '../.shopify_token');
 
 function saveToken(token) {
-  fs.writeFileSync(TOKEN_FILE, token, 'utf8');
+  // Always set in-process env var (works within this dyno instance)
   process.env.SHOPIFY_ACCESS_TOKEN = token;
+  // Best-effort file write — may fail on Render's ephemeral FS, that's OK
+  try {
+    fs.writeFileSync(TOKEN_FILE, token, 'utf8');
+    console.log('✅ Token saved to file and env var.');
+  } catch (e) {
+    console.warn('⚠️  Could not write token file (ephemeral FS?). Token is set in env var for this process only.');
+    console.warn('   → Copy the token from /auth/token?reveal=1 into your Render SHOPIFY_ACCESS_TOKEN env var to make it permanent.');
+  }
 }
 
 function loadToken() {
-  if (process.env.SHOPIFY_ACCESS_TOKEN) return process.env.SHOPIFY_ACCESS_TOKEN;
+  // Check env var first — but guard against empty string (which is falsy but shouldn't clear a valid token)
+  const envToken = process.env.SHOPIFY_ACCESS_TOKEN;
+  if (envToken && envToken.trim()) return envToken.trim();
+
+  // Fall back to file
   try {
     const t = fs.readFileSync(TOKEN_FILE, 'utf8').trim();
-    if (t) process.env.SHOPIFY_ACCESS_TOKEN = t;
+    if (t) {
+      process.env.SHOPIFY_ACCESS_TOKEN = t; // cache in env for subsequent requests
+      console.log('ℹ️  Token loaded from file and cached in env var.');
+    }
     return t || null;
   } catch { return null; }
 }

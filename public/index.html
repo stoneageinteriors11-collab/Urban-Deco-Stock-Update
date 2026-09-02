@@ -619,7 +619,7 @@
   let cfsVariantAttrIds = [];  // iProAttrId values from CFS variant feed
 
   // ── File upload UI ─────────────────────────────────────────────────────────
-  ['product','variant','shop1','shop2'].forEach(id => {
+  ['shop1','shop2'].forEach(id => {
     const input = document.getElementById(`input-${id}`);
     const zone  = document.getElementById(`zone-${id}`);
     const slot  = document.getElementById(`slot-${id}`);
@@ -670,14 +670,56 @@
   // ── Check connection on load ───────────────────────────────────────────────
   async function checkConnectionStatus() {
     const params = new URLSearchParams(window.location.search);
-    if (params.get('connected') === 'true') {
-      window.history.replaceState({}, '', '/');
-    }
+    const justConnected = params.get('connected') === 'true';
+    if (justConnected) window.history.replaceState({}, '', '/');
+
     try {
       const r = await fetch('/auth/status');
       const d = await r.json();
-      setConnected(d.connected);
-    } catch(_) { setConnected(false); }
+
+      if (d.connected) {
+        setConnected(true);
+      } else if (justConnected) {
+        // OAuth just completed — token is in this process's env var but the
+        // status check may have hit a different dyno on Render.
+        // Show connected and display the token so the user can save it permanently.
+        setConnected(true);
+        showTokenNotice();
+      } else {
+        setConnected(false);
+      }
+    } catch(_) {
+      if (justConnected) { setConnected(true); showTokenNotice(); }
+      else setConnected(false);
+    }
+  }
+
+  async function showTokenNotice() {
+    // Fetch the token (masked) and show a banner prompting the user to save it
+    try {
+      const r   = await fetch('/auth/token?reveal=1');
+      const d   = await r.json();
+      const tok = d.token || '';
+      if (!tok) return;
+
+      // Don't duplicate
+      if (document.getElementById('token-notice')) return;
+
+      const notice = document.createElement('div');
+      notice.id = 'token-notice';
+      notice.style.cssText = 'margin-top:10px;padding:10px 14px;background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);border-radius:8px;font-size:12px;line-height:1.6;';
+      notice.innerHTML = `
+        <strong style="color:var(--warning);">⚠️ Save your token to make the connection permanent</strong><br>
+        Render's servers restart periodically — to stay connected, add this token as an environment variable in your Render dashboard:<br>
+        <code style="display:block;margin:6px 0;padding:6px 10px;background:rgba(0,0,0,.18);border-radius:6px;font-size:11px;word-break:break-all;">${tok}</code>
+        Key: <strong>SHOPIFY_ACCESS_TOKEN</strong> &nbsp;→&nbsp; Value: the token above<br>
+        <button class="btn btn-outline" style="font-size:11px;padding:4px 10px;margin-top:6px;" onclick="navigator.clipboard.writeText('${tok}').then(()=>this.textContent='Copied!').catch(()=>alert('${tok}'))">📋 Copy token</button>
+        <button class="btn btn-outline" style="font-size:11px;padding:4px 10px;margin-top:6px;margin-left:6px;" onclick="document.getElementById('token-notice').remove()">✕ Dismiss</button>
+      `;
+
+      const connectedEl = document.getElementById('shopify-connected');
+      connectedEl.insertAdjacentElement('afterend', notice);
+    } catch(_) {}
   }
 
   function setConnected(yes) {
@@ -688,7 +730,7 @@
   async function disconnect() {
     await fetch('/auth/disconnect');
     setConnected(false);
-    document.getElementById('token-copy-msg').classList.add('hidden');
+    document.getElementById('token-notice')?.remove();
   }
 
 async function testConnection() {
