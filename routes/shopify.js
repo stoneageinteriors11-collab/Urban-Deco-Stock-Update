@@ -180,6 +180,30 @@ const VARIANTS_BY_SKU_QUERY = `
   }
 `;
 
+// Bulk scan — fetches ALL Shopify variants 250 at a time, with no SKU filter.
+// Used by sync-metafields to match CFS SKUs against the full Shopify catalog
+// in ~40-200 API calls instead of one call per CFS SKU (~5000+ calls).
+const ALL_VARIANTS_SCAN_QUERY = `
+  query scanVariants($after: String) {
+    productVariants(first: 250, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      edges {
+        node {
+          id
+          sku
+          metafield(namespace: "custom", key: "variant_code") { value }
+          product {
+            id
+            handle
+            title
+            metafield(namespace: "custom", key: "product_code") { value }
+          }
+        }
+      }
+    }
+  }
+`;
+
 // ── SKU parser: UD-{prodId}-{varId} ──────────────────────────────────────────
 function parseSku(sku) {
   const parts = sku.split('-');
@@ -920,13 +944,21 @@ router.post('/publish-products', async (req, res) => {
 //
 // Body: { variants: [...allResults...], dryRun: bool }
 //
-// Enhanced: for each unique variant SKU with a CFS code, queries Shopify directly
-// using productVariants(query: "sku:'...'") to find ALL products that contain that
-// SKU — not just the ones in the compare results. This ensures that if UD-601539
-// appears on 3 Shopify products, all 3 get product_code and/or variant_code set.
+// BULK SCAN APPROACH — replaces the previous per-SKU query strategy.
 //
-//   • custom.product_code on the Shopify product (once per product per run, upsert)
-//   • custom.variant_code on the Shopify variant (one per variant, upsert)
+// Old approach (broken): one Shopify API call per CFS SKU (~5000+ calls,
+//   ~30 min runtime → connection cut at 20 min by nginx/Cloudflare).
+//
+// New approach: scan ALL Shopify variants in pages of 250 (40–200 calls total),
+//   match each variant's SKU against the CFS skuCodeMap in memory, then write
+//   metafields only for matches. Total runtime: 1–2 minutes.
+//
+// Two phases:
+//   Phase 1 (scan):  paginate all Shopify variants, collect matches by product.
+//   Phase 2 (write): upsert metafields for each matched product/variant.
+//
+//   • custom.product_code on the Shopify product (once per product, upsert)
+//   • custom.variant_code on the Shopify variant  (one per variant, upsert)
 //
 // Uses metafieldsSet which acts as upsert — safe to run multiple times.
 // Batches up to 25 metafields per API call to stay within Shopify limits.
@@ -949,39 +981,28 @@ router.post('/sync-metafields', async (req, res) => {
   }
 
   // ── Stream as SSE (text/event-stream) ────────────────────────────────────
-  // nginx recognises this content-type and never buffers it, unlike NDJSON.
-  // Each event is:  data: <JSON>\n\n
-  // The last event carries { type:'done', ... } with the full log + counters.
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.setHeader('X-Accel-Buffering', 'no');
-  if (res.socket) res.socket.setNoDelay(true); // disable Nagle buffering
+  if (res.socket) res.socket.setNoDelay(true);
   res.flushHeaders();
   const send = obj => res.write(`data: ${JSON.stringify(obj)}\n\n`);
 
   // ── Keepalive ping every 20s ──────────────────────────────────────────────
-  // Render's nginx proxy_read_timeout is ~60s. If a Shopify API call (including
-  // retries) takes longer, nginx closes the connection silently — no Render log
-  // entry, just the client seeing the stream end. Sending an SSE comment every
-  // 20s keeps the connection alive regardless of how slow any single call is.
   const keepAliveTimer = setInterval(() => {
     if (!res.writableEnded) res.write(': keepalive\n\n');
   }, 20000);
   const endStream = () => { clearInterval(keepAliveTimer); res.end(); };
 
-  const log  = [];
-  let synced         = 0;  // total metafields written (new + overwrites)
-  let newCount       = 0;  // written because no prior value existed
-  let overwriteCount = 0;  // written because prior value differed
-  let skipped        = 0;  // value already matched — no write needed
+  const log          = [];
+  let synced         = 0;
+  let newCount       = 0;
+  let overwriteCount = 0;
+  let skipped        = 0;
   let failed         = 0;
 
   // ── Build unique-SKU → codes map (first occurrence wins per SKU) ─────────
-  // Enhanced approach: instead of grouping by handle from the compare results,
-  // we deduplicate by SKU and then query Shopify directly to find ALL products
-  // that carry each SKU. This guarantees every matching product is updated,
-  // including products that weren't in the Shopify export for the compare step.
   const skuCodeMap = new Map(); // sku → { productCode, variantCode }
   for (const v of toSync) {
     if (!skuCodeMap.has(v.variantSku)) {
@@ -992,109 +1013,130 @@ router.post('/sync-metafields', async (req, res) => {
     }
   }
 
-  let processed = 0;
-  const totalProducts = skuCodeMap.size; // "products" here = unique SKUs to process
-
   // productCodeWritten tracks which Shopify product GIDs already had
-  // product_code written this run (multiple SKUs can share a product).
+  // product_code written this run (multiple variants can share a product).
   const productCodeWritten = new Set();
 
-  console.log(`▶ Syncing metafields for ${skuCodeMap.size} unique SKUs (dryRun=${dryRun})`);
+  console.log(`▶ sync-metafields: ${skuCodeMap.size} unique CFS SKUs, bulk scan mode (dryRun=${dryRun})`);
 
-  try { // ── outer try ──────────────────────────────────────────────────────
+  // ════════════════════════════════════════════════════════════════════════
+  // PHASE 1 — Scan all Shopify variants (250 per page), collect matches
+  // ════════════════════════════════════════════════════════════════════════
+  send({ type: 'progress', phase: 'scan', scannedVariants: 0, matchedProducts: 0 });
 
-  for (const [sku, { productCode, variantCode }] of skuCodeMap) {
-    try {
-      // ── Query Shopify for ALL variants with this exact SKU ─────────────
-      // productVariants(query:"sku:'X'") uses an exact-match filter.
-      // We post-filter results to guard against partial matches.
-      let allVariantNodes = [];
-      let cursor    = null;
-      let hasMore   = true;
-      while (hasMore) {
-        const data = await gql(client, VARIANTS_BY_SKU_QUERY, {
-          query: `sku:'${sku}'`,
-          after:  cursor,
-        });
-        const edges    = data?.productVariants?.edges    || [];
-        const pageInfo = data?.productVariants?.pageInfo || {};
-        for (const e of edges) {
-          if (e.node.sku === sku) allVariantNodes.push(e.node); // exact match guard
+  // matchedByProduct: productId → { productNode, variants: [variantNode, ...] }
+  // Built during the scan so Phase 2 has all the data it needs in memory.
+  const matchedByProduct = new Map();
+  let scanCursor   = null;
+  let scanHasMore  = true;
+  let scannedVariants = 0;
+  let scannedPages    = 0;
+
+  try {
+    while (scanHasMore) {
+      const data     = await gql(client, ALL_VARIANTS_SCAN_QUERY, { after: scanCursor });
+      const edges    = data?.productVariants?.edges    || [];
+      const pageInfo = data?.productVariants?.pageInfo || {};
+      scannedPages++;
+      scannedVariants += edges.length;
+
+      for (const { node } of edges) {
+        if (!node.sku || !skuCodeMap.has(node.sku)) continue; // not a CFS SKU — skip
+        const pid = node.product.id;
+        if (!matchedByProduct.has(pid)) {
+          matchedByProduct.set(pid, { productNode: node.product, variants: [] });
         }
-        hasMore = pageInfo.hasNextPage;
-        cursor  = pageInfo.endCursor || null;
+        matchedByProduct.get(pid).variants.push(node);
       }
 
-      if (!allVariantNodes.length) {
-        log.push({ type: 'variant', sku, handle: '-', status: 'not_found',
-          message: `SKU ${sku} not found on any Shopify product`,
-          productCode, variantCode });
-        failed++;
-        continue;
+      scanHasMore = pageInfo.hasNextPage;
+      scanCursor  = pageInfo.endCursor || null;
+
+      send({ type: 'progress', phase: 'scan', scannedVariants, matchedProducts: matchedByProduct.size });
+
+      if (scannedPages % 10 === 0) {
+        console.log(`  … scan page ${scannedPages}: ${scannedVariants} variants scanned, ${matchedByProduct.size} products matched`);
       }
+    }
+  } catch (scanErr) {
+    console.error('  ✗ Scan phase error:', scanErr.message);
+    send({ type: 'done', success: false, error: `Scan failed after ${scannedVariants} variants: ${scanErr.message}`,
+      dryRun, synced, newCount, overwriteCount, skipped, failed, total: toSync.length, log });
+    endStream();
+    return;
+  }
 
-      // ── Group found variants by their parent product ───────────────────
-      const byProduct = new Map(); // productId → { productNode, variants: [] }
-      for (const varNode of allVariantNodes) {
-        const pid = varNode.product.id;
-        if (!byProduct.has(pid)) byProduct.set(pid, { productNode: varNode.product, variants: [] });
-        byProduct.get(pid).variants.push(varNode);
-      }
+  console.log(`  ✓ Scan complete — ${scannedVariants} variants scanned across ${scannedPages} pages, ${matchedByProduct.size} products matched`);
 
-      // ── Process each Shopify product that holds this SKU ───────────────
-      for (const [pid, { productNode, variants }] of byProduct) {
-        const handle          = productNode.handle;
-        const title           = productNode.title;
-        const existingProdCode = productNode.metafield?.value || '';
+  // ════════════════════════════════════════════════════════════════════════
+  // PHASE 2 — Write metafields for each matched product
+  // ════════════════════════════════════════════════════════════════════════
+  const totalProducts = matchedByProduct.size;
+  let processed = 0;
 
+  send({ type: 'progress', phase: 'write', processed: 0, totalProducts, synced, newCount, overwriteCount, skipped, failed });
+
+  try {
+    for (const [pid, { productNode, variants }] of matchedByProduct) {
+      const handle           = productNode.handle;
+      const title            = productNode.title;
+      const existingProdCode = productNode.metafield?.value || '';
+
+      // Determine the product_code for this product from its matched variants.
+      // All variants on the same Shopify product share the same CFS product_code,
+      // so take the first non-empty one.
+      const productCode = variants
+        .map(v => skuCodeMap.get(v.sku)?.productCode)
+        .find(c => c) || '';
+
+      try {
         if (dryRun) {
-          // product_code — report once per product per run
+          // ── Dry-run reporting ──────────────────────────────────────────
           if (productCode && !productCodeWritten.has(pid)) {
             if (!existingProdCode) {
-              log.push({ type: 'product', sku, handle, status: 'dry_run',
+              log.push({ type: 'product', sku: variants[0].sku, handle, status: 'dry_run',
                 message: `Would set custom.product_code = "${productCode}" on "${title}" (new)`,
                 productCode, variantCode: '' });
             } else if (existingProdCode === productCode) {
-              log.push({ type: 'product', sku, handle, status: 'match',
+              log.push({ type: 'product', sku: variants[0].sku, handle, status: 'match',
                 message: `custom.product_code already "${productCode}" on "${title}" — no change needed`,
                 productCode, variantCode: '' });
             } else {
-              log.push({ type: 'product', sku, handle, status: 'overwrite',
+              log.push({ type: 'product', sku: variants[0].sku, handle, status: 'overwrite',
                 message: `Would overwrite custom.product_code: "${existingProdCode}" → "${productCode}" on "${title}"`,
                 productCode, variantCode: '' });
             }
-            productCodeWritten.add(pid); // mark reported for this product
+            productCodeWritten.add(pid);
           }
 
-          // variant_code — report for each variant
-          if (variantCode) {
-            for (const varNode of variants) {
-              const existing = varNode.metafield?.value || '';
-              if (!existing) {
-                log.push({ type: 'variant', sku, handle, status: 'dry_run',
-                  message: `Would set custom.variant_code = "${variantCode}" on variant ${sku} in "${title}" (new)`,
-                  productCode, variantCode });
-              } else if (existing === variantCode) {
-                log.push({ type: 'variant', sku, handle, status: 'match',
-                  message: `custom.variant_code already "${variantCode}" on variant ${sku} in "${title}" — no change needed`,
-                  productCode, variantCode });
-              } else {
-                log.push({ type: 'variant', sku, handle, status: 'overwrite',
-                  message: `Would overwrite custom.variant_code: "${existing}" → "${variantCode}" on variant ${sku} in "${title}"`,
-                  productCode, variantCode });
-              }
+          for (const varNode of variants) {
+            const codes = skuCodeMap.get(varNode.sku) || {};
+            if (!codes.variantCode) continue;
+            const existing = varNode.metafield?.value || '';
+            if (!existing) {
+              log.push({ type: 'variant', sku: varNode.sku, handle, status: 'dry_run',
+                message: `Would set custom.variant_code = "${codes.variantCode}" on variant ${varNode.sku} in "${title}" (new)`,
+                productCode: codes.productCode, variantCode: codes.variantCode });
+            } else if (existing === codes.variantCode) {
+              log.push({ type: 'variant', sku: varNode.sku, handle, status: 'match',
+                message: `custom.variant_code already "${codes.variantCode}" on variant ${varNode.sku} in "${title}" — no change needed`,
+                productCode: codes.productCode, variantCode: codes.variantCode });
+            } else {
+              log.push({ type: 'variant', sku: varNode.sku, handle, status: 'overwrite',
+                message: `Would overwrite custom.variant_code: "${existing}" → "${codes.variantCode}" on variant ${varNode.sku} in "${title}"`,
+                productCode: codes.productCode, variantCode: codes.variantCode });
             }
           }
 
         } else {
           // ── Live sync ─────────────────────────────────────────────────
           const metafields   = [];
-          const overwriteMap = new Map(); // GID → old value
+          const overwriteMap = new Map(); // GID → old value (for log messages)
 
           // product_code: write once per product per run
           if (productCode && !productCodeWritten.has(pid)) {
             if (existingProdCode === productCode) {
-              log.push({ type: 'product', sku, handle, status: 'match',
+              log.push({ type: 'product', sku: variants[0].sku, handle, status: 'match',
                 message: `custom.product_code already "${productCode}" on "${title}" — skipped`,
                 productCode, variantCode: '' });
               skipped++;
@@ -1105,21 +1147,21 @@ router.post('/sync-metafields', async (req, res) => {
             }
           }
 
-          // variant_code: write for each variant on this product
-          if (variantCode) {
-            for (const varNode of variants) {
-              const existing = varNode.metafield?.value || '';
-              if (existing === variantCode) {
-                log.push({ type: 'variant', sku, handle, status: 'match',
-                  message: `custom.variant_code already "${variantCode}" on variant ${sku} in "${title}" — skipped`,
-                  productCode, variantCode });
-                skipped++;
-                continue;
-              }
-              if (existing) overwriteMap.set(varNode.id, existing);
-              metafields.push({ ownerId: varNode.id, namespace: 'custom', key: 'variant_code',
-                value: variantCode, type: 'single_line_text_field' });
+          // variant_code: one entry per matched variant on this product
+          for (const varNode of variants) {
+            const codes = skuCodeMap.get(varNode.sku) || {};
+            if (!codes.variantCode) continue;
+            const existing = varNode.metafield?.value || '';
+            if (existing === codes.variantCode) {
+              log.push({ type: 'variant', sku: varNode.sku, handle, status: 'match',
+                message: `custom.variant_code already "${codes.variantCode}" on variant ${varNode.sku} in "${title}" — skipped`,
+                productCode: codes.productCode, variantCode: codes.variantCode });
+              skipped++;
+              continue;
             }
+            if (existing) overwriteMap.set(varNode.id, existing);
+            metafields.push({ ownerId: varNode.id, namespace: 'custom', key: 'variant_code',
+              value: codes.variantCode, type: 'single_line_text_field' });
           }
 
           if (metafields.length) {
@@ -1133,7 +1175,8 @@ router.post('/sync-metafields', async (req, res) => {
                 const errMsg = userErrors.map(e => e.message).join(', ');
                 for (const mf of batch) {
                   const isProduct = mf.ownerId === pid;
-                  log.push({ type: isProduct ? 'product' : 'variant', sku, handle,
+                  const varSku    = isProduct ? variants[0].sku : (variants.find(v => v.id === mf.ownerId)?.sku || '-');
+                  log.push({ type: isProduct ? 'product' : 'variant', sku: varSku, handle,
                     status: 'error', message: `metafieldsSet failed: ${errMsg}` });
                   failed++;
                 }
@@ -1141,18 +1184,19 @@ router.post('/sync-metafields', async (req, res) => {
                 for (const mf of batch) {
                   const isProduct = mf.ownerId === pid;
                   const oldVal    = overwriteMap.get(mf.ownerId);
+                  const varSku    = isProduct ? variants[0].sku : (variants.find(v => v.id === mf.ownerId)?.sku || '-');
                   if (isProduct) {
                     productCodeWritten.add(pid);
                     const msg = oldVal
                       ? `Overwrote custom.product_code: "${oldVal}" → "${mf.value}" on "${title}"`
                       : `Set custom.product_code = "${mf.value}" on "${title}" (new)`;
-                    log.push({ type: 'product', sku, handle,
+                    log.push({ type: 'product', sku: varSku, handle,
                       status: oldVal ? 'overwrite' : 'synced', message: msg, productCode: mf.value, variantCode: '' });
                   } else {
                     const msg = oldVal
-                      ? `Overwrote custom.variant_code: "${oldVal}" → "${mf.value}" on variant ${sku} in "${title}"`
-                      : `Set custom.variant_code = "${mf.value}" on variant ${sku} in "${title}" (new)`;
-                    log.push({ type: 'variant', sku, handle,
+                      ? `Overwrote custom.variant_code: "${oldVal}" → "${mf.value}" on variant ${varSku} in "${title}"`
+                      : `Set custom.variant_code = "${mf.value}" on variant ${varSku} in "${title}" (new)`;
+                    log.push({ type: 'variant', sku: varSku, handle,
                       status: oldVal ? 'overwrite' : 'synced', message: msg, productCode: '', variantCode: mf.value });
                   }
                   synced++;
@@ -1161,43 +1205,37 @@ router.post('/sync-metafields', async (req, res) => {
               }
             }
 
-            await sleep(180);
+            await sleep(180); // brief pause between metafield write batches
           }
 
-          // Mark product as handled even if everything was already a match
           productCodeWritten.add(pid);
         }
-      } // end byProduct loop
+      } catch (err) {
+        const msg = err.response?.data?.errors || err.message;
+        console.error(`  ✗ [${handle}] Error: ${String(msg)}`);
+        log.push({ type: 'product', sku: variants[0]?.sku || '-', handle,
+          status: 'error', message: String(msg) });
+        failed++;
+      }
 
-    } catch (err) {
-      const msg = err.response?.data?.errors || err.message;
-      console.error(`  ✗ [${sku}] Error: ${String(msg)}`);
-      log.push({ type: 'variant', sku, handle: '-', status: 'error', message: String(msg) });
-      failed++;
+      processed++;
+      send({ type: 'progress', phase: 'write', processed, totalProducts, synced, newCount, overwriteCount, skipped, failed });
+
+      if (processed % 50 === 0 || processed === totalProducts) {
+        console.log(`  … write ${processed}/${totalProducts} products — synced: ${synced}, skipped: ${skipped}, failed: ${failed}`);
+      }
+
+      if (dryRun) await sleep(30);
     }
-
-    // Progress heartbeat after every unique SKU
-    processed++;
-    send({ type: 'progress', processed, totalProducts, synced, newCount, overwriteCount, skipped, failed });
-
-    if (processed % 50 === 0 || processed === totalProducts) {
-      console.log(`  … ${processed}/${totalProducts} SKUs done — synced: ${synced}, skipped: ${skipped}, failed: ${failed}`);
-    }
-
-    if (dryRun) await sleep(60); // light throttle between SKU queries in dry-run
-  }
-
-  // ── outer catch ────────────────────────────────────────────────────────
   } catch (outerErr) {
-    console.error(`  ✗ Unexpected outer error at SKU ${processed}/${totalProducts}:`, outerErr.message, outerErr.stack);
-    send({ type: 'done', success: false, error: `Server error at SKU ${processed}/${totalProducts}: ${outerErr.message}`,
+    console.error(`  ✗ Write phase error at product ${processed}/${totalProducts}:`, outerErr.message);
+    send({ type: 'done', success: false, error: `Write error at product ${processed}/${totalProducts}: ${outerErr.message}`,
       dryRun, synced, newCount, overwriteCount, skipped, failed, total: toSync.length, log });
     endStream();
     return;
   }
 
   console.log(`  ✓ Done — synced: ${synced} (new: ${newCount}, overwrites: ${overwriteCount}), skipped: ${skipped}, failed: ${failed}`);
-  // log[] here only contains entries from the very last SKU (already drained by recentLog above)
   send({ type: 'done', success: true, dryRun, synced, newCount, overwriteCount, skipped, failed, total: toSync.length, log });
   endStream();
 });

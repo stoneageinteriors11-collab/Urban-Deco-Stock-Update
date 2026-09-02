@@ -1243,9 +1243,14 @@ async function testConnection() {
           if (event.type === 'progress') {
             lastProgress = event;
             const p = progressEl();
-            if (p) p.textContent =
-              `${event.processed}/${event.totalProducts} products — ` +
-              `written: ${event.synced}, skipped: ${event.skipped}, failed: ${event.failed}`;
+            if (p) {
+              if (event.phase === 'scan') {
+                p.textContent = `Scanning Shopify catalog… ${event.scannedVariants.toLocaleString()} variants scanned, ${event.matchedProducts} products matched`;
+              } else {
+                p.textContent = `Writing metafields — ${event.processed}/${event.totalProducts} products — ` +
+                  `written: ${event.synced}, skipped: ${event.skipped}, failed: ${event.failed}`;
+              }
+            }
           } else if (event.type === 'done') {
             finalData = event;
           }
@@ -1253,10 +1258,15 @@ async function testConnection() {
       }
 
       if (!finalData) {
-        const pos = lastProgress
-          ? `stopped at product ${lastProgress.processed}/${lastProgress.totalProducts} ` +
-            `(written: ${lastProgress.synced}, skipped: ${lastProgress.skipped}, failed: ${lastProgress.failed})`
-          : 'no progress received';
+        let pos;
+        if (!lastProgress) {
+          pos = 'no progress received';
+        } else if (lastProgress.phase === 'scan') {
+          pos = `stopped during catalog scan (${(lastProgress.scannedVariants || 0).toLocaleString()} variants scanned, ${lastProgress.matchedProducts || 0} products matched)`;
+        } else {
+          pos = `stopped at product ${lastProgress.processed}/${lastProgress.totalProducts} ` +
+            `(written: ${lastProgress.synced}, skipped: ${lastProgress.skipped}, failed: ${lastProgress.failed})`;
+        }
         throw new Error(`Sync stream ended without completing — ${pos}.\nCheck Render logs for the full error.`);
       }
       if (!finalData.success) throw new Error(finalData.error || 'Unknown server error');
