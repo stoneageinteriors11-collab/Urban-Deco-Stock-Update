@@ -1013,11 +1013,45 @@ router.post('/sync-metafields', async (req, res) => {
     }
   }
 
+  // ── Identify product-level SKUs that have sub-variants in the feed ───────
+  // A "product-level" SKU looks like UD-{prodId} (2 segments).
+  // A "sub-variant" SKU looks like UD-{prodId}-{varId} (3 segments).
+  //
+  // Rule: for UD-{prodId} SKUs that have NO UD-{prodId}-{varId} entries in
+  // skuCodeMap, we must write variant_code on the Shopify variant in addition
+  // to product_code on the product — because that lone variant IS both the
+  // product and the only variant.
+  // If UD-{prodId}-{varId} sub-variants DO exist, those carry their own
+  // variant_code, and the product-level Shopify variant is just a placeholder.
+  const prodIdsWithSubVariants = new Set();
+  for (const sku of skuCodeMap.keys()) {
+    const parts = sku.split('-');
+    if (parts.length >= 3 && parts[0] === 'UD') {
+      prodIdsWithSubVariants.add(`${parts[0]}-${parts[1]}`); // e.g. "UD-601539"
+    }
+  }
+
+  // Returns the variant_code to write for a given Shopify variant SKU.
+  // For UD-{prodId}-{varId}: uses codes.variantCode (from CFS variant feed).
+  // For UD-{prodId} with no sub-variants: uses codes.variantCode if set,
+  //   then falls back to codes.productCode (product and variant are the same item).
+  // For UD-{prodId} WITH sub-variants: returns '' (skip — sub-variants own this).
+  function resolveVarCode(sku, codes) {
+    if (codes.variantCode) return codes.variantCode; // explicit value always wins
+    const parts = sku ? sku.split('-') : [];
+    if (parts.length === 2 && parts[0] === 'UD' && !prodIdsWithSubVariants.has(sku)) {
+      // Product-level SKU with no sub-variants: fall back to productCode
+      return codes.productCode || '';
+    }
+    return '';
+  }
+
   // productCodeWritten tracks which Shopify product GIDs already had
   // product_code written this run (multiple variants can share a product).
   const productCodeWritten = new Set();
 
   console.log(`▶ sync-metafields: ${skuCodeMap.size} unique CFS SKUs, bulk scan mode (dryRun=${dryRun})`);
+  console.log(`  product-level SKUs with sub-variants: ${prodIdsWithSubVariants.size}`);
 
   // ════════════════════════════════════════════════════════════════════════
   // PHASE 1 — Scan all Shopify variants (250 per page), collect matches
@@ -1110,21 +1144,22 @@ router.post('/sync-metafields', async (req, res) => {
           }
 
           for (const varNode of variants) {
-            const codes = skuCodeMap.get(varNode.sku) || {};
-            if (!codes.variantCode) continue;
+            const codes   = skuCodeMap.get(varNode.sku) || {};
+            const varCode = resolveVarCode(varNode.sku, codes);
+            if (!varCode) continue;
             const existing = varNode.metafield?.value || '';
             if (!existing) {
               log.push({ type: 'variant', sku: varNode.sku, handle, status: 'dry_run',
-                message: `Would set custom.variant_code = "${codes.variantCode}" on variant ${varNode.sku} in "${title}" (new)`,
-                productCode: codes.productCode, variantCode: codes.variantCode });
-            } else if (existing === codes.variantCode) {
+                message: `Would set custom.variant_code = "${varCode}" on variant ${varNode.sku} in "${title}" (new)`,
+                productCode: codes.productCode, variantCode: varCode });
+            } else if (existing === varCode) {
               log.push({ type: 'variant', sku: varNode.sku, handle, status: 'match',
-                message: `custom.variant_code already "${codes.variantCode}" on variant ${varNode.sku} in "${title}" — no change needed`,
-                productCode: codes.productCode, variantCode: codes.variantCode });
+                message: `custom.variant_code already "${varCode}" on variant ${varNode.sku} in "${title}" — no change needed`,
+                productCode: codes.productCode, variantCode: varCode });
             } else {
               log.push({ type: 'variant', sku: varNode.sku, handle, status: 'overwrite',
-                message: `Would overwrite custom.variant_code: "${existing}" → "${codes.variantCode}" on variant ${varNode.sku} in "${title}"`,
-                productCode: codes.productCode, variantCode: codes.variantCode });
+                message: `Would overwrite custom.variant_code: "${existing}" → "${varCode}" on variant ${varNode.sku} in "${title}"`,
+                productCode: codes.productCode, variantCode: varCode });
             }
           }
 
@@ -1149,19 +1184,20 @@ router.post('/sync-metafields', async (req, res) => {
 
           // variant_code: one entry per matched variant on this product
           for (const varNode of variants) {
-            const codes = skuCodeMap.get(varNode.sku) || {};
-            if (!codes.variantCode) continue;
+            const codes   = skuCodeMap.get(varNode.sku) || {};
+            const varCode = resolveVarCode(varNode.sku, codes);
+            if (!varCode) continue;
             const existing = varNode.metafield?.value || '';
-            if (existing === codes.variantCode) {
+            if (existing === varCode) {
               log.push({ type: 'variant', sku: varNode.sku, handle, status: 'match',
-                message: `custom.variant_code already "${codes.variantCode}" on variant ${varNode.sku} in "${title}" — skipped`,
-                productCode: codes.productCode, variantCode: codes.variantCode });
+                message: `custom.variant_code already "${varCode}" on variant ${varNode.sku} in "${title}" — skipped`,
+                productCode: codes.productCode, variantCode: varCode });
               skipped++;
               continue;
             }
             if (existing) overwriteMap.set(varNode.id, existing);
             metafields.push({ ownerId: varNode.id, namespace: 'custom', key: 'variant_code',
-              value: codes.variantCode, type: 'single_line_text_field' });
+              value: varCode, type: 'single_line_text_field' });
           }
 
           if (metafields.length) {
