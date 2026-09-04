@@ -574,30 +574,24 @@ router.post(
             } else {
               const isNew  = vInoutCur === null || currentQty === null;
               const status = dryRun ? 'dry_run' : (isNew ? 'new' : 'updated');
-              const rule   = `${vIsShortLead ? 'IN STOCK' : 'OUT OF STOCK'} (delivery: "${vDeliveryTime || 'n/a'}")`;
+              const ruleLabel   = vIsShortLead ? 'IN STOCK' : 'OUT OF STOCK';
+              const delivery    = vDeliveryTime || 'n/a';
 
-              const lines = [`Rule: ${rule}`];
-              lines.push(`  inoutstock: ${diffStr(vInoutCur, vInOutStock)}`);
+              const inoutChange = diffStr(vInoutCur, vInOutStock);
 
-              // Inventory line
+              let qtyChange;
               if (locationId !== null) {
                 if (!vIsShortLead) {
-                  // OUT OF STOCK: always targeting 0
-                  lines.push(`  qty:        ${diffQty(currentQty, 0)}`);
+                  qtyChange = diffQty(currentQty, 0);
                 } else if (currentQty === 0) {
-                  // IN STOCK and was 0 → set to 2
-                  lines.push(`  qty:        currently 0 — will set to 2`);
+                  qtyChange = 'currently 0 — will set to 2';
                 } else {
-                  // IN STOCK and already > 0 → no change
-                  lines.push(`  qty:        currently ${currentQty} (no change — already > 0)`);
+                  qtyChange = `currently ${currentQty} (no change — already > 0)`;
                 }
               } else {
-                // No read_locations scope
-                if (!vIsShortLead) {
-                  lines.push(`  qty:        would set to 0 — reconnect Shopify via OAuth to enable inventory reads`);
-                } else {
-                  lines.push(`  qty:        would set to 2 if currently 0 — reconnect Shopify via OAuth to enable inventory reads`);
-                }
+                qtyChange = !vIsShortLead
+                  ? 'would set to 0 — reconnect Shopify to enable inventory reads'
+                  : 'would set to 2 if 0 — reconnect Shopify to enable inventory reads';
               }
 
               if (!dryRun) {
@@ -606,7 +600,7 @@ router.post(
                 if (isNew) newCount++; else updatedCount++;
               }
 
-              log.push({ sku: varSku, handle, status, message: lines.join('\n') });
+              log.push({ sku: varSku, handle, status, rule: ruleLabel, delivery, inoutChange, qtyChange });
             }
           }
 
@@ -892,21 +886,22 @@ router.post('/sync-api', async (req, res) => {
             } else {
               const isNew  = vInoutCur === null || currentQty === null;
               const status = dryRun ? 'dry_run' : (isNew ? 'new' : 'updated');
-              const rule   = `${vIsShortLead ? 'IN STOCK' : 'OUT OF STOCK'} (delivery: "${vDeliveryTime || 'n/a'}")`;
+              const ruleLabel   = vIsShortLead ? 'IN STOCK' : 'OUT OF STOCK';
+              const delivery    = vDeliveryTime || 'n/a';
 
-              const lines = [`Rule: ${rule}`];
-              lines.push(`  inoutstock: ${diffStr(vInoutCur, vInOutStock)}`);
+              const inoutChange = diffStr(vInoutCur, vInOutStock);
 
+              let qtyChange;
               if (locationId !== null) {
-                if (!vIsShortLead)        lines.push(`  qty:        ${diffQty(currentQty, 0)}`);
-                else if (currentQty === 0) lines.push(`  qty:        currently 0 — will set to 2`);
-                else                      lines.push(`  qty:        currently ${currentQty} (no change — already > 0)`);
+                if (!vIsShortLead)         qtyChange = diffQty(currentQty, 0);
+                else if (currentQty === 0) qtyChange = 'currently 0 — will set to 2';
+                else                       qtyChange = `currently ${currentQty} (no change — already > 0)`;
               } else {
-                lines.push(`  qty:        inventory reads disabled — reconnect Shopify to enable`);
+                qtyChange = 'inventory reads disabled — reconnect Shopify to enable';
               }
 
               if (isNew) newCount++; else updatedCount++;
-              log.push({ sku: varSku, handle, status, message: lines.join('\n') });
+              log.push({ sku: varSku, handle, status, rule: ruleLabel, delivery, inoutChange, qtyChange });
             }
           } // end per-variant
 

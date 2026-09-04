@@ -1764,10 +1764,16 @@ async function testConnection() {
                 : l.status === 'warning'  ? 'log-overwrite'
                 : l.status === 'failed'   ? 'log-error'
                 : 'log-ok';
-      // Split message into header line + detail lines
-      const lines  = (l.message || '').split('\n');
-      const first  = lines[0] || '';
-      const detail = lines.slice(1).join('\n');
+      // Structured entries (dry_run / new / updated) have separate fields
+      let first, detail;
+      if (l.rule) {
+        first  = `Rule: ${l.rule} — Delivery: ${l.delivery}`;
+        detail = `inoutstock: ${l.inoutChange}\nqty: ${l.qtyChange}`;
+      } else {
+        const lines = (l.message || '').split('\n');
+        first  = lines[0] || '';
+        detail = lines.slice(1).join('\n');
+      }
       const detailHtml = detail
         ? `<span style="display:block;margin-top:3px;padding-left:12px;font-size:11px;opacity:.75;white-space:pre-wrap;">${detail}</span>`
         : '';
@@ -1778,12 +1784,17 @@ async function testConnection() {
 
   function downloadStockSyncLog() {
     if (!lastStockSyncLog.length) return;
-    const headers = ['SKU', 'Handle', 'Status', 'Message'];
+    const esc = s => `"${String(s || '').replace(/"/g, '""')}"`;
+    const headers = ['SKU', 'Handle', 'Status', 'Rule', 'Delivery', 'InOutStock Change', 'Qty Change', 'Message'];
     const rows = lastStockSyncLog.map(l => [
-      l.sku || '',
-      `"${(l.handle || '').replace(/"/g, '""')}"`,
+      l.sku   || '',
+      esc(l.handle),
       l.status,
-      `"${(l.message || '').replace(/\n/g, ' ').replace(/"/g, '""')}"`,
+      l.rule     || '',                   // "IN STOCK" or "OUT OF STOCK" (empty for skipped/failed)
+      l.delivery || '',                   // "12 Weeks", "In Stock", etc.
+      esc(l.inoutChange || ''),           // e.g. currently "IN STOCK" — will change to "OUT OF STOCK"
+      esc(l.qtyChange   || ''),           // e.g. currently 1 — will set to 0
+      esc(l.message     || ''),           // simple message for skipped / failed / warning rows
     ]);
     const csv  = [headers, ...rows].map(r => r.join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
