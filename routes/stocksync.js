@@ -146,8 +146,8 @@ const GET_PRODUCT_STOCK_QUERY = `
 
 // Without inventory quantities (fallback when read_inventory scope is missing)
 const GET_PRODUCTS_BULK_QUERY = `
-  query getProductsBulk($first: Int!, $after: String) {
-    products(first: $first, after: $after) {
+  query getProductsBulk($first: Int!, $after: String, $query: String) {
+    products(first: $first, after: $after, query: $query) {
       pageInfo { hasNextPage endCursor }
       edges {
         node {
@@ -174,8 +174,8 @@ const GET_PRODUCTS_BULK_QUERY = `
 
 // With inventory quantities (requires read_inventory scope — added after re-auth)
 const GET_PRODUCTS_BULK_QUERY_WITH_INV = `
-  query getProductsBulkWithInv($first: Int!, $after: String, $locationId: ID!) {
-    products(first: $first, after: $after) {
+  query getProductsBulkWithInv($first: Int!, $after: String, $locationId: ID!, $query: String) {
+    products(first: $first, after: $after, query: $query) {
       pageInfo { hasNextPage endCursor }
       edges {
         node {
@@ -733,7 +733,7 @@ router.post('/sync-api', async (req, res) => {
           cleanup(); res.end(); return;
         }
 
-        const vars = { first: PAGE };
+        const vars = { first: PAGE, query: 'vendor:"Urban Deco"' };
         if (cursor)     vars.after      = cursor;
         if (locationId) vars.locationId = locationId;
 
