@@ -1767,7 +1767,7 @@ async function testConnection() {
       // Structured entries (dry_run / new / updated) have separate fields
       let first, detail;
       if (l.rule) {
-        first  = `Rule: ${l.rule} — Delivery: ${l.delivery}`;
+        first  = `Rule: ${l.rule} — Delivery: ${l.delivery}${l.dueDateChange ? ` — Due: ${l.dueDateChange}` : ''}`;
         detail = `inoutstock: ${l.inoutChange}\nqty: ${l.qtyChange}`;
       } else {
         const lines = (l.message || '').split('\n');
@@ -1785,16 +1785,17 @@ async function testConnection() {
   function downloadStockSyncLog() {
     if (!lastStockSyncLog.length) return;
     const esc = s => `"${String(s || '').replace(/"/g, '""')}"`;
-    const headers = ['SKU', 'Handle', 'Status', 'Rule', 'Delivery', 'InOutStock Change', 'Qty Change', 'Message'];
+    const headers = ['SKU', 'Handle', 'Status', 'Rule', 'Delivery', 'Due Date', 'InOutStock Change', 'Qty Change', 'Message'];
     const rows = lastStockSyncLog.map(l => [
       l.sku   || '',
       esc(l.handle),
       l.status,
-      l.rule     || '',                   // "IN STOCK" or "OUT OF STOCK" (empty for skipped/failed)
-      l.delivery || '',                   // "12 Weeks", "In Stock", etc.
-      esc(l.inoutChange || ''),           // e.g. currently "IN STOCK" — will change to "OUT OF STOCK"
-      esc(l.qtyChange   || ''),           // e.g. currently 1 — will set to 0
-      esc(l.message     || ''),           // simple message for skipped / failed / warning rows
+      l.rule          || '',              // "IN STOCK" or "OUT OF STOCK" (empty for skipped/failed)
+      l.delivery      || '',              // "12 Weeks", "In Stock", etc.
+      esc(l.dueDateChange || ''),         // CFS dueDate value copied to Shopify
+      esc(l.inoutChange   || ''),         // e.g. currently "IN STOCK" — will change to "OUT OF STOCK"
+      esc(l.qtyChange     || ''),         // e.g. currently 1 — will set to 0
+      esc(l.message       || ''),         // simple message for skipped / failed / warning rows
     ]);
     const csv  = [headers, ...rows].map(r => r.join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });

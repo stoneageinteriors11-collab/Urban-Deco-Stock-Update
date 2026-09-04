@@ -473,25 +473,33 @@ router.post(
 
             // Delivery time is always the source of truth — never trust vinOutStock directly
             const vDeliveryTime = varStock ? varStock.vNotificationTitle : varProdStock.deliveryTime;
+            const vDueDate      = varStock ? (varStock.vDueDate || '') : (varProdStock?.dueDate || '');
             const vIsShortLead  = deliveryTimeIsShort(vDeliveryTime);
             const vInOutStock   = vIsShortLead ? 'IN STOCK' : 'OUT OF STOCK';
 
-            // Product-level inoutstock: write once from the first matched variant
+            // Product-level inoutstock + duedate: write once from the first matched variant
             if (!productInoutWritten) {
               productInoutWritten = true;
               const prodInoutCur = existingProd['inoutstock'] ?? null;
+              const prodMfToWrite = [];
               if (prodInoutCur !== vInOutStock) {
-                const prodMfToWrite = [{
+                prodMfToWrite.push({
                   ownerId: product.id, namespace: 'custom', key: 'inoutstock',
                   value: vInOutStock, type: 'single_line_text_field',
-                }];
-                if (!dryRun) {
-                  const mfResult = await gql(client, METAFIELDS_SET_MUTATION, { metafields: prodMfToWrite });
-                  const mfErrors = mfResult?.metafieldsSet?.userErrors || [];
-                  if (mfErrors.length) {
-                    log.push({ sku: varSku, handle, status: 'warning',
-                      message: `Product metafield error: ${mfErrors.map(e => e.message).join(', ')}` });
-                  }
+                });
+              }
+              if (vDueDate) {
+                prodMfToWrite.push({
+                  ownerId: product.id, namespace: 'custom', key: 'duedate',
+                  value: vDueDate, type: 'single_line_text_field',
+                });
+              }
+              if (!dryRun && prodMfToWrite.length > 0) {
+                const mfResult = await gql(client, METAFIELDS_SET_MUTATION, { metafields: prodMfToWrite });
+                const mfErrors = mfResult?.metafieldsSet?.userErrors || [];
+                if (mfErrors.length) {
+                  log.push({ sku: varSku, handle, status: 'warning',
+                    message: `Product metafield error: ${mfErrors.map(e => e.message).join(', ')}` });
                 }
               }
             }
@@ -502,7 +510,7 @@ router.post(
             const currentQty  = invLevel?.quantities?.find(q => q.name === 'available')?.quantity ?? null;
             const invItemId   = shopNode.inventoryItem?.id;
 
-            // ── Inoutstock metafield ──────────────────────────────────────
+            // ── Variant metafields: inoutstock + vnotificationtitle + duedate ─
             const varMfToWrite  = [];
             const vInoutCur     = existingVar['inoutstock'] ?? null;
             const vInoutChanged = vInoutCur !== vInOutStock;
@@ -510,6 +518,18 @@ router.post(
               varMfToWrite.push({
                 ownerId: shopNode.id, namespace: 'custom', key: 'inoutstock',
                 value: vInOutStock, type: 'single_line_text_field',
+              });
+            }
+            if (vDeliveryTime) {
+              varMfToWrite.push({
+                ownerId: shopNode.id, namespace: 'custom', key: 'vnotificationtitle',
+                value: vDeliveryTime, type: 'single_line_text_field',
+              });
+            }
+            if (vDueDate) {
+              varMfToWrite.push({
+                ownerId: shopNode.id, namespace: 'custom', key: 'duedate',
+                value: vDueDate, type: 'single_line_text_field',
               });
             }
 
@@ -602,7 +622,8 @@ router.post(
                 if (isNew) newCount++; else updatedCount++;
               }
 
-              log.push({ sku: varSku, handle, status, rule: ruleLabel, delivery, inoutChange, qtyChange });
+              log.push({ sku: varSku, handle, status, rule: ruleLabel, delivery, inoutChange, qtyChange,
+                dueDateChange: vDueDate || '' });
             }
           }
 
@@ -804,18 +825,25 @@ router.post('/sync-api', async (req, res) => {
             }
 
             const vDeliveryTime = varStock ? varStock.vNotificationTitle : varProdStock.deliveryTime;
+            const vDueDate      = varStock ? (varStock.vDueDate || '') : (varProdStock?.dueDate || '');
             const vIsShortLead  = deliveryTimeIsShort(vDeliveryTime);
             const vInOutStock   = vIsShortLead ? 'IN STOCK' : 'OUT OF STOCK';
 
-            // Product-level inoutstock — write once from first matched variant
+            // Product-level inoutstock + duedate — write once from first matched variant
             if (!productInoutWritten) {
               productInoutWritten = true;
-              const prodInoutCur = existingProd['inoutstock'] ?? null;
-              if (prodInoutCur !== vInOutStock && !dryRun) {
-                const mfResult = await gql(client, METAFIELDS_SET_MUTATION, {
-                  metafields: [{ ownerId: product.id, namespace: 'custom', key: 'inoutstock',
-                    value: vInOutStock, type: 'single_line_text_field' }],
-                });
+              const prodInoutCur  = existingProd['inoutstock'] ?? null;
+              const prodMfToWrite = [];
+              if (prodInoutCur !== vInOutStock) {
+                prodMfToWrite.push({ ownerId: product.id, namespace: 'custom', key: 'inoutstock',
+                  value: vInOutStock, type: 'single_line_text_field' });
+              }
+              if (vDueDate) {
+                prodMfToWrite.push({ ownerId: product.id, namespace: 'custom', key: 'duedate',
+                  value: vDueDate, type: 'single_line_text_field' });
+              }
+              if (!dryRun && prodMfToWrite.length > 0) {
+                const mfResult = await gql(client, METAFIELDS_SET_MUTATION, { metafields: prodMfToWrite });
                 const mfErrors = mfResult?.metafieldsSet?.userErrors || [];
                 if (mfErrors.length) {
                   log.push({ sku: varSku, handle, status: 'warning',
@@ -829,13 +857,21 @@ router.post('/sync-api', async (req, res) => {
             const currentQty   = invLevel?.quantities?.find(q => q.name === 'available')?.quantity ?? null;
             const invItemId    = shopNode.inventoryItem?.id;
 
-            // Variant inoutstock metafield
+            // Variant metafields: inoutstock + vnotificationtitle + duedate
             const varMfToWrite  = [];
             const vInoutCur     = existingVar['inoutstock'] ?? null;
             const vInoutChanged = vInoutCur !== vInOutStock;
             if (vInoutChanged) {
               varMfToWrite.push({ ownerId: shopNode.id, namespace: 'custom', key: 'inoutstock',
                 value: vInOutStock, type: 'single_line_text_field' });
+            }
+            if (vDeliveryTime) {
+              varMfToWrite.push({ ownerId: shopNode.id, namespace: 'custom', key: 'vnotificationtitle',
+                value: vDeliveryTime, type: 'single_line_text_field' });
+            }
+            if (vDueDate) {
+              varMfToWrite.push({ ownerId: shopNode.id, namespace: 'custom', key: 'duedate',
+                value: vDueDate, type: 'single_line_text_field' });
             }
 
             // Inventory quantity logic
@@ -910,7 +946,8 @@ router.post('/sync-api', async (req, res) => {
               }
 
               if (isNew) newCount++; else updatedCount++;
-              log.push({ sku: varSku, handle, status, rule: ruleLabel, delivery, inoutChange, qtyChange });
+              log.push({ sku: varSku, handle, status, rule: ruleLabel, delivery, inoutChange, qtyChange,
+                dueDateChange: vDueDate || '' });
             }
           } // end per-variant
 
