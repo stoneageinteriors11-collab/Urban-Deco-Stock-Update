@@ -511,6 +511,7 @@ router.post(
             const invItemId   = shopNode.inventoryItem?.id;
 
             // ── Variant metafields: inoutstock + vnotificationtitle + duedate ─
+            // Only push each field if the CFS value differs from what Shopify already has.
             const varMfToWrite  = [];
             const vInoutCur     = existingVar['inoutstock'] ?? null;
             const vInoutChanged = vInoutCur !== vInOutStock;
@@ -520,13 +521,13 @@ router.post(
                 value: vInOutStock, type: 'single_line_text_field',
               });
             }
-            if (vDeliveryTime) {
+            if (vDeliveryTime && existingVar['vnotificationtitle'] !== vDeliveryTime) {
               varMfToWrite.push({
                 ownerId: shopNode.id, namespace: 'custom', key: 'vnotificationtitle',
                 value: vDeliveryTime, type: 'single_line_text_field',
               });
             }
-            if (vDueDate) {
+            if (vDueDate && existingVar['duedate'] !== vDueDate) {
               varMfToWrite.push({
                 ownerId: shopNode.id, namespace: 'custom', key: 'duedate',
                 value: vDueDate, type: 'single_line_text_field',
@@ -859,6 +860,7 @@ router.post('/sync-api', async (req, res) => {
             const invItemId    = shopNode.inventoryItem?.id;
 
             // Variant metafields: inoutstock + vnotificationtitle + duedate
+            // Only push each field if the CFS value differs from what Shopify already has.
             const varMfToWrite  = [];
             const vInoutCur     = existingVar['inoutstock'] ?? null;
             const vInoutChanged = vInoutCur !== vInOutStock;
@@ -866,11 +868,11 @@ router.post('/sync-api', async (req, res) => {
               varMfToWrite.push({ ownerId: shopNode.id, namespace: 'custom', key: 'inoutstock',
                 value: vInOutStock, type: 'single_line_text_field' });
             }
-            if (vDeliveryTime) {
+            if (vDeliveryTime && existingVar['vnotificationtitle'] !== vDeliveryTime) {
               varMfToWrite.push({ ownerId: shopNode.id, namespace: 'custom', key: 'vnotificationtitle',
                 value: vDeliveryTime, type: 'single_line_text_field' });
             }
-            if (vDueDate) {
+            if (vDueDate && existingVar['duedate'] !== vDueDate) {
               varMfToWrite.push({ ownerId: shopNode.id, namespace: 'custom', key: 'duedate',
                 value: vDueDate, type: 'single_line_text_field' });
             }
