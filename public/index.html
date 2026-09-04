@@ -296,66 +296,9 @@
     </div>
   </header>
 
-  <!-- ── Step 1: Upload Files ── -->
+  <!-- ── Step 1: Shopify Connection ── -->
   <div class="card">
-    <div class="card-title">Step 1 — Upload Files</div>
-
-    <!-- CFS data (fetched from API automatically) -->
-    <div class="upload-group">
-      <div class="upload-group-label">Choice Furniture Superstore — Product &amp; Variant Data</div>
-      <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);border-radius:var(--radius);">
-        <span style="font-size:22px;">🌐</span>
-        <div>
-          <div style="font-size:13px;font-weight:600;color:var(--success);">Fetched automatically from CFS API</div>
-          <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">
-            No file upload required — CFS product &amp; variant data is fetched live from
-            <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">productVariantStockJsonCFS.php?brandId=215</code>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Shopify exports -->
-    <div class="upload-group">
-      <div class="upload-group-label">Urban Deco — Shopify Export</div>
-      <div class="grid-2">
-
-        <div>
-          <div class="upload-zone-label">File 1 <span class="req">*</span></div>
-          <div class="upload-slot" id="slot-shop1">
-            <div class="upload-zone" id="zone-shop1" onclick="document.getElementById('input-shop1').click()">
-              <input type="file" id="input-shop1" accept=".csv,.xlsx,.xls" />
-              <div class="icon">🛍</div>
-              <div class="label">products_export_1</div>
-              <div class="sub">CSV or Excel · Urban Deco Shopify export</div>
-              <div class="file-name" id="fname-shop1"></div>
-            </div>
-            <button class="remove-btn" onclick="clearFile('shop1')">✕ Remove file</button>
-          </div>
-        </div>
-
-        <div>
-          <div class="upload-zone-label">File 2 <span class="opt">(optional)</span></div>
-          <div class="upload-slot" id="slot-shop2">
-            <div class="upload-zone" id="zone-shop2" onclick="document.getElementById('input-shop2').click()">
-              <input type="file" id="input-shop2" accept=".csv,.xlsx,.xls" />
-              <div class="icon">🛍</div>
-              <div class="label">products_export_2</div>
-              <div class="sub">CSV or Excel · If export was split</div>
-              <div class="file-name" id="fname-shop2"></div>
-            </div>
-            <button class="remove-btn" onclick="clearFile('shop2')">✕ Remove file</button>
-          </div>
-        </div>
-
-      </div>
-    </div>
-
-  </div>
-
-  <!-- ── Step 2: Settings ── -->
-  <div class="card">
-    <div class="card-title">Step 2 — Shopify Connection</div>
+    <div class="card-title">Step 1 — Shopify Connection</div>
     <div style="display:flex;gap:16px;align-items:flex-end;flex-wrap:wrap;">
 
       <div style="display:flex;flex-direction:column;gap:10px;flex:1;">
@@ -387,6 +330,110 @@
       </div>
 
     </div>
+  </div>
+
+  <!-- ── Step 2: Upload Files ── -->
+  <div class="card">
+    <div class="card-title">Step 2 — Upload Files</div>
+
+    <!-- Mode tabs -->
+    <div style="display:flex;gap:8px;margin-bottom:18px;">
+      <button id="upload-tab-api" onclick="switchUploadMode('api')"
+        style="padding:7px 18px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#fff;font-size:13px;font-weight:600;cursor:pointer;">
+        🤖 API Mode
+      </button>
+      <button id="upload-tab-csv" onclick="switchUploadMode('csv')"
+        style="padding:7px 18px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--text-muted);font-size:13px;font-weight:600;cursor:pointer;">
+        📂 CSV Upload
+      </button>
+    </div>
+
+    <!-- API mode: both sources auto-fetched -->
+    <div id="upload-api-section">
+      <div class="upload-group">
+        <div class="upload-group-label">Choice Furniture Superstore — Product &amp; Variant Data</div>
+        <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);border-radius:var(--radius);">
+          <span style="font-size:22px;">🌐</span>
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--success);">Fetched automatically from CFS API</div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">
+              No file upload required — CFS product &amp; variant data is fetched live from
+              <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">productVariantStockJsonCFS.php?brandId=215</code>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="upload-group">
+        <div class="upload-group-label">Urban Deco — Shopify Product Data</div>
+        <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;background:rgba(99,102,241,.07);border:1px solid rgba(99,102,241,.25);border-radius:var(--radius);">
+          <span style="font-size:22px;">🔗</span>
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--accent);">Fetched automatically via Shopify API</div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">
+              No export needed — product &amp; variant data is fetched live using your connected Shopify account.
+            </div>
+          </div>
+        </div>
+      </div>
+      <p style="font-size:12px;color:var(--text-muted);margin-top:12px;">
+        In API mode, no files need to be uploaded. Proceed to Step 3 to run a comparison, or Step 5 to sync stock.
+      </p>
+    </div>
+
+    <!-- CSV mode: manual Shopify export uploads -->
+    <div id="upload-csv-section" class="hidden">
+      <!-- CFS data (fetched from API automatically) -->
+      <div class="upload-group">
+        <div class="upload-group-label">Choice Furniture Superstore — Product &amp; Variant Data</div>
+        <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);border-radius:var(--radius);">
+          <span style="font-size:22px;">🌐</span>
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--success);">Fetched automatically from CFS API</div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">
+              No file upload required — CFS product &amp; variant data is fetched live from
+              <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">productVariantStockJsonCFS.php?brandId=215</code>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Shopify exports -->
+      <div class="upload-group">
+        <div class="upload-group-label">Urban Deco — Shopify Export (CSV)</div>
+        <div class="grid-2">
+
+          <div>
+            <div class="upload-zone-label">File 1 <span class="req">*</span></div>
+            <div class="upload-slot" id="slot-shop1">
+              <div class="upload-zone" id="zone-shop1" onclick="document.getElementById('input-shop1').click()">
+                <input type="file" id="input-shop1" accept=".csv,.xlsx,.xls" />
+                <div class="icon">🛍</div>
+                <div class="label">products_export_1</div>
+                <div class="sub">CSV or Excel · Urban Deco Shopify export</div>
+                <div class="file-name" id="fname-shop1"></div>
+              </div>
+              <button class="remove-btn" onclick="clearFile('shop1')">✕ Remove file</button>
+            </div>
+          </div>
+
+          <div>
+            <div class="upload-zone-label">File 2 <span class="opt">(optional)</span></div>
+            <div class="upload-slot" id="slot-shop2">
+              <div class="upload-zone" id="zone-shop2" onclick="document.getElementById('input-shop2').click()">
+                <input type="file" id="input-shop2" accept=".csv,.xlsx,.xls" />
+                <div class="icon">🛍</div>
+                <div class="label">products_export_2</div>
+                <div class="sub">CSV or Excel · If export was split</div>
+                <div class="file-name" id="fname-shop2"></div>
+              </div>
+              <button class="remove-btn" onclick="clearFile('shop2')">✕ Remove file</button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
   </div>
 
   <!-- ── Step 3: Compare ── -->
@@ -734,14 +781,11 @@
       const r = await fetch('/auth/status');
       const d = await r.json();
 
-      if (d.connected) {
+      if (d.connected || justConnected) {
         setConnected(true);
-      } else if (justConnected) {
-        // OAuth just completed — token is in this process's env var but the
-        // status check may have hit a different dyno on Render.
-        // Show connected and display the token so the user can save it permanently.
-        setConnected(true);
-        showTokenNotice();
+        // Always show the token banner when we just came back from OAuth,
+        // even if the status check already says connected (same dyno case).
+        if (justConnected) showTokenNotice();
       } else {
         setConnected(false);
       }
@@ -1402,6 +1446,31 @@ async function testConnection() {
   let lastStockSyncLog = [];
   let stockSyncReader  = null;
   let currentSyncMode  = 'api'; // 'api' | 'csv'
+
+  // ── Upload mode tab switcher (Step 2) ────────────────────────────────────
+  function switchUploadMode(mode) {
+    const isApi = mode === 'api';
+    document.getElementById('upload-api-section').classList.toggle('hidden', !isApi);
+    document.getElementById('upload-csv-section').classList.toggle('hidden', isApi);
+
+    const tabApi = document.getElementById('upload-tab-api');
+    const tabCsv = document.getElementById('upload-tab-csv');
+    if (isApi) {
+      tabApi.style.background = 'var(--accent)';
+      tabApi.style.borderColor = 'var(--accent)';
+      tabApi.style.color = '#fff';
+      tabCsv.style.background = 'transparent';
+      tabCsv.style.borderColor = 'var(--border)';
+      tabCsv.style.color = 'var(--text-muted)';
+    } else {
+      tabCsv.style.background = 'var(--accent)';
+      tabCsv.style.borderColor = 'var(--accent)';
+      tabCsv.style.color = '#fff';
+      tabApi.style.background = 'transparent';
+      tabApi.style.borderColor = 'var(--border)';
+      tabApi.style.color = 'var(--text-muted)';
+    }
+  }
 
   // ── Mode tab switcher ─────────────────────────────────────────────────────
   function switchSyncMode(mode) {
