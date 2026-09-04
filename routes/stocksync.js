@@ -515,7 +515,8 @@ router.post(
 
             // ── Inventory quantity logic ──────────────────────────────────
             // OUT OF STOCK: always set qty to 0
-            // IN STOCK:     set qty to 2 ONLY if currently 0; otherwise no change
+            // IN STOCK:     if currently 0, set to CFS onHand (fallback 2); otherwise no change
+            const cfsOnHand = varStock ? (varStock.vOnHand ?? 0) : (varProdStock?.onHand ?? 0);
             let targetQty;
             let shouldWriteInv;
             if (!vIsShortLead) {
@@ -525,7 +526,7 @@ router.post(
             } else {
               // IN STOCK
               if (currentQty === 0) {
-                targetQty    = 2;
+                targetQty    = cfsOnHand > 0 ? cfsOnHand : 2;
                 shouldWriteInv = locationId !== null;
               } else {
                 // qty > 0 or unknown — do not touch inventory
@@ -584,14 +585,15 @@ router.post(
                 if (!vIsShortLead) {
                   qtyChange = diffQty(currentQty, 0);
                 } else if (currentQty === 0) {
-                  qtyChange = 'currently 0 — will set to 2';
+                  const tgt = cfsOnHand > 0 ? cfsOnHand : 2;
+                  qtyChange = `currently 0 — will set to ${tgt}${cfsOnHand > 0 ? ` (CFS onHand: ${cfsOnHand})` : ' (CFS onHand: 0, using fallback)'}`;
                 } else {
                   qtyChange = `currently ${currentQty} (no change — already > 0)`;
                 }
               } else {
                 qtyChange = !vIsShortLead
                   ? 'would set to 0 — reconnect Shopify to enable inventory reads'
-                  : 'would set to 2 if 0 — reconnect Shopify to enable inventory reads';
+                  : `would set to ${cfsOnHand > 0 ? cfsOnHand : 2} if 0 — reconnect Shopify to enable inventory reads`;
               }
 
               if (!dryRun) {
@@ -837,13 +839,15 @@ router.post('/sync-api', async (req, res) => {
             }
 
             // Inventory quantity logic
+            // IN STOCK: if currently 0, set to CFS onHand (fallback 2 if onHand is 0)
+            const cfsOnHand = varStock ? (varStock.vOnHand ?? 0) : (varProdStock?.onHand ?? 0);
             let targetQty, shouldWriteInv;
             if (!vIsShortLead) {
               targetQty      = 0;
               shouldWriteInv = locationId !== null && currentQty !== 0;
             } else {
               if (currentQty === 0) {
-                targetQty      = 2;
+                targetQty      = cfsOnHand > 0 ? cfsOnHand : 2;
                 shouldWriteInv = locationId !== null;
               } else {
                 targetQty      = currentQty;
@@ -893,9 +897,14 @@ router.post('/sync-api', async (req, res) => {
 
               let qtyChange;
               if (locationId !== null) {
-                if (!vIsShortLead)         qtyChange = diffQty(currentQty, 0);
-                else if (currentQty === 0) qtyChange = 'currently 0 — will set to 2';
-                else                       qtyChange = `currently ${currentQty} (no change — already > 0)`;
+                if (!vIsShortLead) {
+                  qtyChange = diffQty(currentQty, 0);
+                } else if (currentQty === 0) {
+                  const tgt = cfsOnHand > 0 ? cfsOnHand : 2;
+                  qtyChange = `currently 0 — will set to ${tgt}${cfsOnHand > 0 ? ` (CFS onHand: ${cfsOnHand})` : ' (CFS onHand: 0, using fallback)'}`;
+                } else {
+                  qtyChange = `currently ${currentQty} (no change — already > 0)`;
+                }
               } else {
                 qtyChange = 'inventory reads disabled — reconnect Shopify to enable';
               }
