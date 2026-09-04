@@ -44,7 +44,7 @@ function loadToken() {
 router.get('/', (req, res) => {
   const shop    = process.env.SHOPIFY_STORE;
   const apiKey  = process.env.SHOPIFY_API_KEY;
-  const scopes  = process.env.SCOPES || 'read_products,write_products,read_locations,write_inventory';
+  const scopes  = process.env.SCOPES || 'read_products,write_products,read_locations,read_inventory,write_inventory';
   const appUrl  = process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`;
   const redirect = `${appUrl}/auth/callback`;
   const nonce   = crypto.randomBytes(16).toString('hex');

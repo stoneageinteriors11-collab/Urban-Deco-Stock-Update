@@ -142,6 +142,69 @@ const GET_PRODUCT_STOCK_QUERY = `
   }
 `;
 
+// ── Bulk product fetch queries (used by /sync-api — no CSV upload needed) ─────
+
+// Without inventory quantities (fallback when read_inventory scope is missing)
+const GET_PRODUCTS_BULK_QUERY = `
+  query getProductsBulk($first: Int!, $after: String) {
+    products(first: $first, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      edges {
+        node {
+          id handle vendor status
+          metafields(first: 20, namespace: "custom") {
+            edges { node { key value } }
+          }
+          variants(first: 250) {
+            edges {
+              node {
+                id sku
+                metafields(first: 20, namespace: "custom") {
+                  edges { node { key value } }
+                }
+                inventoryItem { id }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+// With inventory quantities (requires read_inventory scope — added after re-auth)
+const GET_PRODUCTS_BULK_QUERY_WITH_INV = `
+  query getProductsBulkWithInv($first: Int!, $after: String, $locationId: ID!) {
+    products(first: $first, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      edges {
+        node {
+          id handle vendor status
+          metafields(first: 20, namespace: "custom") {
+            edges { node { key value } }
+          }
+          variants(first: 250) {
+            edges {
+              node {
+                id sku
+                metafields(first: 20, namespace: "custom") {
+                  edges { node { key value } }
+                }
+                inventoryItem {
+                  id
+                  inventoryLevel(locationId: $locationId) {
+                    quantities(names: ["available"]) { name quantity }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
 // ── Mutations ─────────────────────────────────────────────────────────────────
 
 const METAFIELDS_SET_MUTATION = `
@@ -583,5 +646,297 @@ router.post(
     }
   }
 );
+
+// ── POST /api/stock/sync-api ──────────────────────────────────────────────────
+//
+// API-driven sync — fetches Shopify product data directly (no CSV upload).
+// Streams SSE in two phases:
+//   Phase 1 — Fetch CFS + location + all Shopify products (paginated)
+//   Phase 2 — Compare with CFS and write updates (same logic as /sync)
+//
+// Requires read_inventory scope for inventory qty. Without it metafields still
+// sync and a one-time warning is shown in the log.
+//
+// Render keep-alive: sends SSE comment pings every 15s to prevent timeout.
+//
+router.post('/sync-api', async (req, res) => {
+  try {
+    const dryRun = req.body?.dryRun !== 'false' && req.body?.dryRun !== false;
+
+    let client;
+    try { client = graphqlClient(); }
+    catch (err) { return res.status(400).json({ error: err.message }); }
+
+    // ── SSE headers — open stream immediately (keeps Render connection alive) ──
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (res.socket) res.socket.setNoDelay(true);
+    res.flushHeaders();
+
+    const send = obj => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+
+    // Keepalive ping every 15 s — prevents Render from closing idle connections
+    const keepalive = setInterval(() => res.write(': ping\n\n'), 15000);
+    const cleanup   = () => clearInterval(keepalive);
+
+    try {
+      cancelRequested = false;
+
+      // ── Phase 1a: CFS stock data ──────────────────────────────────────────
+      send({ type: 'status', phase: 'cfs', message: 'Fetching CFS stock data…' });
+      const cfsProducts = await fetchCfsProducts();
+      const { prodStockBySku, varStockBySku } = buildStockData(cfsProducts);
+      send({ type: 'status', phase: 'cfs-done',
+        message: `CFS: ${cfsProducts.length} products, ${varStockBySku.size} variant records` });
+
+      // ── Phase 1b: Shopify location ────────────────────────────────────────
+      let locationId   = null;
+      let hasLocations = false;
+      send({ type: 'status', phase: 'location', message: 'Fetching Shopify location…' });
+      try {
+        const locData = await gql(client, GET_LOCATIONS_QUERY);
+        const locs    = (locData?.locations?.edges || []).map(e => e.node);
+        console.log(`  ℹ Locations: ${locs.map(l => `"${l.name}"`).join(', ') || 'none'}`);
+        const loc     = locs.find(l => /^shop$/i.test(l.name))
+                     || locs.find(l => /shop|warehouse|main/i.test(l.name))
+                     || locs[0];
+        if (loc) {
+          locationId   = loc.id;
+          hasLocations = true;
+          send({ type: 'status', phase: 'location-done',
+            message: `Location: "${loc.name}"` });
+        } else {
+          send({ type: 'status', phase: 'location-warn',
+            message: 'No location found — inventory sync will be skipped' });
+        }
+      } catch (locErr) {
+        send({ type: 'status', phase: 'location-warn',
+          message: 'Location fetch failed — inventory sync will be skipped' });
+      }
+
+      // ── Phase 1c: Paginated Shopify product fetch ─────────────────────────
+      send({ type: 'status', phase: 'shopify-fetch', message: 'Fetching Shopify products…' });
+
+      const byHandle = new Map();      // handle → product GraphQL node
+      let   cursor   = null;
+      const PAGE     = 50;             // safe limit for nested variant data
+      const QUERY    = locationId
+        ? GET_PRODUCTS_BULK_QUERY_WITH_INV
+        : GET_PRODUCTS_BULK_QUERY;
+
+      while (true) {
+        if (cancelRequested) {
+          send({ type: 'done', success: true, cancelled: true, dryRun,
+            newCount: 0, updatedCount: 0, skipped: 0, failed: 0, total: 0, log: [] });
+          cleanup(); res.end(); return;
+        }
+
+        const vars = { first: PAGE };
+        if (cursor)     vars.after      = cursor;
+        if (locationId) vars.locationId = locationId;
+
+        const data = await gql(client, QUERY, vars);
+        const page = data?.products;
+        if (!page) break;
+
+        for (const edge of (page.edges || [])) {
+          if (edge.node?.handle) byHandle.set(edge.node.handle, edge.node);
+        }
+
+        send({ type: 'fetch-progress', fetched: byHandle.size, hasMore: page.pageInfo.hasNextPage });
+
+        if (!page.pageInfo.hasNextPage) break;
+        cursor = page.pageInfo.endCursor;
+        await sleep(200); // stay within 2 req/s burst budget
+      }
+
+      const totalProducts = byHandle.size;
+      send({ type: 'fetch-done', total: totalProducts });
+      console.log(`  ✓ Fetched ${totalProducts} Shopify products (dryRun=${dryRun}, inventory=${hasLocations})`);
+
+      // ── Phase 2: Sync ─────────────────────────────────────────────────────
+      const log = [];
+      let newCount = 0, updatedCount = 0, skipped = 0, failed = 0, processed = 0;
+
+      if (!hasLocations) {
+        log.push({ sku: '-', handle: '-', status: 'warning',
+          message: 'Inventory sync disabled — token is missing read_locations or read_inventory scope.\n' +
+            'Fix: Disconnect then reconnect Shopify (OAuth) to get an updated token with all scopes.' });
+      }
+
+      for (const [handle, product] of byHandle) {
+        if (cancelRequested) {
+          send({ type: 'done', success: true, cancelled: true, dryRun,
+            newCount, updatedCount, skipped, failed, total: totalProducts, log });
+          cleanup(); res.end(); return;
+        }
+
+        try {
+          // Skip non-active products
+          const productStatus = (product.status || '').toLowerCase();
+          if (productStatus && productStatus !== 'active') {
+            const varCount = product.variants?.edges?.length || 0;
+            skipped += varCount;
+            log.push({ sku: '-', handle, status: 'skipped',
+              message: `Shopify product is ${productStatus.toUpperCase()} — skipped` });
+            processed++;
+            send({ type: 'progress', processed, totalProducts, newCount, updatedCount, skipped, failed });
+            continue;
+          }
+
+          const shopifyNodes   = (product.variants?.edges || []).map(e => e.node);
+          const existingProd   = metafieldMap(product.metafields);
+          let   productInoutWritten = false;
+
+          for (const shopNode of shopifyNodes) {
+            const varSku = shopNode.sku;
+            if (!varSku) continue;
+
+            const varStock     = varStockBySku.get(varSku);
+            const varProdStock = varStock ? null : prodStockBySku.get(varSku);
+
+            if (!varStock && !varProdStock) {
+              skipped++;
+              log.push({ sku: varSku, handle, status: 'skipped',
+                message: 'No CFS stock data found for this variant SKU — skipped' });
+              continue;
+            }
+
+            const vDeliveryTime = varStock ? varStock.vNotificationTitle : varProdStock.deliveryTime;
+            const vIsShortLead  = deliveryTimeIsShort(vDeliveryTime);
+            const vInOutStock   = vIsShortLead ? 'IN STOCK' : 'OUT OF STOCK';
+
+            // Product-level inoutstock — write once from first matched variant
+            if (!productInoutWritten) {
+              productInoutWritten = true;
+              const prodInoutCur = existingProd['inoutstock'] ?? null;
+              if (prodInoutCur !== vInOutStock && !dryRun) {
+                const mfResult = await gql(client, METAFIELDS_SET_MUTATION, {
+                  metafields: [{ ownerId: product.id, namespace: 'custom', key: 'inoutstock',
+                    value: vInOutStock, type: 'single_line_text_field' }],
+                });
+                const mfErrors = mfResult?.metafieldsSet?.userErrors || [];
+                if (mfErrors.length) {
+                  log.push({ sku: varSku, handle, status: 'warning',
+                    message: `Product metafield error: ${mfErrors.map(e => e.message).join(', ')}` });
+                }
+              }
+            }
+
+            const existingVar  = metafieldMap(shopNode.metafields);
+            const invLevel     = shopNode.inventoryItem?.inventoryLevel;
+            const currentQty   = invLevel?.quantities?.find(q => q.name === 'available')?.quantity ?? null;
+            const invItemId    = shopNode.inventoryItem?.id;
+
+            // Variant inoutstock metafield
+            const varMfToWrite  = [];
+            const vInoutCur     = existingVar['inoutstock'] ?? null;
+            const vInoutChanged = vInoutCur !== vInOutStock;
+            if (vInoutChanged) {
+              varMfToWrite.push({ ownerId: shopNode.id, namespace: 'custom', key: 'inoutstock',
+                value: vInOutStock, type: 'single_line_text_field' });
+            }
+
+            // Inventory quantity logic
+            let targetQty, shouldWriteInv;
+            if (!vIsShortLead) {
+              targetQty      = 0;
+              shouldWriteInv = locationId !== null && currentQty !== 0;
+            } else {
+              if (currentQty === 0) {
+                targetQty      = 2;
+                shouldWriteInv = locationId !== null;
+              } else {
+                targetQty      = currentQty;
+                shouldWriteInv = false;
+              }
+            }
+
+            // Live writes
+            if (!dryRun) {
+              if (varMfToWrite.length > 0) {
+                const vmfResult = await gql(client, METAFIELDS_SET_MUTATION, { metafields: varMfToWrite });
+                const vmfErrors = vmfResult?.metafieldsSet?.userErrors || [];
+                if (vmfErrors.length) {
+                  log.push({ sku: varSku, handle, status: 'warning',
+                    message: `Variant metafield error: ${vmfErrors.map(e => e.message).join(', ')}` });
+                }
+              }
+              if (invItemId && locationId && shouldWriteInv) {
+                const invResult = await gql(client, INVENTORY_SET_MUTATION, {
+                  input: { name: 'available', reason: 'correction',
+                    quantities: [{ inventoryItemId: invItemId, locationId, quantity: targetQty }] },
+                });
+                const invErrors = invResult?.inventorySetQuantities?.userErrors || [];
+                if (invErrors.length) {
+                  log.push({ sku: varSku, handle, status: 'warning',
+                    message: `Inventory set error: ${invErrors.map(e => e.message).join(', ')}` });
+                }
+              }
+            }
+
+            // Build log entry
+            const anyChanged = vInoutChanged || shouldWriteInv;
+
+            if (!anyChanged && currentQty !== null) {
+              skipped++;
+              log.push({ sku: varSku, handle, status: 'skipped',
+                message: `All values already correct — no changes needed\n` +
+                  `  inoutstock: "${vInOutStock}" (no change)\n` +
+                  `  qty:        ${currentQty} (no change)` });
+            } else {
+              const isNew  = vInoutCur === null || currentQty === null;
+              const status = dryRun ? 'dry_run' : (isNew ? 'new' : 'updated');
+              const rule   = `${vIsShortLead ? 'IN STOCK' : 'OUT OF STOCK'} (delivery: "${vDeliveryTime || 'n/a'}")`;
+
+              const lines = [`Rule: ${rule}`];
+              lines.push(`  inoutstock: ${diffStr(vInoutCur, vInOutStock)}`);
+
+              if (locationId !== null) {
+                if (!vIsShortLead)        lines.push(`  qty:        ${diffQty(currentQty, 0)}`);
+                else if (currentQty === 0) lines.push(`  qty:        currently 0 — will set to 2`);
+                else                      lines.push(`  qty:        currently ${currentQty} (no change — already > 0)`);
+              } else {
+                lines.push(`  qty:        inventory reads disabled — reconnect Shopify to enable`);
+              }
+
+              if (isNew) newCount++; else updatedCount++;
+              log.push({ sku: varSku, handle, status, message: lines.join('\n') });
+            }
+          } // end per-variant
+
+          await sleep(dryRun ? 50 : 200);
+
+        } catch (prodErr) {
+          failed++;
+          console.error(`  ✗ "${handle}":`, prodErr.message);
+          log.push({ sku: '-', handle, status: 'failed', message: prodErr.message });
+        }
+
+        processed++;
+        send({ type: 'progress', processed, totalProducts, newCount, updatedCount, skipped, failed });
+
+        if (processed % 50 === 0 || processed === totalProducts) {
+          console.log(`  … ${processed}/${totalProducts} — new:${newCount} updated:${updatedCount} skipped:${skipped} failed:${failed}`);
+        }
+      }
+
+      console.log(`  ✓ API sync done — new:${newCount} updated:${updatedCount} skipped:${skipped} failed:${failed}`);
+      send({ type: 'done', success: true, dryRun,
+        newCount, updatedCount, skipped, failed, total: totalProducts, log });
+
+    } finally {
+      cleanup();
+      res.end();
+    }
+
+  } catch (err) {
+    console.error('sync-api error:', err);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+    else res.end();
+  }
+});
 
 module.exports = router;

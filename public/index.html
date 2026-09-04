@@ -523,55 +523,92 @@
     <div class="card-title">Step 5 — Stock Sync (Delivery Time, Inventory &amp; Metafields)</div>
 
     <p style="font-size:13px;color:var(--text-muted);margin-bottom:18px;line-height:1.6">
-      Syncs <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.inoutstock</code>,
-      <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.duedate</code>,
-      <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.vnotificationtitle</code> and inventory quantity.
+      Syncs <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.inoutstock</code> and inventory quantity.
       Rule: delivery ≤ 6 weeks → <strong style="color:var(--success)">IN STOCK</strong> (qty min 2);
       &gt; 6 weeks → <strong style="color:var(--danger)">OUT OF STOCK</strong> (qty 0).
-      CFS stock data is fetched automatically from the API.
     </p>
 
-    <!-- CFS data (fetched from API) -->
-    <div class="upload-group">
-      <div class="upload-group-label">Choice Furniture Superstore — Stock Data</div>
-      <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);border-radius:var(--radius);">
-        <span style="font-size:22px;">🌐</span>
-        <div>
-          <div style="font-size:13px;font-weight:600;color:var(--success);">Fetched automatically from CFS API</div>
-          <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">
-            Delivery time, stock status, onHand and dueDate are fetched live —
-            <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">productVariantStockJsonCFS.php?brandId=215</code>
+    <!-- Mode selector tabs -->
+    <div style="display:flex;gap:8px;margin-bottom:18px;">
+      <button id="tab-api" onclick="switchSyncMode('api')"
+        style="padding:7px 16px;border-radius:7px;font-size:13px;font-weight:600;border:1px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer;">
+        🚀 API Mode
+      </button>
+      <button id="tab-csv" onclick="switchSyncMode('csv')"
+        style="padding:7px 16px;border-radius:7px;font-size:13px;font-weight:600;border:1px solid var(--border);background:transparent;color:var(--text-muted);cursor:pointer;">
+        📤 CSV Backup
+      </button>
+    </div>
+
+    <!-- ── API Mode ── -->
+    <div id="ss-api-section">
+      <div class="upload-group">
+        <div class="upload-group-label">Data Sources — Both fetched automatically</div>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <!-- CFS banner -->
+          <div style="display:flex;align-items:center;gap:12px;padding:13px 16px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);border-radius:var(--radius);">
+            <span style="font-size:20px;">🌐</span>
+            <div>
+              <div style="font-size:13px;font-weight:600;color:var(--success);">CFS Stock API</div>
+              <div style="font-size:12px;color:var(--text-muted);margin-top:1px;">
+                Delivery time, stock status, onHand and dueDate fetched live from
+                <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">productVariantStockJsonCFS.php?brandId=215</code>
+              </div>
+            </div>
+          </div>
+          <!-- Shopify banner -->
+          <div style="display:flex;align-items:center;gap:12px;padding:13px 16px;background:rgba(99,102,241,.07);border:1px solid rgba(99,102,241,.25);border-radius:var(--radius);">
+            <span style="font-size:20px;">🛍</span>
+            <div>
+              <div style="font-size:13px;font-weight:600;color:var(--accent);">Shopify Products API</div>
+              <div style="font-size:12px;color:var(--text-muted);margin-top:1px;">
+                All active products with variants, metafields and inventory fetched via GraphQL — no export file needed
+              </div>
+            </div>
           </div>
         </div>
       </div>
     </div>
 
-    <div class="upload-group">
-      <div class="upload-group-label">Shopify Exports</div>
-      <div class="grid-2">
-        <div>
-          <div class="upload-zone-label">Shopify Export 1 <span class="req">*</span></div>
-          <div class="upload-zone" id="ss-zone-shop1">
-            <input type="file" id="ss-input-shop1" accept=".csv,.xlsx,.xls" />
-            <div class="icon">🛍</div>
-            <div class="label" id="ss-slot-shop1">Drop file or click to browse</div>
-            <div class="sub">Standard Shopify product export with variant SKUs</div>
-            <div class="file-name hidden" id="ss-fname-shop1"></div>
+    <!-- ── CSV Backup Mode (hidden by default) ── -->
+    <div id="ss-csv-section" class="hidden">
+      <div class="upload-group">
+        <div class="upload-group-label">Choice Furniture Superstore — Stock Data</div>
+        <div style="display:flex;align-items:center;gap:12px;padding:13px 16px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);border-radius:var(--radius);">
+          <span style="font-size:20px;">🌐</span>
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--success);">CFS Stock API — always fetched live</div>
           </div>
         </div>
-        <div>
-          <div class="upload-zone-label">Shopify Export 2 <span class="opt">(optional)</span></div>
-          <div class="upload-zone" id="ss-zone-shop2">
-            <input type="file" id="ss-input-shop2" accept=".csv,.xlsx,.xls" />
-            <div class="icon">🛍</div>
-            <div class="label" id="ss-slot-shop2">Drop file or click to browse</div>
-            <div class="sub">Second export file if products are split</div>
-            <div class="file-name hidden" id="ss-fname-shop2"></div>
+      </div>
+      <div class="upload-group">
+        <div class="upload-group-label">Shopify Exports</div>
+        <div class="grid-2">
+          <div>
+            <div class="upload-zone-label">Shopify Export 1 <span class="req">*</span></div>
+            <div class="upload-zone" id="ss-zone-shop1">
+              <input type="file" id="ss-input-shop1" accept=".csv,.xlsx,.xls" />
+              <div class="icon">🛍</div>
+              <div class="label" id="ss-slot-shop1">Drop file or click to browse</div>
+              <div class="sub">Standard Shopify product export with variant SKUs</div>
+              <div class="file-name hidden" id="ss-fname-shop1"></div>
+            </div>
+          </div>
+          <div>
+            <div class="upload-zone-label">Shopify Export 2 <span class="opt">(optional)</span></div>
+            <div class="upload-zone" id="ss-zone-shop2">
+              <input type="file" id="ss-input-shop2" accept=".csv,.xlsx,.xls" />
+              <div class="icon">🛍</div>
+              <div class="label" id="ss-slot-shop2">Drop file or click to browse</div>
+              <div class="sub">Second export file if products are split</div>
+              <div class="file-name hidden" id="ss-fname-shop2"></div>
+            </div>
           </div>
         </div>
       </div>
     </div>
 
+    <!-- Dry run toggle (shared) -->
     <div style="padding-bottom:2px;margin-bottom:16px;">
       <div class="toggle-wrap">
         <label class="toggle">
@@ -583,9 +620,13 @@
       </div>
     </div>
 
+    <!-- Buttons -->
     <div class="actions-row">
-      <button class="btn btn-primary" id="btn-ss-run" onclick="runStockSync()">
-        📊 Run Stock Sync
+      <button class="btn btn-primary" id="btn-ss-run-api" onclick="runStockSyncApi()">
+        🚀 Run Stock Sync
+      </button>
+      <button class="btn btn-primary hidden" id="btn-ss-run-csv" onclick="runStockSyncCsv()">
+        📤 Run Stock Sync (CSV)
       </button>
       <button class="btn btn-danger hidden" id="btn-ss-stop" onclick="stopStockSync()">
         ⛔ Stop Sync
@@ -593,11 +634,19 @@
       <button class="btn btn-warning hidden" id="btn-ss-download-log" onclick="downloadStockSyncLog()">
         📋 Download Log
       </button>
-      <span id="ss-spinner" class="hidden"><span class="spinner"></span> Syncing stock…</span>
+      <span id="ss-spinner" class="hidden"><span class="spinner"></span> <span id="ss-spinner-text">Running…</span></span>
     </div>
 
-    <!-- Progress + summary tiles -->
-    <div id="ss-progress-wrap" class="hidden" style="margin-top:18px;">
+    <!-- Phase 1: Fetch progress (API mode only) -->
+    <div id="ss-fetch-wrap" class="hidden" style="margin-top:16px;padding:14px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);">
+      <p style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em;">Phase 1 — Fetching from Shopify API</p>
+      <div id="ss-fetch-steps" style="font-size:12px;font-family:monospace;display:flex;flex-direction:column;gap:4px;"></div>
+      <div id="ss-fetch-count" style="font-size:12px;color:var(--text-muted);margin-top:8px;"></div>
+    </div>
+
+    <!-- Phase 2: Sync progress (both modes) -->
+    <div id="ss-progress-wrap" class="hidden" style="margin-top:16px;">
+      <p id="ss-phase-label" style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:10px;text-transform:uppercase;letter-spacing:.05em;">Phase 2 — Syncing</p>
       <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px;" id="ss-tiles"></div>
       <div id="ss-progress-bar-wrap" style="background:var(--surface2);border-radius:6px;height:6px;overflow:hidden;">
         <div id="ss-progress-bar" style="height:100%;background:var(--accent);width:0%;transition:width .3s;"></div>
@@ -1351,15 +1400,45 @@ async function testConnection() {
   // ── Stock Sync (Step 5) ───────────────────────────────────────────────────
 
   let lastStockSyncLog = [];
-  let stockSyncReader  = null; // holds the active SSE reader so Stop can cancel it
+  let stockSyncReader  = null;
+  let currentSyncMode  = 'api'; // 'api' | 'csv'
 
-  // Wire up the two stock sync upload zones (Shopify exports only — CFS from API)
+  // ── Mode tab switcher ─────────────────────────────────────────────────────
+  function switchSyncMode(mode) {
+    currentSyncMode = mode;
+    const isApi = mode === 'api';
+
+    document.getElementById('ss-api-section').classList.toggle('hidden', !isApi);
+    document.getElementById('ss-csv-section').classList.toggle('hidden',  isApi);
+    document.getElementById('btn-ss-run-api').classList.toggle('hidden', !isApi);
+    document.getElementById('btn-ss-run-csv').classList.toggle('hidden',  isApi);
+
+    const tabApi = document.getElementById('tab-api');
+    const tabCsv = document.getElementById('tab-csv');
+    if (isApi) {
+      tabApi.style.background = 'var(--accent)'; tabApi.style.color = '#fff'; tabApi.style.borderColor = 'var(--accent)';
+      tabCsv.style.background = 'transparent';   tabCsv.style.color = 'var(--text-muted)'; tabCsv.style.borderColor = 'var(--border)';
+    } else {
+      tabCsv.style.background = 'var(--accent)'; tabCsv.style.color = '#fff'; tabCsv.style.borderColor = 'var(--accent)';
+      tabApi.style.background = 'transparent';   tabApi.style.color = 'var(--text-muted)'; tabApi.style.borderColor = 'var(--border)';
+    }
+
+    // Reset progress area on mode switch
+    document.getElementById('ss-fetch-wrap').classList.add('hidden');
+    document.getElementById('ss-progress-wrap').classList.add('hidden');
+    document.getElementById('ss-log-panel').innerHTML = '';
+    document.getElementById('ss-log-panel').classList.remove('log-box');
+    document.getElementById('btn-ss-download-log').classList.add('hidden');
+    document.getElementById('ss-progress-bar').style.width = '0%';
+    document.getElementById('ss-progress-bar').style.background = 'var(--accent)';
+  }
+
+  // Wire up CSV upload zones
   ['shop1','shop2'].forEach(id => {
     const input = document.getElementById(`ss-input-${id}`);
     const zone  = document.getElementById(`ss-zone-${id}`);
     const fname = document.getElementById(`ss-fname-${id}`);
     if (!input) return;
-
     function markFile(file) {
       zone.classList.add('has-file');
       fname.textContent = file.name;
@@ -1379,103 +1458,140 @@ async function testConnection() {
     const on = document.getElementById('ss-dry-run-toggle').checked;
     const b  = document.getElementById('ss-dry-badge');
     b.textContent = on ? 'ON — No changes will be made' : 'OFF — Will update Shopify';
-    b.style.background = on ? '' : 'rgba(239,68,68,.12)';
-    b.style.color      = on ? '' : 'var(--danger)';
+    b.style.background  = on ? '' : 'rgba(239,68,68,.12)';
+    b.style.color       = on ? '' : 'var(--danger)';
     b.style.borderColor = on ? '' : 'rgba(239,68,68,.3)';
   }
 
   function ssSetRunning(running) {
-    document.getElementById('btn-ss-run').disabled  = running;
+    document.getElementById('btn-ss-run-api').disabled = running;
+    document.getElementById('btn-ss-run-csv').disabled = running;
     document.getElementById('btn-ss-stop').classList.toggle('hidden', !running);
     document.getElementById('ss-spinner').classList.toggle('hidden', !running);
   }
 
   async function stopStockSync() {
-    // Tell the server to stop after the current product
     try { await fetch('/api/stock/cancel', { method: 'POST' }); } catch(_) {}
-    // Also cancel the client-side stream reader
     if (stockSyncReader) { try { stockSyncReader.cancel(); } catch(_) {} }
   }
 
-  async function runStockSync() {
-    const shop1File = document.getElementById('ss-input-shop1').files[0];
-
-    if (!shop1File) {
-      alert('Please upload at least one Shopify export file.');
-      return;
-    }
-
-    const dryRun = document.getElementById('ss-dry-run-toggle').checked;
-
-    ssSetRunning(true);
-    document.getElementById('btn-ss-download-log').classList.add('hidden');
-
+  // ── Shared SSE stream handler ─────────────────────────────────────────────
+  async function handleSyncStream(fetchPromise, dryRun, isApiMode) {
     const progressWrap = document.getElementById('ss-progress-wrap');
+    const phaseLabel   = document.getElementById('ss-phase-label');
     const tiles        = document.getElementById('ss-tiles');
     const bar          = document.getElementById('ss-progress-bar');
     const progressText = document.getElementById('ss-progress-text');
     const logPanel     = document.getElementById('ss-log-panel');
-    progressWrap.classList.remove('hidden');
-    tiles.innerHTML = '';
-    bar.style.width = '0%';
-    progressText.textContent = 'Starting…';
+    const fetchWrap    = document.getElementById('ss-fetch-wrap');
+    const fetchSteps   = document.getElementById('ss-fetch-steps');
+    const fetchCount   = document.getElementById('ss-fetch-count');
+
+    // Show fetch panel for API mode
+    if (isApiMode) {
+      fetchWrap.classList.remove('hidden');
+      fetchSteps.innerHTML = '';
+      fetchCount.textContent = '';
+    }
+
     logPanel.innerHTML = '';
+    logPanel.classList.remove('log-box');
     lastStockSyncLog = [];
     stockSyncReader  = null;
 
-    const fd = new FormData();
-    fd.append('shopifyFile1', shop1File);
-    fd.append('dryRun',       dryRun ? 'true' : 'false');
-    const shop2File = document.getElementById('ss-input-shop2').files[0];
-    if (shop2File) fd.append('shopifyFile2', shop2File);
+    const addStep = (emoji, msg, color) => {
+      const p = document.createElement('p');
+      p.style.color = color || 'var(--text-muted)';
+      p.textContent = `${emoji} ${msg}`;
+      fetchSteps.appendChild(p);
+      fetchSteps.scrollTop = fetchSteps.scrollHeight;
+    };
 
     try {
-      const res = await fetch('/api/stock/sync', { method: 'POST', body: fd });
-
+      const res = await fetchPromise;
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: res.statusText }));
         throw new Error(err.error || `HTTP ${res.status}`);
       }
 
-      stockSyncReader   = res.body.getReader();
-      const decoder     = new TextDecoder();
-      let   buf         = '';
+      stockSyncReader  = res.body.getReader();
+      const decoder    = new TextDecoder();
+      let   buf        = '';
 
       while (true) {
         let chunk;
-        try { chunk = await stockSyncReader.read(); } catch(_) { break; } // cancelled
+        try { chunk = await stockSyncReader.read(); } catch(_) { break; }
         const { done, value } = chunk;
         if (done) break;
         buf += decoder.decode(value, { stream: true });
         const parts = buf.split('\n\n');
         buf = parts.pop();
+
         for (const part of parts) {
+          if (part.startsWith(': ')) continue; // SSE keepalive comment
           const line = part.startsWith('data: ') ? part.slice(6) : part;
           if (!line.trim()) continue;
           let evt;
           try { evt = JSON.parse(line); } catch { continue; }
 
-          if (evt.type === 'progress') {
+          // Phase 1 status events (API mode only)
+          if (evt.type === 'status') {
+            const icons = {
+              'cfs':            ['⏳', 'var(--text-muted)'],
+              'cfs-done':       ['✅', 'var(--success)'],
+              'location':       ['⏳', 'var(--text-muted)'],
+              'location-done':  ['✅', 'var(--success)'],
+              'location-warn':  ['⚠️', 'var(--warning)'],
+              'shopify-fetch':  ['⏳', 'var(--text-muted)'],
+            };
+            const [icon, color] = icons[evt.phase] || ['•', 'var(--text-muted)'];
+            addStep(icon, evt.message, color);
+            document.getElementById('ss-spinner-text').textContent = evt.message;
+          }
+
+          // Phase 1 fetch progress
+          else if (evt.type === 'fetch-progress') {
+            fetchCount.textContent = `Fetched ${evt.fetched} products${evt.hasMore ? '…' : ' ✅'}`;
+          }
+
+          // Phase 1 complete — show phase 2
+          else if (evt.type === 'fetch-done') {
+            addStep('✅', `Fetched ${evt.total} Shopify products — starting sync…`, 'var(--success)');
+            fetchCount.textContent = `${evt.total} products total`;
+            progressWrap.classList.remove('hidden');
+            phaseLabel.textContent = 'Phase 2 — Syncing with CFS data';
+            document.getElementById('ss-spinner-text').textContent = 'Syncing…';
+            tiles.innerHTML = '';
+            bar.style.width = '0%';
+            progressText.textContent = 'Starting sync…';
+          }
+
+          // Phase 2 progress
+          else if (evt.type === 'progress') {
             const pct = evt.totalProducts > 0 ? Math.round((evt.processed / evt.totalProducts) * 100) : 0;
             bar.style.width = pct + '%';
             progressText.textContent = `${evt.processed} / ${evt.totalProducts} products — new: ${evt.newCount}, updated: ${evt.updatedCount}, skipped: ${evt.skipped}, failed: ${evt.failed}`;
             tiles.innerHTML = `
               <div class="tile ok-count"><div class="num">${evt.newCount}</div><div class="lbl">New</div></div>
               <div class="tile cfs-product-count"><div class="num">${evt.updatedCount}</div><div class="lbl">Updated</div></div>
-              <div class="tile draft-count"><div class="num">${evt.skipped}</div><div class="lbl">Skipped (no change)</div></div>
+              <div class="tile draft-count"><div class="num">${evt.skipped}</div><div class="lbl">Skipped</div></div>
               <div class="tile ${evt.failed > 0 ? 'orphaned' : ''}"><div class="num">${evt.failed}</div><div class="lbl">Failed</div></div>
             `;
-          } else if (evt.type === 'done') {
+            // For CSV mode, show progress wrap on first event
+            if (!isApiMode) progressWrap.classList.remove('hidden');
+          }
+
+          // Done
+          else if (evt.type === 'done') {
             if (evt.cancelled) {
               bar.style.background = 'var(--warning)';
-              progressText.textContent = `⛔ Stopped at ${evt.newCount + evt.updatedCount + evt.skipped + evt.failed} products — new: ${evt.newCount}, updated: ${evt.updatedCount}, skipped: ${evt.skipped}, failed: ${evt.failed}`;
+              progressText.textContent = `⛔ Stopped — new: ${evt.newCount}, updated: ${evt.updatedCount}, skipped: ${evt.skipped}, failed: ${evt.failed}`;
             } else {
               bar.style.width = '100%';
               progressText.textContent = evt.success
                 ? `✅ Done — ${evt.newCount} new, ${evt.updatedCount} updated, ${evt.skipped} skipped, ${evt.failed} failed`
                 : `❌ Error: ${evt.error}`;
             }
-
             lastStockSyncLog = evt.log || [];
             if (lastStockSyncLog.length) {
               document.getElementById('btn-ss-download-log').classList.remove('hidden');
@@ -1486,12 +1602,62 @@ async function testConnection() {
       }
 
     } catch (err) {
+      progressWrap.classList.remove('hidden');
       progressText.textContent = 'Error: ' + err.message;
       logPanel.innerHTML = `<p style="color:var(--danger);margin-top:8px">${err.message}</p>`;
     } finally {
       ssSetRunning(false);
       stockSyncReader = null;
     }
+  }
+
+  // ── Run via Shopify API (no file upload) ──────────────────────────────────
+  async function runStockSyncApi() {
+    const dryRun = document.getElementById('ss-dry-run-toggle').checked;
+    ssSetRunning(true);
+    document.getElementById('btn-ss-download-log').classList.add('hidden');
+    document.getElementById('ss-progress-wrap').classList.add('hidden');
+    document.getElementById('ss-progress-bar').style.background = 'var(--accent)';
+    document.getElementById('ss-spinner-text').textContent = 'Starting…';
+
+    const fetchPromise = fetch('/api/stock/sync-api', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `dryRun=${dryRun ? 'true' : 'false'}`,
+    });
+
+    await handleSyncStream(fetchPromise, dryRun, true);
+  }
+
+  // ── Run via CSV upload (backup mode) ──────────────────────────────────────
+  async function runStockSyncCsv() {
+    const shop1File = document.getElementById('ss-input-shop1').files[0];
+    if (!shop1File) {
+      alert('Please upload at least one Shopify export file.');
+      return;
+    }
+    const dryRun = document.getElementById('ss-dry-run-toggle').checked;
+    ssSetRunning(true);
+    document.getElementById('btn-ss-download-log').classList.add('hidden');
+
+    const phaseLabel = document.getElementById('ss-phase-label');
+    phaseLabel.textContent = 'Syncing';
+    document.getElementById('ss-progress-bar').style.background = 'var(--accent)';
+    document.getElementById('ss-progress-bar').style.width = '0%';
+    document.getElementById('ss-progress-text').textContent = 'Starting…';
+    document.getElementById('ss-tiles').innerHTML = '';
+    document.getElementById('ss-log-panel').innerHTML = '';
+    document.getElementById('ss-log-panel').classList.remove('log-box');
+    document.getElementById('ss-spinner-text').textContent = 'Syncing stock…';
+
+    const fd = new FormData();
+    fd.append('shopifyFile1', shop1File);
+    fd.append('dryRun', dryRun ? 'true' : 'false');
+    const shop2File = document.getElementById('ss-input-shop2').files[0];
+    if (shop2File) fd.append('shopifyFile2', shop2File);
+
+    const fetchPromise = fetch('/api/stock/sync', { method: 'POST', body: fd });
+    await handleSyncStream(fetchPromise, dryRun, false);
   }
 
   function showStockSyncLog(log, dryRun) {
