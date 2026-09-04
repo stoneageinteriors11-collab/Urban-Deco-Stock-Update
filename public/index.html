@@ -443,6 +443,9 @@
       <button class="btn btn-primary" id="btn-compare" onclick="runCompare()">
         🔍 Run Comparison
       </button>
+      <button class="btn btn-danger hidden" id="btn-stop-compare" onclick="stopCompare()">
+        ⛔ Stop Comparison
+      </button>
       <button class="btn btn-danger hidden" id="btn-delete" onclick="deleteSelected()">
         🗑 Delete Selected Orphaned
       </button>
@@ -854,6 +857,12 @@ async function testConnection() {
   checkConnectionStatus();
 
   // ── Run comparison ─────────────────────────────────────────────────────────
+  let compareController = null;
+
+  function stopCompare() {
+    if (compareController) compareController.abort();
+  }
+
   async function runCompare() {
     const shopFile1 = document.getElementById('input-shop1').files[0];
     const shopFile2 = document.getElementById('input-shop2').files[0];
@@ -863,7 +872,9 @@ async function testConnection() {
       return;
     }
 
+    compareController = new AbortController();
     document.getElementById('btn-compare').disabled = true;
+    document.getElementById('btn-stop-compare').classList.remove('hidden');
     document.getElementById('compare-spinner').classList.remove('hidden');
     document.getElementById('btn-download-log').classList.add('hidden');
 
@@ -872,7 +883,7 @@ async function testConnection() {
     if (shopFile2) form.append('shopifyFile2', shopFile2);
 
     try {
-      const res  = await fetch('/api/compare', { method: 'POST', body: form });
+      const res  = await fetch('/api/compare', { method: 'POST', body: form, signal: compareController.signal });
       const data = await res.json();
       if (!data.success) throw new Error(data.error);
 
@@ -909,9 +920,11 @@ async function testConnection() {
       updateSyncCard();
 
     } catch(e) {
-      alert('Error: ' + e.message);
+      if (e.name !== 'AbortError') alert('Error: ' + e.message);
     } finally {
+      compareController = null;
       document.getElementById('btn-compare').disabled = false;
+      document.getElementById('btn-stop-compare').classList.add('hidden');
       document.getElementById('compare-spinner').classList.add('hidden');
     }
   }

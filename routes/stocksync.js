@@ -745,7 +745,9 @@ router.post('/sync-api', async (req, res) => {
           if (edge.node?.handle) byHandle.set(edge.node.handle, edge.node);
         }
 
-        send({ type: 'fetch-progress', fetched: byHandle.size, hasMore: page.pageInfo.hasNextPage });
+        const fetched = byHandle.size;
+        send({ type: 'fetch-progress', fetched, hasMore: page.pageInfo.hasNextPage });
+        console.log(`  📦 Fetched ${fetched} products so far…`);
 
         if (!page.pageInfo.hasNextPage) break;
         cursor = page.pageInfo.endCursor;
@@ -754,7 +756,7 @@ router.post('/sync-api', async (req, res) => {
 
       const totalProducts = byHandle.size;
       send({ type: 'fetch-done', total: totalProducts });
-      console.log(`  ✓ Fetched ${totalProducts} Shopify products (dryRun=${dryRun}, inventory=${hasLocations})`);
+      console.log(`  ✅ Done fetching — ${totalProducts} Shopify products total (dryRun=${dryRun}, inventory=${hasLocations})`);
 
       // ── Phase 2: Sync ─────────────────────────────────────────────────────
       const log = [];
