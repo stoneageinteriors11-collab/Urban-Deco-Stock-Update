@@ -6,7 +6,8 @@ const axios   = require('axios');
 require('dotenv').config();
 
 const { streamShopifyVariants } = require('../utils/parseCSV');
-const { fetchCfsProducts, buildStockData } = require('../utils/cfsApi');
+const { fetchCfsProducts, buildStockData, buildCompareData } = require('../utils/cfsApi');
+const { compareVariants } = require('../utils/matchVariants');
 
 const router = express.Router();
 
@@ -151,7 +152,7 @@ const GET_PRODUCTS_BULK_QUERY = `
       pageInfo { hasNextPage endCursor }
       edges {
         node {
-          id handle vendor status
+          id handle title vendor status
           metafields(first: 20, namespace: "custom") {
             edges { node { key value } }
           }
@@ -179,7 +180,7 @@ const GET_PRODUCTS_BULK_QUERY_WITH_INV = `
       pageInfo { hasNextPage endCursor }
       edges {
         node {
-          id handle vendor status
+          id handle title vendor status
           metafields(first: 20, namespace: "custom") {
             edges { node { key value } }
           }
@@ -938,6 +939,107 @@ router.post('/sync-api', async (req, res) => {
     console.error('sync-api error:', err);
     if (!res.headersSent) res.status(500).json({ error: err.message });
     else res.end();
+  }
+});
+
+// ── POST /api/stock/compare-api ───────────────────────────────────────────────
+// API-mode compare: fetches Shopify products via GraphQL instead of CSV upload.
+// Returns the same JSON structure as POST /api/compare (upload.js).
+router.post('/compare-api', async (req, res) => {
+  try {
+    const client = graphqlClient();
+
+    // 1. CFS data
+    console.log('▶ [compare-api] Fetching CFS product data…');
+    const cfsProducts = await fetchCfsProducts();
+    const {
+      validProductSKUs,
+      cfsProductIds,
+      validVariantSKUs,
+      cfsVariantAttrIds,
+      productCodesBySku,
+      productCodesByProdId,
+      cfsProductCodeToStatus,
+      variantCodesBySku,
+      variantCodesByAttrId,
+      cfsVarCodeSet,
+    } = buildCompareData(cfsProducts);
+    console.log(`  ✓ ${validProductSKUs.size} product SKUs, ${validVariantSKUs.size} variant SKUs`);
+
+    // 2. Fetch Shopify products via API (no inventory needed for compare)
+    console.log('▶ [compare-api] Fetching Shopify products…');
+    const byHandle = new Map();
+    let cursor = null;
+    const PAGE = 50;
+
+    while (true) {
+      const vars = { first: PAGE, query: 'vendor:"Urban Deco"' };
+      if (cursor) vars.after = cursor;
+      const data = await gql(client, GET_PRODUCTS_BULK_QUERY, vars);
+      const page = data?.products;
+      if (!page) break;
+      for (const edge of (page.edges || [])) {
+        if (edge.node?.handle) byHandle.set(edge.node.handle, edge.node);
+      }
+      console.log(`  📦 Fetched ${byHandle.size} products so far…`);
+      if (!page.pageInfo.hasNextPage) break;
+      cursor = page.pageInfo.endCursor;
+      await sleep(200);
+    }
+    console.log(`  ✅ ${byHandle.size} Shopify products fetched`);
+
+    // 3. Map GraphQL nodes → shopifyVariants shape expected by compareVariants()
+    function getMeta(edges, key) {
+      const node = (edges || []).map(e => e.node).find(n => n.key === key);
+      return node?.value || '';
+    }
+
+    const shopifyVariants = [];
+    for (const product of byHandle.values()) {
+      const productMeta = product.metafields?.edges || [];
+      const shopifyProductCode = getMeta(productMeta, 'product_code');
+      const status = (product.status || '').toLowerCase();
+
+      for (const ve of (product.variants?.edges || [])) {
+        const variant = ve.node;
+        if (!variant.sku) continue;
+        const variantMeta = variant.metafields?.edges || [];
+        shopifyVariants.push({
+          handle:             product.handle,
+          title:              product.title || '',
+          variantSku:         variant.sku,
+          option1:            '',
+          option2:            '',
+          barcode:            '',
+          inventoryQty:       '',
+          status,
+          shopifyVariantCode: getMeta(variantMeta, 'variant_code'),
+          shopifyProductCode,
+        });
+      }
+    }
+    console.log(`  ✓ ${shopifyVariants.length} variants mapped`);
+
+    // 4. Compare
+    console.log('▶ [compare-api] Running comparison…');
+    const { results, summary } = compareVariants(
+      shopifyVariants, validVariantSKUs, validProductSKUs, cfsProductIds, cfsVariantAttrIds,
+      productCodesBySku, productCodesByProdId, variantCodesBySku, variantCodesByAttrId,
+      cfsVarCodeSet, cfsProductCodeToStatus,
+    );
+    console.log(`  ✓ ${summary.orphaned} orphaned, ${summary.ok} OK, ${summary.draft} draft, ${summary.cfsInactive} cfs-inactive, ${summary.cfsProduct} cfs-product`);
+
+    res.json({
+      success:          true,
+      results,
+      summary,
+      cfsProductIds:    [...cfsProductIds.entries()],
+      cfsVariantAttrIds:[...cfsVariantAttrIds],
+    });
+
+  } catch (err) {
+    console.error('[compare-api] error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 

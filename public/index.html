@@ -864,11 +864,14 @@ async function testConnection() {
   }
 
   async function runCompare() {
+    const uploadMode = document.getElementById('upload-tab-csv').style.background === 'var(--accent)' ? 'csv' : 'api';
+    const isApiMode  = uploadMode !== 'csv';
+
     const shopFile1 = document.getElementById('input-shop1').files[0];
     const shopFile2 = document.getElementById('input-shop2').files[0];
 
-    if (!shopFile1) {
-      alert('Please upload at least one Shopify export file.');
+    if (!isApiMode && !shopFile1) {
+      alert('Please upload at least one Shopify export file (or switch to API Mode in Step 2).');
       return;
     }
 
@@ -878,12 +881,18 @@ async function testConnection() {
     document.getElementById('compare-spinner').classList.remove('hidden');
     document.getElementById('btn-download-log').classList.add('hidden');
 
-    const form = new FormData();
-    form.append('shopifyFile1', shopFile1);
-    if (shopFile2) form.append('shopifyFile2', shopFile2);
+    let fetchPromise;
+    if (isApiMode) {
+      fetchPromise = fetch('/api/stock/compare-api', { method: 'POST', signal: compareController.signal });
+    } else {
+      const form = new FormData();
+      form.append('shopifyFile1', shopFile1);
+      if (shopFile2) form.append('shopifyFile2', shopFile2);
+      fetchPromise = fetch('/api/compare', { method: 'POST', body: form, signal: compareController.signal });
+    }
 
     try {
-      const res  = await fetch('/api/compare', { method: 'POST', body: form, signal: compareController.signal });
+      const res  = await fetchPromise;
       const data = await res.json();
       if (!data.success) throw new Error(data.error);
 
