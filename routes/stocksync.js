@@ -534,25 +534,20 @@ router.post(
             }
 
             // ── Inventory quantity logic ──────────────────────────────────
-            // OUT OF STOCK: always set qty to 0
-            // IN STOCK:     if currently 0, set to CFS onHand (fallback 2); otherwise no change
+            // Step 1 (pre-sync): always match CFS onHand, then delivery time rules override.
+            // OUT OF STOCK: always set qty to 0 (regardless of CFS onHand)
+            // IN STOCK:     always sync to CFS onHand; fallback to 2 if CFS onHand is 0
             const cfsOnHand = varStock ? (varStock.vOnHand ?? 0) : (varProdStock?.onHand ?? 0);
             let targetQty;
             let shouldWriteInv;
             if (!vIsShortLead) {
-              // OUT OF STOCK
-              targetQty    = 0;
+              // OUT OF STOCK — force 0
+              targetQty      = 0;
               shouldWriteInv = locationId !== null && currentQty !== 0;
             } else {
-              // IN STOCK
-              if (currentQty === 0) {
-                targetQty    = cfsOnHand > 0 ? cfsOnHand : 2;
-                shouldWriteInv = locationId !== null;
-              } else {
-                // qty > 0 or unknown — do not touch inventory
-                targetQty    = currentQty;
-                shouldWriteInv = false;
-              }
+              // IN STOCK — always sync qty to CFS onHand (fallback 2 when onHand is 0)
+              targetQty      = cfsOnHand > 0 ? cfsOnHand : 2;
+              shouldWriteInv = locationId !== null && currentQty !== targetQty;
             }
 
             // ── Live: write if changed ─────────────────────────────────────
@@ -582,7 +577,9 @@ router.post(
             }
 
             // ── Build log entry ────────────────────────────────────────────
-            const anyChanged = vInoutChanged || shouldWriteInv;
+            // anyChanged covers: inoutstock metafield, inventory qty, and any other metafield
+            // (vnotificationtitle, duedate) — so a product is only skipped when truly nothing changes
+            const anyChanged = vInoutChanged || shouldWriteInv || varMfToWrite.length > 0;
 
             if (!anyChanged && currentQty !== null) {
               // Everything already correct and we could verify — truly skipped
@@ -604,16 +601,20 @@ router.post(
               if (locationId !== null) {
                 if (!vIsShortLead) {
                   qtyChange = diffQty(currentQty, 0);
-                } else if (currentQty === 0) {
-                  const tgt = cfsOnHand > 0 ? cfsOnHand : 2;
-                  qtyChange = `currently 0 — will set to ${tgt}${cfsOnHand > 0 ? ` (CFS onHand: ${cfsOnHand})` : ' (CFS onHand: 0, using fallback)'}`;
                 } else {
-                  qtyChange = `currently ${currentQty} (no change — already > 0)`;
+                  // IN STOCK — always sync to CFS onHand
+                  const tgt = cfsOnHand > 0 ? cfsOnHand : 2;
+                  const onHandNote = cfsOnHand > 0 ? ` (CFS onHand: ${cfsOnHand})` : ' (CFS onHand: 0, using fallback)';
+                  if (currentQty === tgt) {
+                    qtyChange = `currently ${currentQty} (no change — already matches CFS)`;
+                  } else {
+                    qtyChange = `currently ${currentQty ?? 'unknown'} — will set to ${tgt}${onHandNote}`;
+                  }
                 }
               } else {
                 qtyChange = !vIsShortLead
                   ? 'would set to 0 — reconnect Shopify to enable inventory reads'
-                  : `would set to ${cfsOnHand > 0 ? cfsOnHand : 2} if 0 — reconnect Shopify to enable inventory reads`;
+                  : `would set to ${cfsOnHand > 0 ? cfsOnHand : 2} — reconnect Shopify to enable inventory reads`;
               }
 
               if (!dryRun) {
@@ -875,20 +876,19 @@ router.post('/sync-api', async (req, res) => {
             }
 
             // Inventory quantity logic
-            // IN STOCK: if currently 0, set to CFS onHand (fallback 2 if onHand is 0)
+            // Step 1 (pre-sync): always match CFS onHand, then delivery time rules override.
+            // OUT OF STOCK: always set qty to 0 (regardless of CFS onHand)
+            // IN STOCK:     always sync to CFS onHand; fallback to 2 if CFS onHand is 0
             const cfsOnHand = varStock ? (varStock.vOnHand ?? 0) : (varProdStock?.onHand ?? 0);
             let targetQty, shouldWriteInv;
             if (!vIsShortLead) {
+              // OUT OF STOCK — force 0
               targetQty      = 0;
               shouldWriteInv = locationId !== null && currentQty !== 0;
             } else {
-              if (currentQty === 0) {
-                targetQty      = cfsOnHand > 0 ? cfsOnHand : 2;
-                shouldWriteInv = locationId !== null;
-              } else {
-                targetQty      = currentQty;
-                shouldWriteInv = false;
-              }
+              // IN STOCK — always sync qty to CFS onHand (fallback 2 when onHand is 0)
+              targetQty      = cfsOnHand > 0 ? cfsOnHand : 2;
+              shouldWriteInv = locationId !== null && currentQty !== targetQty;
             }
 
             // Live writes
@@ -915,7 +915,9 @@ router.post('/sync-api', async (req, res) => {
             }
 
             // Build log entry
-            const anyChanged = vInoutChanged || shouldWriteInv;
+            // anyChanged covers: inoutstock metafield, inventory qty, and any other metafield
+            // (vnotificationtitle, duedate) — so a product is only skipped when truly nothing changes
+            const anyChanged = vInoutChanged || shouldWriteInv || varMfToWrite.length > 0;
 
             if (!anyChanged && currentQty !== null) {
               skipped++;
@@ -935,11 +937,15 @@ router.post('/sync-api', async (req, res) => {
               if (locationId !== null) {
                 if (!vIsShortLead) {
                   qtyChange = diffQty(currentQty, 0);
-                } else if (currentQty === 0) {
-                  const tgt = cfsOnHand > 0 ? cfsOnHand : 2;
-                  qtyChange = `currently 0 — will set to ${tgt}${cfsOnHand > 0 ? ` (CFS onHand: ${cfsOnHand})` : ' (CFS onHand: 0, using fallback)'}`;
                 } else {
-                  qtyChange = `currently ${currentQty} (no change — already > 0)`;
+                  // IN STOCK — always sync to CFS onHand
+                  const tgt = cfsOnHand > 0 ? cfsOnHand : 2;
+                  const onHandNote = cfsOnHand > 0 ? ` (CFS onHand: ${cfsOnHand})` : ' (CFS onHand: 0, using fallback)';
+                  if (currentQty === tgt) {
+                    qtyChange = `currently ${currentQty} (no change — already matches CFS)`;
+                  } else {
+                    qtyChange = `currently ${currentQty ?? 'unknown'} — will set to ${tgt}${onHandNote}`;
+                  }
                 }
               } else {
                 qtyChange = 'inventory reads disabled — reconnect Shopify to enable';
