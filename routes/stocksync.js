@@ -1331,9 +1331,13 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
               updatedCount++;
               log.push({
                 sku: varSku, handle,
-                status:      dryRun ? 'dry_run' : 'updated',
-                calChange:   diffStr(curVShowCal, 'true'),
-                notifChange: diffStr(curVNotif, 'Next Day'),
+                status:       dryRun ? 'dry_run' : 'updated',
+                calBefore:    curVShowCal ?? '(not set)',
+                calAfter:     'true',
+                notifBefore:  curVNotif   ?? '(not set)',
+                notifAfter:   'Next Day',
+                calChanged:   vShowCalChanged,
+                notifChanged: vNotifChanged,
               });
             } else {
               skipped++;
@@ -1342,30 +1346,47 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
             }
           }
 
-          // ── Product-level showcalendar — write once per product if any variant matched ──
+          // ── Product-level: showcalendar + vnotificationtitle ────────────────
           if (productHasNextDay && !productCalendarWritten) {
             productCalendarWritten = true;
-            const curShowCal    = existingProd['showcalendar'] ?? null;
-            const showCalChanged = curShowCal !== 'true';
+            const curShowCal      = existingProd['showcalendar']      ?? null;
+            const curProdNotif    = existingProd['vnotificationtitle'] ?? null;
+            const showCalChanged  = curShowCal   !== 'true';
+            const prodNotifChanged = curProdNotif !== 'Next Day';
+
+            const prodMfToWrite = [];
             if (showCalChanged) {
-              if (!dryRun) {
-                const mfResult = await gql(client, METAFIELDS_SET_MUTATION, {
-                  metafields: [{ ownerId: product.id, namespace: 'custom', key: 'showcalendar',
-                    value: 'true', type: 'single_line_text_field' }],
-                });
-                const mfErrors = mfResult?.metafieldsSet?.userErrors || [];
-                if (mfErrors.length) {
-                  log.push({ sku: '-', handle, status: 'warning',
-                    message: `Product showcalendar error: ${mfErrors.map(e => e.message).join(', ')}` });
-                }
+              prodMfToWrite.push({ ownerId: product.id, namespace: 'custom',
+                key: 'showcalendar', value: 'true', type: 'single_line_text_field' });
+            }
+            if (prodNotifChanged) {
+              prodMfToWrite.push({ ownerId: product.id, namespace: 'custom',
+                key: 'vnotificationtitle', value: 'Next Day', type: 'single_line_text_field' });
+            }
+
+            if (!dryRun && prodMfToWrite.length) {
+              const mfResult = await gql(client, METAFIELDS_SET_MUTATION, { metafields: prodMfToWrite });
+              const mfErrors = mfResult?.metafieldsSet?.userErrors || [];
+              if (mfErrors.length) {
+                log.push({ sku: '-', handle, status: 'warning',
+                  message: `Product metafield error: ${mfErrors.map(e => e.message).join(', ')}` });
               }
-              log.push({ sku: '-', handle,
-                status:  dryRun ? 'dry_run' : 'updated',
-                message: `Product showcalendar: ${diffStr(curShowCal, 'true')}`,
+            }
+
+            if (showCalChanged || prodNotifChanged) {
+              log.push({
+                sku: '-', handle,
+                status:           dryRun ? 'dry_run' : 'updated',
+                calBefore:        curShowCal   ?? '(not set)',
+                calAfter:         'true',
+                notifBefore:      curProdNotif ?? '(not set)',
+                notifAfter:       'Next Day',
+                calChanged:       showCalChanged,
+                notifChanged:     prodNotifChanged,
               });
             } else {
               log.push({ sku: '-', handle, status: 'skipped',
-                message: 'Product showcalendar already "true" — no change' });
+                message: 'Product showcalendar=true and vnotificationtitle=Next Day — no change' });
             }
           }
 

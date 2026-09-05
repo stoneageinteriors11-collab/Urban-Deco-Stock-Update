@@ -712,33 +712,41 @@
     <div class="card-title">Step 6 — Calendar Sync (Next Day Delivery)</div>
 
     <p style="font-size:13px;color:var(--text-muted);margin-bottom:18px;line-height:1.6">
-      Finds CFS products/variants where delivery time is <strong>Next Day</strong> and sets
-      <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.showcalendar</code> (product)
+      Upload the <strong>Froogle CSV</strong> exported from CFS (brandId=215) to identify Next Day products.
+      Sets <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.showcalendar</code> (product)
       and <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.vshowcalendar</code>
       + <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.vnotificationtitle = "Next Day"</code> (variant)
       to enable the booking calendar.
     </p>
 
-    <!-- Data source banners -->
+    <!-- Data source — Froogle CSV upload + Shopify API banner -->
     <div class="upload-group">
-      <div class="upload-group-label">Data Sources — Both fetched automatically</div>
-      <div style="display:flex;flex-direction:column;gap:10px;">
-        <div style="display:flex;align-items:center;gap:12px;padding:13px 16px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);border-radius:var(--radius);">
-          <span style="font-size:20px;">🌐</span>
-          <div>
-            <div style="font-size:13px;font-weight:600;color:var(--success);">CFS Stock API</div>
-            <div style="font-size:12px;color:var(--text-muted);margin-top:1px;">
-              Delivery time fetched live — Next Day variants identified automatically
-            </div>
+      <div class="upload-group-label">Step 1 — Upload Froogle CSV (required)</div>
+      <label id="cs-csv-label" style="
+          display:flex;align-items:center;gap:12px;padding:14px 16px;
+          background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);
+          cursor:pointer;transition:border-color .2s,background .2s;"
+          ondragover="event.preventDefault();this.style.borderColor='var(--accent)'"
+          ondragleave="this.style.borderColor=''"
+          ondrop="csHandleDrop(event)">
+        <span style="font-size:22px;">📋</span>
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:13px;font-weight:600;color:var(--text);" id="cs-csv-filename">
+            Choose Froogle CSV / drag &amp; drop here
+          </div>
+          <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">
+            Must include <strong>Shopify SKU</strong> and <strong>Delivery Time</strong> columns
           </div>
         </div>
-        <div style="display:flex;align-items:center;gap:12px;padding:13px 16px;background:rgba(99,102,241,.07);border:1px solid rgba(99,102,241,.25);border-radius:var(--radius);">
-          <span style="font-size:20px;">🛍</span>
-          <div>
-            <div style="font-size:13px;font-weight:600;color:var(--accent);">Shopify Products API</div>
-            <div style="font-size:12px;color:var(--text-muted);margin-top:1px;">
-              All active Urban Deco products with variant metafields fetched via GraphQL
-            </div>
+        <input type="file" id="cs-csv-input" accept=".csv,.xlsx,.xls" style="display:none"
+          onchange="csOnFileChange(this)" />
+      </label>
+      <div style="display:flex;align-items:center;gap:12px;padding:13px 16px;background:rgba(99,102,241,.07);border:1px solid rgba(99,102,241,.25);border-radius:var(--radius);margin-top:8px;">
+        <span style="font-size:20px;">🛍</span>
+        <div>
+          <div style="font-size:13px;font-weight:600;color:var(--accent);">Shopify Products API</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-top:1px;">
+            All active Urban Deco products with variant metafields fetched automatically via GraphQL
           </div>
         </div>
       </div>
@@ -1892,6 +1900,27 @@ async function testConnection() {
 
   let lastCalendarSyncLog = [];
   let calendarSyncReader  = null;
+  let csFroogleFile       = null; // the uploaded Froogle CSV File object
+
+  function csOnFileChange(input) {
+    if (input.files && input.files[0]) csFroogleFileSet(input.files[0]);
+  }
+
+  function csHandleDrop(evt) {
+    evt.preventDefault();
+    evt.currentTarget.style.borderColor = '';
+    const f = evt.dataTransfer.files[0];
+    if (f) { document.getElementById('cs-csv-input').files; csFroogleFileSet(f); }
+  }
+
+  function csFroogleFileSet(file) {
+    csFroogleFile = file;
+    const lbl = document.getElementById('cs-csv-filename');
+    lbl.textContent = `✅ ${file.name}  (${(file.size/1024).toFixed(1)} KB)`;
+    lbl.style.color = 'var(--success)';
+    document.getElementById('cs-csv-label').style.borderColor = 'var(--success)';
+    document.getElementById('cs-csv-label').style.background  = 'rgba(34,197,94,.06)';
+  }
 
   function updateCsDryBadge() {
     const on = document.getElementById('cs-dry-run-toggle').checked;
@@ -1914,6 +1943,10 @@ async function testConnection() {
   }
 
   async function runCalendarSync() {
+    if (!csFroogleFile) {
+      alert('Please upload the Froogle CSV first.');
+      return;
+    }
     const dryRun = document.getElementById('cs-dry-run-toggle').checked;
     csSetRunning(true);
     document.getElementById('btn-cs-download-log').classList.add('hidden');
@@ -1947,10 +1980,14 @@ async function testConnection() {
     };
 
     try {
+      const fd = new FormData();
+      fd.append('dryRun', dryRun ? 'true' : 'false');
+      if (csFroogleFile) fd.append('froogleCsv', csFroogleFile, csFroogleFile.name);
+
       const res = await fetch('/api/stock/calendar-sync', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `dryRun=${dryRun ? 'true' : 'false'}`,
+        body: fd,
+        // No Content-Type header — browser sets multipart boundary automatically
       });
 
       if (!res.ok) {
@@ -1983,6 +2020,7 @@ async function testConnection() {
               'cfs':           ['⏳', 'var(--text-muted)'],
               'cfs-done':      ['✅', 'var(--success)'],
               'shopify-fetch': ['⏳', 'var(--text-muted)'],
+              'shopify-done':  ['✅', 'var(--success)'],
             };
             const [icon, color] = icons[evt.phase] || ['•', 'var(--text-muted)'];
             addStep(icon, evt.message, color);
@@ -2060,10 +2098,16 @@ async function testConnection() {
                 : 'log-ok';
 
       let first, detail;
-      if (l.calChange !== undefined) {
-        // Variant with structured calendar data
-        first  = `vshowcalendar: ${l.calChange}`;
-        detail = `vnotificationtitle: ${l.notifChange}`;
+      if (l.calBefore !== undefined) {
+        // Structured before/after log entry (variant or product)
+        const calPart   = l.calChanged
+          ? `showcalendar: ${l.calBefore} → ${l.calAfter}`
+          : `showcalendar: ${l.calAfter} (no change)`;
+        const notifPart = l.notifChanged
+          ? `vnotificationtitle: ${l.notifBefore} → ${l.notifAfter}`
+          : `vnotificationtitle: ${l.notifAfter} (no change)`;
+        first  = calPart;
+        detail = notifPart;
       } else {
         const lines = (l.message || '').split('\n');
         first  = lines[0] || '';
@@ -2082,14 +2126,21 @@ async function testConnection() {
   function downloadCalendarLog() {
     if (!lastCalendarSyncLog.length) return;
     const esc = s => `"${String(s || '').replace(/"/g, '""')}"`;
-    const headers = ['SKU', 'Handle', 'Status', 'vshowcalendar Change', 'vnotificationtitle Change', 'Message'];
+    const headers = [
+      'SKU', 'Handle', 'Status',
+      'showcalendar (Before)', 'showcalendar (After)',
+      'vnotificationtitle (Before)', 'vnotificationtitle (After)',
+      'Message',
+    ];
     const rows = lastCalendarSyncLog.map(l => [
-      l.sku    || '',
+      l.sku === '-' ? '(product)' : (l.sku || ''),
       esc(l.handle),
       l.status,
-      esc(l.calChange   || ''),
-      esc(l.notifChange || ''),
-      esc(l.message     || ''),
+      esc(l.calBefore   ?? ''),
+      esc(l.calAfter    ?? ''),
+      esc(l.notifBefore ?? ''),
+      esc(l.notifAfter  ?? ''),
+      esc(l.message     ?? ''),
     ]);
     const csv  = [headers, ...rows].map(r => r.join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
