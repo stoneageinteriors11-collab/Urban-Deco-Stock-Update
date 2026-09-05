@@ -1299,6 +1299,15 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
             // Read inoutstock for display in log (not changed by this sync)
             const curInoutstock = existingVar['inoutstock'] ?? '(not set)';
 
+            // Skip OUT OF STOCK variants — calendar only applies to in-stock items
+            if (curInoutstock === 'OUT OF STOCK') {
+              skipped++;
+              log.push({ sku: varSku, handle, status: 'skipped',
+                inoutstock: curInoutstock,
+                message: 'OUT OF STOCK — calendar not set' });
+              continue;
+            }
+
             // vshowcalendar
             const curVShowCal    = existingVar['vshowcalendar'] ?? null;
             const vShowCalChanged = curVShowCal !== 'true';
