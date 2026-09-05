@@ -1092,4 +1092,255 @@ router.post('/compare-api', async (req, res) => {
   }
 });
 
+// ── POST /api/stock/calendar-sync ────────────────────────────────────────────
+//
+// Step 6 — Calendar Sync
+// Reads CFS API for products/variants where deliveryTime === 'Next Day'.
+// Matches those SKUs in Shopify and writes:
+//   product:  custom.showcalendar     = 'true'
+//   variant:  custom.vshowcalendar    = 'true'
+//             custom.vnotificationtitle = 'Next Day'
+//
+// Streams SSE events (same pattern as /sync-api).
+// Re-uses the module-level cancelRequested flag — safe since only one sync
+// runs at a time.
+//
+router.post('/calendar-sync', async (req, res) => {
+  try {
+    const dryRun = req.body?.dryRun !== 'false' && req.body?.dryRun !== false;
+
+    let client;
+    try { client = graphqlClient(); }
+    catch (err) { return res.status(400).json({ error: err.message }); }
+
+    // ── SSE headers ───────────────────────────────────────────────────────────
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (res.socket) res.socket.setNoDelay(true);
+    res.flushHeaders();
+
+    const send    = obj => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+    const keepalive = setInterval(() => res.write(': ping\n\n'), 15000);
+    const cleanup   = () => clearInterval(keepalive);
+
+    // Counters declared here so inner catch can reference them
+    let log = [], updatedCount = 0, skipped = 0, failed = 0, processed = 0, totalProducts = 0;
+
+    try {
+      cancelRequested = false;
+
+      // ── Phase 1a: CFS — build the Next Day SKU set ──────────────────────────
+      send({ type: 'status', phase: 'cfs', message: 'Fetching CFS product data…' });
+      const cfsProducts = await fetchCfsProducts();
+
+      // A SKU is "Next Day" if its effective delivery time (variant or parent) === 'Next Day'
+      const nextDaySkus = new Set();
+      for (const item of cfsProducts) {
+        const prodId = String(item.productId);
+        if (Array.isArray(item.variants) && item.variants.length > 0) {
+          for (const v of item.variants) {
+            const effectiveDelivery = v.deliveryTime || item.deliveryTime || '';
+            if (effectiveDelivery === 'Next Day') {
+              nextDaySkus.add(`UD-${prodId}-${v.variantId}`);
+            }
+          }
+        } else {
+          if ((item.deliveryTime || '') === 'Next Day') {
+            nextDaySkus.add(`UD-${prodId}`);
+          }
+        }
+      }
+
+      send({ type: 'status', phase: 'cfs-done',
+        message: `CFS: ${cfsProducts.length} products, ${nextDaySkus.size} Next Day SKUs found` });
+
+      // ── Phase 1b: Paginated Shopify product fetch ────────────────────────────
+      send({ type: 'status', phase: 'shopify-fetch', message: 'Fetching Shopify products…' });
+
+      const byHandle = new Map();
+      let   cursor   = null;
+      const PAGE     = 50;
+
+      while (true) {
+        if (cancelRequested) {
+          send({ type: 'done', success: true, cancelled: true, dryRun,
+            updatedCount: 0, skipped: 0, failed: 0, total: 0, log: [] });
+          cleanup(); res.end(); return;
+        }
+
+        const vars = { first: PAGE, query: 'vendor:"Urban Deco"' };
+        if (cursor) vars.after = cursor;
+
+        const data = await gql(client, GET_PRODUCTS_BULK_QUERY, vars);
+        const page = data?.products;
+        if (!page) break;
+
+        for (const edge of (page.edges || [])) {
+          if (edge.node?.handle) byHandle.set(edge.node.handle, edge.node);
+        }
+
+        send({ type: 'fetch-progress', fetched: byHandle.size, hasMore: page.pageInfo.hasNextPage });
+        console.log(`  📦 [calendar] Fetched ${byHandle.size} products so far…`);
+
+        if (!page.pageInfo.hasNextPage) break;
+        cursor = page.pageInfo.endCursor;
+        await sleep(200);
+      }
+
+      totalProducts = byHandle.size;
+      send({ type: 'fetch-done', total: totalProducts, nextDayCount: nextDaySkus.size });
+      console.log(`  ✅ [calendar] Done fetching — ${totalProducts} Shopify products (nextDay SKUs: ${nextDaySkus.size}, dryRun=${dryRun})`);
+
+      // ── Phase 2: Calendar sync ───────────────────────────────────────────────
+      for (const [handle, product] of byHandle) {
+        if (cancelRequested) {
+          send({ type: 'done', success: true, cancelled: true, dryRun,
+            updatedCount, skipped, failed, total: totalProducts, log });
+          cleanup(); res.end(); return;
+        }
+
+        try {
+          const productStatus = (product.status || '').toLowerCase();
+          if (productStatus && productStatus !== 'active') {
+            const varCount = product.variants?.edges?.length || 0;
+            skipped += varCount;
+            log.push({ sku: '-', handle, status: 'skipped',
+              message: `Shopify product is ${productStatus.toUpperCase()} — skipped` });
+            processed++;
+            send({ type: 'progress', processed, totalProducts, updatedCount, skipped, failed });
+            continue;
+          }
+
+          const existingProd = metafieldMap(product.metafields);
+          const shopifyNodes = (product.variants?.edges || []).map(e => e.node);
+
+          let productHasNextDay      = false;
+          let productCalendarWritten = false;
+
+          for (const shopNode of shopifyNodes) {
+            const varSku = shopNode.sku;
+            if (!varSku) continue;
+
+            const isNextDay = nextDaySkus.has(varSku);
+            if (!isNextDay) {
+              skipped++;
+              log.push({ sku: varSku, handle, status: 'skipped',
+                message: 'Not a Next Day delivery variant — skipped' });
+              continue;
+            }
+
+            productHasNextDay = true;
+
+            const existingVar  = metafieldMap(shopNode.metafields);
+            const varMfToWrite = [];
+
+            // vshowcalendar
+            const curVShowCal    = existingVar['vshowcalendar'] ?? null;
+            const vShowCalChanged = curVShowCal !== 'true';
+            if (vShowCalChanged) {
+              varMfToWrite.push({
+                ownerId: shopNode.id, namespace: 'custom', key: 'vshowcalendar',
+                value: 'true', type: 'single_line_text_field',
+              });
+            }
+
+            // vnotificationtitle → 'Next Day'
+            const curVNotif    = existingVar['vnotificationtitle'] ?? null;
+            const vNotifChanged = curVNotif !== 'Next Day';
+            if (vNotifChanged) {
+              varMfToWrite.push({
+                ownerId: shopNode.id, namespace: 'custom', key: 'vnotificationtitle',
+                value: 'Next Day', type: 'single_line_text_field',
+              });
+            }
+
+            const anyVarChanged = varMfToWrite.length > 0;
+
+            if (!dryRun && anyVarChanged) {
+              const vmfResult = await gql(client, METAFIELDS_SET_MUTATION, { metafields: varMfToWrite });
+              const vmfErrors = vmfResult?.metafieldsSet?.userErrors || [];
+              if (vmfErrors.length) {
+                log.push({ sku: varSku, handle, status: 'warning',
+                  message: `Variant metafield error: ${vmfErrors.map(e => e.message).join(', ')}` });
+              }
+            }
+
+            if (anyVarChanged) {
+              updatedCount++;
+              log.push({
+                sku: varSku, handle,
+                status:      dryRun ? 'dry_run' : 'updated',
+                calChange:   diffStr(curVShowCal, 'true'),
+                notifChange: diffStr(curVNotif, 'Next Day'),
+              });
+            } else {
+              skipped++;
+              log.push({ sku: varSku, handle, status: 'skipped',
+                message: 'Already correct — vshowcalendar=true and vnotificationtitle=Next Day' });
+            }
+          }
+
+          // ── Product-level showcalendar — write once per product if any variant matched ──
+          if (productHasNextDay && !productCalendarWritten) {
+            productCalendarWritten = true;
+            const curShowCal    = existingProd['showcalendar'] ?? null;
+            const showCalChanged = curShowCal !== 'true';
+            if (showCalChanged) {
+              if (!dryRun) {
+                const mfResult = await gql(client, METAFIELDS_SET_MUTATION, {
+                  metafields: [{ ownerId: product.id, namespace: 'custom', key: 'showcalendar',
+                    value: 'true', type: 'single_line_text_field' }],
+                });
+                const mfErrors = mfResult?.metafieldsSet?.userErrors || [];
+                if (mfErrors.length) {
+                  log.push({ sku: '-', handle, status: 'warning',
+                    message: `Product showcalendar error: ${mfErrors.map(e => e.message).join(', ')}` });
+                }
+              }
+              log.push({ sku: '-', handle,
+                status:  dryRun ? 'dry_run' : 'updated',
+                message: `Product showcalendar: ${diffStr(curShowCal, 'true')}`,
+              });
+            } else {
+              log.push({ sku: '-', handle, status: 'skipped',
+                message: 'Product showcalendar already "true" — no change' });
+            }
+          }
+
+        } catch (prodErr) {
+          failed++;
+          console.error(`  ✗ [calendar] Error on handle "${handle}":`, prodErr.message);
+          log.push({ sku: '-', handle, status: 'failed', message: prodErr.message });
+        }
+
+        processed++;
+        send({ type: 'progress', processed, totalProducts, updatedCount, skipped, failed });
+
+        if (processed % 50 === 0 || processed === totalProducts) {
+          console.log(`  … [calendar] ${processed}/${totalProducts} — updated: ${updatedCount}, skipped: ${skipped}, failed: ${failed}`);
+        }
+      }
+
+      console.log(`  ✓ [calendar] Done — updated: ${updatedCount}, skipped: ${skipped}, failed: ${failed}`);
+      send({ type: 'done', success: true, dryRun, updatedCount, skipped, failed, total: totalProducts, log });
+      res.end();
+
+    } catch (innerErr) {
+      console.error('[calendar-sync] inner error:', innerErr.message);
+      send({ type: 'done', success: false, error: `Server error: ${innerErr.message}`,
+        dryRun, updatedCount, skipped, failed, total: totalProducts, log });
+      res.end();
+    } finally {
+      cleanup();
+    }
+
+  } catch (err) {
+    console.error('[calendar-sync] outer error:', err);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+    else res.end();
+  }
+});
+
 module.exports = router;

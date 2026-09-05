@@ -707,6 +707,89 @@
     <div id="ss-log-panel" style="margin-top:16px;"></div>
   </div>
 
+  <!-- ── Step 6: Calendar Sync ── -->
+  <div class="card" id="calendar-sync-card">
+    <div class="card-title">Step 6 — Calendar Sync (Next Day Delivery)</div>
+
+    <p style="font-size:13px;color:var(--text-muted);margin-bottom:18px;line-height:1.6">
+      Finds CFS products/variants where delivery time is <strong>Next Day</strong> and sets
+      <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.showcalendar</code> (product)
+      and <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.vshowcalendar</code>
+      + <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.vnotificationtitle = "Next Day"</code> (variant)
+      to enable the booking calendar.
+    </p>
+
+    <!-- Data source banners -->
+    <div class="upload-group">
+      <div class="upload-group-label">Data Sources — Both fetched automatically</div>
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <div style="display:flex;align-items:center;gap:12px;padding:13px 16px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);border-radius:var(--radius);">
+          <span style="font-size:20px;">🌐</span>
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--success);">CFS Stock API</div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:1px;">
+              Delivery time fetched live — Next Day variants identified automatically
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;padding:13px 16px;background:rgba(99,102,241,.07);border:1px solid rgba(99,102,241,.25);border-radius:var(--radius);">
+          <span style="font-size:20px;">🛍</span>
+          <div>
+            <div style="font-size:13px;font-weight:600;color:var(--accent);">Shopify Products API</div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:1px;">
+              All active Urban Deco products with variant metafields fetched via GraphQL
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Dry run toggle -->
+    <div style="padding-bottom:2px;margin-bottom:16px;">
+      <div class="toggle-wrap">
+        <label class="toggle">
+          <input type="checkbox" id="cs-dry-run-toggle" checked onchange="updateCsDryBadge()" />
+          <span class="slider"></span>
+        </label>
+        <label for="cs-dry-run-toggle" style="cursor:pointer">Dry Run</label>
+        <span class="dry-badge" id="cs-dry-badge">ON — No changes will be made</span>
+      </div>
+    </div>
+
+    <!-- Buttons -->
+    <div class="actions-row">
+      <button class="btn btn-primary" id="btn-cs-run" onclick="runCalendarSync()">
+        📅 Run Calendar Sync
+      </button>
+      <button class="btn btn-danger hidden" id="btn-cs-stop" onclick="stopCalendarSync()">
+        ⛔ Stop
+      </button>
+      <button class="btn btn-warning hidden" id="btn-cs-download-log" onclick="downloadCalendarLog()">
+        📋 Download Log
+      </button>
+      <span id="cs-spinner" class="hidden"><span class="spinner"></span> <span id="cs-spinner-text">Running…</span></span>
+    </div>
+
+    <!-- Phase 1: Fetch progress -->
+    <div id="cs-fetch-wrap" class="hidden" style="margin-top:16px;padding:14px 16px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);">
+      <p style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.05em;">Phase 1 — Fetching</p>
+      <div id="cs-fetch-steps" style="font-size:12px;font-family:monospace;display:flex;flex-direction:column;gap:4px;"></div>
+      <div id="cs-fetch-count" style="font-size:12px;color:var(--text-muted);margin-top:8px;"></div>
+    </div>
+
+    <!-- Phase 2: Sync progress -->
+    <div id="cs-progress-wrap" class="hidden" style="margin-top:16px;">
+      <p id="cs-phase-label" style="font-size:12px;font-weight:600;color:var(--text-muted);margin-bottom:10px;text-transform:uppercase;letter-spacing:.05em;">Phase 2 — Syncing Calendar Metafields</p>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px;" id="cs-tiles"></div>
+      <div id="cs-progress-bar-wrap" style="background:var(--surface2);border-radius:6px;height:6px;overflow:hidden;">
+        <div id="cs-progress-bar" style="height:100%;background:var(--accent);width:0%;transition:width .3s;"></div>
+      </div>
+      <p id="cs-progress-text" style="font-size:12px;color:var(--text-muted);margin-top:6px;"></p>
+    </div>
+
+    <div id="cs-log-panel" style="margin-top:16px;"></div>
+  </div>
+
 </div>
 
 <script>
@@ -1802,6 +1885,217 @@ async function testConnection() {
     const a    = document.createElement('a');
     a.href     = URL.createObjectURL(blob);
     a.download = `stock-sync-log-${Date.now()}.csv`;
+    a.click();
+  }
+
+  // ── Step 6: Calendar Sync ────────────────────────────────────────────────
+
+  let lastCalendarSyncLog = [];
+  let calendarSyncReader  = null;
+
+  function updateCsDryBadge() {
+    const on = document.getElementById('cs-dry-run-toggle').checked;
+    const b  = document.getElementById('cs-dry-badge');
+    b.textContent = on ? 'ON — No changes will be made' : 'OFF — Will update Shopify';
+    b.style.background  = on ? '' : 'rgba(239,68,68,.12)';
+    b.style.color       = on ? '' : 'var(--danger)';
+    b.style.borderColor = on ? '' : 'rgba(239,68,68,.3)';
+  }
+
+  function csSetRunning(running) {
+    document.getElementById('btn-cs-run').disabled = running;
+    document.getElementById('btn-cs-stop').classList.toggle('hidden', !running);
+    document.getElementById('cs-spinner').classList.toggle('hidden', !running);
+  }
+
+  async function stopCalendarSync() {
+    try { await fetch('/api/stock/cancel', { method: 'POST' }); } catch(_) {}
+    if (calendarSyncReader) { try { calendarSyncReader.cancel(); } catch(_) {} }
+  }
+
+  async function runCalendarSync() {
+    const dryRun = document.getElementById('cs-dry-run-toggle').checked;
+    csSetRunning(true);
+    document.getElementById('btn-cs-download-log').classList.add('hidden');
+    document.getElementById('cs-fetch-wrap').classList.remove('hidden');
+    document.getElementById('cs-fetch-steps').innerHTML = '';
+    document.getElementById('cs-fetch-count').textContent = '';
+    document.getElementById('cs-progress-wrap').classList.add('hidden');
+    document.getElementById('cs-progress-bar').style.width = '0%';
+    document.getElementById('cs-progress-bar').style.background = 'var(--accent)';
+    document.getElementById('cs-progress-text').textContent = '';
+    document.getElementById('cs-tiles').innerHTML = '';
+    document.getElementById('cs-log-panel').innerHTML = '';
+    document.getElementById('cs-log-panel').classList.remove('log-box');
+    document.getElementById('cs-spinner-text').textContent = 'Starting…';
+    lastCalendarSyncLog = [];
+    calendarSyncReader  = null;
+
+    const progressWrap = document.getElementById('cs-progress-wrap');
+    const tiles        = document.getElementById('cs-tiles');
+    const bar          = document.getElementById('cs-progress-bar');
+    const progressText = document.getElementById('cs-progress-text');
+    const fetchSteps   = document.getElementById('cs-fetch-steps');
+    const fetchCount   = document.getElementById('cs-fetch-count');
+    const logPanel     = document.getElementById('cs-log-panel');
+
+    const addStep = (emoji, msg, color) => {
+      const p = document.createElement('p');
+      p.style.color = color || 'var(--text-muted)';
+      p.textContent = `${emoji} ${msg}`;
+      fetchSteps.appendChild(p);
+    };
+
+    try {
+      const res = await fetch('/api/stock/calendar-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `dryRun=${dryRun ? 'true' : 'false'}`,
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+
+      calendarSyncReader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let   buf     = '';
+
+      while (true) {
+        let chunk;
+        try { chunk = await calendarSyncReader.read(); } catch(_) { break; }
+        const { done, value } = chunk;
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const parts = buf.split('\n\n');
+        buf = parts.pop();
+
+        for (const part of parts) {
+          if (part.startsWith(': ')) continue; // keepalive
+          const line = part.startsWith('data: ') ? part.slice(6) : part;
+          if (!line.trim()) continue;
+          let evt;
+          try { evt = JSON.parse(line); } catch { continue; }
+
+          if (evt.type === 'status') {
+            const icons = {
+              'cfs':           ['⏳', 'var(--text-muted)'],
+              'cfs-done':      ['✅', 'var(--success)'],
+              'shopify-fetch': ['⏳', 'var(--text-muted)'],
+            };
+            const [icon, color] = icons[evt.phase] || ['•', 'var(--text-muted)'];
+            addStep(icon, evt.message, color);
+            document.getElementById('cs-spinner-text').textContent = evt.message;
+          }
+
+          else if (evt.type === 'fetch-progress') {
+            fetchCount.textContent = `Fetched ${evt.fetched} products${evt.hasMore ? '…' : ' ✅'}`;
+          }
+
+          else if (evt.type === 'fetch-done') {
+            addStep('✅',
+              `Fetched ${evt.total} Shopify products — ${evt.nextDayCount} Next Day SKUs to sync`,
+              'var(--success)');
+            fetchCount.textContent = `${evt.total} products`;
+            progressWrap.classList.remove('hidden');
+            document.getElementById('cs-phase-label').textContent = 'Phase 2 — Syncing Calendar Metafields';
+            document.getElementById('cs-spinner-text').textContent = 'Syncing…';
+            tiles.innerHTML = '';
+            bar.style.width = '0%';
+            progressText.textContent = 'Starting sync…';
+          }
+
+          else if (evt.type === 'progress') {
+            const pct = evt.totalProducts > 0 ? Math.round((evt.processed / evt.totalProducts) * 100) : 0;
+            bar.style.width = pct + '%';
+            progressText.textContent = `${evt.processed} / ${evt.totalProducts} products — updated: ${evt.updatedCount}, skipped: ${evt.skipped}, failed: ${evt.failed}`;
+            tiles.innerHTML = `
+              <div class="tile cfs-product-count"><div class="num">${evt.updatedCount}</div><div class="lbl">Updated</div></div>
+              <div class="tile draft-count"><div class="num">${evt.skipped}</div><div class="lbl">Skipped</div></div>
+              <div class="tile ${evt.failed > 0 ? 'orphaned' : ''}"><div class="num">${evt.failed}</div><div class="lbl">Failed</div></div>
+            `;
+          }
+
+          else if (evt.type === 'done') {
+            if (evt.cancelled) {
+              bar.style.background = 'var(--warning)';
+              progressText.textContent = `⛔ Stopped — updated: ${evt.updatedCount}, skipped: ${evt.skipped}, failed: ${evt.failed}`;
+            } else {
+              bar.style.width = '100%';
+              progressText.textContent = evt.success
+                ? `✅ Done — ${evt.updatedCount} updated, ${evt.skipped} skipped, ${evt.failed} failed`
+                : `❌ Error: ${evt.error}`;
+            }
+            lastCalendarSyncLog = evt.log || [];
+            if (lastCalendarSyncLog.length) {
+              document.getElementById('btn-cs-download-log').classList.remove('hidden');
+              showCalendarLog(lastCalendarSyncLog, dryRun);
+            }
+          }
+        }
+      }
+
+    } catch (err) {
+      progressWrap.classList.remove('hidden');
+      progressText.textContent = 'Error: ' + err.message;
+      logPanel.innerHTML = `<p style="color:var(--danger);margin-top:8px">${err.message}</p>`;
+    } finally {
+      csSetRunning(false);
+      calendarSyncReader = null;
+    }
+  }
+
+  function showCalendarLog(log, dryRun) {
+    const panel = document.getElementById('cs-log-panel');
+    if (!log.length) { panel.classList.remove('log-box'); panel.innerHTML = ''; return; }
+    panel.classList.add('log-box');
+    const header = `<p style="color:var(--text-muted);margin-bottom:8px">${dryRun ? 'DRY RUN' : 'CALENDAR SYNC'} LOG — ${new Date().toLocaleTimeString()}</p>`;
+    const rows = log.map(l => {
+      const cls = l.status === 'updated'  ? 'log-overwrite'
+                : l.status === 'dry_run'  ? 'log-dry'
+                : l.status === 'skipped'  ? 'log-match'
+                : l.status === 'warning'  ? 'log-overwrite'
+                : l.status === 'failed'   ? 'log-error'
+                : 'log-ok';
+
+      let first, detail;
+      if (l.calChange !== undefined) {
+        // Variant with structured calendar data
+        first  = `vshowcalendar: ${l.calChange}`;
+        detail = `vnotificationtitle: ${l.notifChange}`;
+      } else {
+        const lines = (l.message || '').split('\n');
+        first  = lines[0] || '';
+        detail = lines.slice(1).join('\n');
+      }
+
+      const detailHtml = detail
+        ? `<span style="display:block;margin-top:3px;padding-left:12px;font-size:11px;opacity:.75;white-space:pre-wrap;">${detail}</span>`
+        : '';
+      const skuLabel = l.sku === '-' ? '(product)' : l.sku;
+      return `<p class="${cls}">[${l.status.toUpperCase()}] <strong>${skuLabel}</strong> — ${first}${detailHtml}</p>`;
+    }).join('');
+    panel.innerHTML = header + rows;
+  }
+
+  function downloadCalendarLog() {
+    if (!lastCalendarSyncLog.length) return;
+    const esc = s => `"${String(s || '').replace(/"/g, '""')}"`;
+    const headers = ['SKU', 'Handle', 'Status', 'vshowcalendar Change', 'vnotificationtitle Change', 'Message'];
+    const rows = lastCalendarSyncLog.map(l => [
+      l.sku    || '',
+      esc(l.handle),
+      l.status,
+      esc(l.calChange   || ''),
+      esc(l.notifChange || ''),
+      esc(l.message     || ''),
+    ]);
+    const csv  = [headers, ...rows].map(r => r.join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const a    = document.createElement('a');
+    a.href     = URL.createObjectURL(blob);
+    a.download = `calendar-sync-log-${Date.now()}.csv`;
     a.click();
   }
 
