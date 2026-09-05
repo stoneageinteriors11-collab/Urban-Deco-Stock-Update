@@ -712,43 +712,77 @@
     <div class="card-title">Step 6 — Calendar Sync (Next Day Delivery)</div>
 
     <p style="font-size:13px;color:var(--text-muted);margin-bottom:18px;line-height:1.6">
-      Upload the <strong>Froogle CSV</strong> exported from CFS (brandId=215) to identify Next Day products.
-      Sets <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.showcalendar</code> (product)
-      and <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.vshowcalendar</code>
-      + <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.vnotificationtitle = "Next Day"</code> (variant)
+      Finds Next Day products from the CFS API and sets
+      <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.showcalendar</code> +
+      <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.vnotificationtitle = "Next Day"</code> (product)
+      and <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.vshowcalendar</code> +
+      <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">custom.vnotificationtitle = "Next Day"</code> (variant)
       to enable the booking calendar.
     </p>
 
-    <!-- Data source — Froogle CSV upload + Shopify API banner -->
-    <div class="upload-group">
-      <div class="upload-group-label">Step 1 — Upload Froogle CSV (required)</div>
-      <label id="cs-csv-label" style="
-          display:flex;align-items:center;gap:12px;padding:14px 16px;
-          background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);
-          cursor:pointer;transition:border-color .2s,background .2s;"
-          ondragover="event.preventDefault();this.style.borderColor='var(--accent)'"
-          ondragleave="this.style.borderColor=''"
-          ondrop="csHandleDrop(event)">
-        <span style="font-size:22px;">📋</span>
-        <div style="flex:1;min-width:0;">
-          <div style="font-size:13px;font-weight:600;color:var(--text);" id="cs-csv-filename">
-            Choose Froogle CSV / drag &amp; drop here
+    <!-- Mode tabs -->
+    <div style="display:flex;gap:8px;margin-bottom:18px;">
+      <button id="cs-tab-api" onclick="switchCsMode('api')"
+        style="padding:7px 16px;border-radius:7px;font-size:13px;font-weight:600;border:1px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer;">
+        🚀 API Mode
+      </button>
+      <button id="cs-tab-csv" onclick="switchCsMode('csv')"
+        style="padding:7px 16px;border-radius:7px;font-size:13px;font-weight:600;border:1px solid var(--border);background:transparent;color:var(--text-muted);cursor:pointer;">
+        📤 CSV Backup
+      </button>
+    </div>
+
+    <!-- API Mode -->
+    <div id="cs-api-section">
+      <div class="upload-group">
+        <div class="upload-group-label">Data Sources — Both fetched automatically</div>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <div style="display:flex;align-items:center;gap:12px;padding:13px 16px;background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.25);border-radius:var(--radius);">
+            <span style="font-size:20px;">🌐</span>
+            <div>
+              <div style="font-size:13px;font-weight:600;color:var(--success);">CFS Stock API</div>
+              <div style="font-size:12px;color:var(--text-muted);margin-top:1px;">
+                Next Day products identified live from
+                <code style="font-size:11px;background:var(--surface2);padding:1px 5px;border-radius:4px">productVariantStockJsonCFS.php?brandId=215</code>
+              </div>
+            </div>
           </div>
-          <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">
-            Must include <strong>Shopify SKU</strong> and <strong>Delivery Time</strong> columns
+          <div style="display:flex;align-items:center;gap:12px;padding:13px 16px;background:rgba(99,102,241,.07);border:1px solid rgba(99,102,241,.25);border-radius:var(--radius);">
+            <span style="font-size:20px;">🛍</span>
+            <div>
+              <div style="font-size:13px;font-weight:600;color:var(--accent);">Shopify Products API</div>
+              <div style="font-size:12px;color:var(--text-muted);margin-top:1px;">
+                All active Urban Deco products with variant metafields fetched via GraphQL — no export file needed
+              </div>
+            </div>
           </div>
         </div>
-        <input type="file" id="cs-csv-input" accept=".csv,.xlsx,.xls" style="display:none"
-          onchange="csOnFileChange(this)" />
-      </label>
-      <div style="display:flex;align-items:center;gap:12px;padding:13px 16px;background:rgba(99,102,241,.07);border:1px solid rgba(99,102,241,.25);border-radius:var(--radius);margin-top:8px;">
-        <span style="font-size:20px;">🛍</span>
-        <div>
-          <div style="font-size:13px;font-weight:600;color:var(--accent);">Shopify Products API</div>
-          <div style="font-size:12px;color:var(--text-muted);margin-top:1px;">
-            All active Urban Deco products with variant metafields fetched automatically via GraphQL
+      </div>
+    </div>
+
+    <!-- CSV Backup Mode (hidden by default) -->
+    <div id="cs-csv-section" class="hidden">
+      <div class="upload-group">
+        <div class="upload-group-label">Froogle CSV — Next Day Source</div>
+        <label id="cs-csv-label" style="
+            display:flex;align-items:center;gap:12px;padding:14px 16px;
+            background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);
+            cursor:pointer;transition:border-color .2s,background .2s;"
+            ondragover="event.preventDefault();this.style.borderColor='var(--accent)'"
+            ondragleave="this.style.borderColor=''"
+            ondrop="csHandleDrop(event)">
+          <span style="font-size:22px;">📋</span>
+          <div style="flex:1;min-width:0;">
+            <div style="font-size:13px;font-weight:600;color:var(--text);" id="cs-csv-filename">
+              Choose Froogle CSV / drag &amp; drop here
+            </div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:2px;">
+              Must include <strong>Shopify SKU</strong> and <strong>Delivery Time</strong> columns
+            </div>
           </div>
-        </div>
+          <input type="file" id="cs-csv-input" accept=".csv,.xlsx,.xls" style="display:none"
+            onchange="csOnFileChange(this)" />
+        </label>
       </div>
     </div>
 
@@ -1901,6 +1935,22 @@ async function testConnection() {
   let lastCalendarSyncLog = [];
   let calendarSyncReader  = null;
   let csFroogleFile       = null; // the uploaded Froogle CSV File object
+  let csSyncMode          = 'api'; // 'api' | 'csv'
+
+  function switchCsMode(mode) {
+    csSyncMode = mode;
+    document.getElementById('cs-api-section').classList.toggle('hidden', mode !== 'api');
+    document.getElementById('cs-csv-section').classList.toggle('hidden', mode !== 'csv');
+    const apiBtn = document.getElementById('cs-tab-api');
+    const csvBtn = document.getElementById('cs-tab-csv');
+    if (mode === 'api') {
+      apiBtn.style.cssText = 'padding:7px 16px;border-radius:7px;font-size:13px;font-weight:600;border:1px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer;';
+      csvBtn.style.cssText = 'padding:7px 16px;border-radius:7px;font-size:13px;font-weight:600;border:1px solid var(--border);background:transparent;color:var(--text-muted);cursor:pointer;';
+    } else {
+      csvBtn.style.cssText = 'padding:7px 16px;border-radius:7px;font-size:13px;font-weight:600;border:1px solid var(--accent);background:var(--accent);color:#fff;cursor:pointer;';
+      apiBtn.style.cssText = 'padding:7px 16px;border-radius:7px;font-size:13px;font-weight:600;border:1px solid var(--border);background:transparent;color:var(--text-muted);cursor:pointer;';
+    }
+  }
 
   function csOnFileChange(input) {
     if (input.files && input.files[0]) csFroogleFileSet(input.files[0]);
@@ -1910,7 +1960,7 @@ async function testConnection() {
     evt.preventDefault();
     evt.currentTarget.style.borderColor = '';
     const f = evt.dataTransfer.files[0];
-    if (f) { document.getElementById('cs-csv-input').files; csFroogleFileSet(f); }
+    if (f) csFroogleFileSet(f);
   }
 
   function csFroogleFileSet(file) {
@@ -1943,8 +1993,8 @@ async function testConnection() {
   }
 
   async function runCalendarSync() {
-    if (!csFroogleFile) {
-      alert('Please upload the Froogle CSV first.');
+    if (csSyncMode === 'csv' && !csFroogleFile) {
+      alert('Please upload the Froogle CSV first, or switch to API Mode.');
       return;
     }
     const dryRun = document.getElementById('cs-dry-run-toggle').checked;
@@ -1982,7 +2032,8 @@ async function testConnection() {
     try {
       const fd = new FormData();
       fd.append('dryRun', dryRun ? 'true' : 'false');
-      if (csFroogleFile) fd.append('froogleCsv', csFroogleFile, csFroogleFile.name);
+      // Only attach CSV in CSV backup mode
+      if (csSyncMode === 'csv' && csFroogleFile) fd.append('froogleCsv', csFroogleFile, csFroogleFile.name);
 
       const res = await fetch('/api/stock/calendar-sync', {
         method: 'POST',
