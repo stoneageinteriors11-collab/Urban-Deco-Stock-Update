@@ -1296,6 +1296,9 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
             const existingVar  = metafieldMap(shopNode.metafields);
             const varMfToWrite = [];
 
+            // Read inoutstock for display in log (not changed by this sync)
+            const curInoutstock = existingVar['inoutstock'] ?? '(not set)';
+
             // vshowcalendar
             const curVShowCal    = existingVar['vshowcalendar'] ?? null;
             const vShowCalChanged = curVShowCal !== 'true';
@@ -1332,6 +1335,7 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
               log.push({
                 sku: varSku, handle,
                 status:       dryRun ? 'dry_run' : 'updated',
+                inoutstock:   curInoutstock,
                 calBefore:    curVShowCal ?? '(not set)',
                 calAfter:     'true',
                 notifBefore:  curVNotif   ?? '(not set)',
@@ -1342,6 +1346,7 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
             } else {
               skipped++;
               log.push({ sku: varSku, handle, status: 'skipped',
+                inoutstock: curInoutstock,
                 message: 'Already correct — vshowcalendar=true and vnotificationtitle=Next Day' });
             }
           }

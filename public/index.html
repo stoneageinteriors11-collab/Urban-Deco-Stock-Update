@@ -2178,7 +2178,7 @@ async function testConnection() {
     if (!lastCalendarSyncLog.length) return;
     const esc = s => `"${String(s || '').replace(/"/g, '""')}"`;
     const headers = [
-      'SKU', 'Handle', 'Status',
+      'SKU', 'Handle', 'Status', 'inoutstock',
       'showcalendar (Before)', 'showcalendar (After)',
       'vnotificationtitle (Before)', 'vnotificationtitle (After)',
       'Message',
@@ -2187,6 +2187,7 @@ async function testConnection() {
       l.sku === '-' ? '(product)' : (l.sku || ''),
       esc(l.handle),
       l.status,
+      esc(l.inoutstock  ?? ''),
       esc(l.calBefore   ?? ''),
       esc(l.calAfter    ?? ''),
       esc(l.notifBefore ?? ''),
