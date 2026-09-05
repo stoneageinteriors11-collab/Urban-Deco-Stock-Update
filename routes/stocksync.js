@@ -5,7 +5,7 @@ const fs      = require('fs');
 const axios   = require('axios');
 require('dotenv').config();
 
-const { streamShopifyVariants } = require('../utils/parseCSV');
+const { streamShopifyVariants, getRows } = require('../utils/parseCSV');
 const { fetchCfsProducts, buildStockData, buildCompareData } = require('../utils/cfsApi');
 const { compareVariants } = require('../utils/matchVariants');
 
@@ -1095,7 +1095,13 @@ router.post('/compare-api', async (req, res) => {
 // ── POST /api/stock/calendar-sync ────────────────────────────────────────────
 //
 // Step 6 — Calendar Sync
-// Reads CFS API for products/variants where deliveryTime === 'Next Day'.
+// Accepts an optional Froogle CSV upload (field name: froogleCsv).
+//   • If CSV supplied  → reads 'Shopify SKU' + 'Delivery Time' columns; builds
+//                        a Set of product-level SKUs (e.g. "UD-144246") where
+//                        Delivery Time === 'Next Day'. All Shopify variants whose
+//                        SKU starts with that product prefix are treated as Next Day.
+//   • If no CSV        → falls back to CFS API deliveryTime field (original logic).
+//
 // Matches those SKUs in Shopify and writes:
 //   product:  custom.showcalendar     = 'true'
 //   variant:  custom.vshowcalendar    = 'true'
@@ -1105,13 +1111,18 @@ router.post('/compare-api', async (req, res) => {
 // Re-uses the module-level cancelRequested flag — safe since only one sync
 // runs at a time.
 //
-router.post('/calendar-sync', async (req, res) => {
+router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
+  const uploadedFile = req.file ? req.file.path : null;
+
   try {
     const dryRun = req.body?.dryRun !== 'false' && req.body?.dryRun !== false;
 
     let client;
     try { client = graphqlClient(); }
-    catch (err) { return res.status(400).json({ error: err.message }); }
+    catch (err) {
+      if (uploadedFile) tryUnlink(uploadedFile);
+      return res.status(400).json({ error: err.message });
+    }
 
     // ── SSE headers ───────────────────────────────────────────────────────────
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -1123,38 +1134,74 @@ router.post('/calendar-sync', async (req, res) => {
 
     const send    = obj => res.write(`data: ${JSON.stringify(obj)}\n\n`);
     const keepalive = setInterval(() => res.write(': ping\n\n'), 15000);
-    const cleanup   = () => clearInterval(keepalive);
+    const cleanup   = () => {
+      clearInterval(keepalive);
+      if (uploadedFile) tryUnlink(uploadedFile);
+    };
 
     // Counters declared here so inner catch can reference them
     let log = [], updatedCount = 0, skipped = 0, failed = 0, processed = 0, totalProducts = 0;
 
+    // froogleMode = true  → nextDaySkus contains PRODUCT-level SKUs (UD-{productId})
+    //                        match variant by prefix
+    // froogleMode = false → nextDaySkus contains VARIANT-level SKUs (UD-{prodId}-{varId})
+    //                        exact match
+    let froogleMode = false;
+
     try {
       cancelRequested = false;
 
-      // ── Phase 1a: CFS — build the Next Day SKU set ──────────────────────────
-      send({ type: 'status', phase: 'cfs', message: 'Fetching CFS product data…' });
-      const cfsProducts = await fetchCfsProducts();
-
-      // A SKU is "Next Day" if its effective delivery time (variant or parent) === 'Next Day'
+      // ── Phase 1a: Build the Next Day SKU set ────────────────────────────────
       const nextDaySkus = new Set();
-      for (const item of cfsProducts) {
-        const prodId = String(item.productId);
-        if (Array.isArray(item.variants) && item.variants.length > 0) {
-          for (const v of item.variants) {
-            const effectiveDelivery = v.deliveryTime || item.deliveryTime || '';
-            if (effectiveDelivery === 'Next Day') {
-              nextDaySkus.add(`UD-${prodId}-${v.variantId}`);
-            }
-          }
-        } else {
-          if ((item.deliveryTime || '') === 'Next Day') {
-            nextDaySkus.add(`UD-${prodId}`);
+
+      if (uploadedFile) {
+        // ── Froogle CSV path ─────────────────────────────────────────────────
+        froogleMode = true;
+        send({ type: 'status', phase: 'cfs', message: 'Parsing Froogle CSV for Next Day products…' });
+
+        const rows = await getRows(uploadedFile);
+        for (const row of rows) {
+          const sku = String(row['Shopify SKU'] || '').trim();
+          const dt  = String(row['Delivery Time'] || '').trim();
+          if (sku && dt === 'Next Day') {
+            nextDaySkus.add(sku); // product-level e.g. "UD-144246"
           }
         }
-      }
 
-      send({ type: 'status', phase: 'cfs-done',
-        message: `CFS: ${cfsProducts.length} products, ${nextDaySkus.size} Next Day SKUs found` });
+        send({ type: 'status', phase: 'cfs-done',
+          message: `Froogle CSV: ${rows.length} rows — ${nextDaySkus.size} Next Day product SKUs found` });
+
+      } else {
+        // ── CFS API primary path ──────────────────────────────────────────────
+        // Builds product-level SKUs (UD-{productId}) and uses prefix matching,
+        // same as Froogle mode. A product is "Next Day" if:
+        //   • its own deliveryTime === 'Next Day', OR
+        //   • any of its variants has deliveryTime === 'Next Day'
+        froogleMode = true; // both paths now use prefix matching
+        send({ type: 'status', phase: 'cfs', message: 'Fetching CFS product data…' });
+        const cfsProducts = await fetchCfsProducts();
+
+        for (const item of cfsProducts) {
+          const prodId = String(item.productId);
+          // Product-level delivery time
+          if ((item.deliveryTime || '') === 'Next Day') {
+            nextDaySkus.add(`UD-${prodId}`);
+            continue;
+          }
+          // Variant-level delivery time (any variant marks the whole product)
+          if (Array.isArray(item.variants)) {
+            for (const v of item.variants) {
+              if ((v.deliveryTime || '') === 'Next Day') {
+                nextDaySkus.add(`UD-${prodId}`);
+                break;
+              }
+            }
+          }
+        }
+
+        send({ type: 'status', phase: 'cfs-done',
+          message: `CFS: ${cfsProducts.length} products — ${nextDaySkus.size} Next Day product SKUs found` });
+      }
 
       // ── Phase 1b: Paginated Shopify product fetch ────────────────────────────
       send({ type: 'status', phase: 'shopify-fetch', message: 'Fetching Shopify products…' });
@@ -1223,7 +1270,20 @@ router.post('/calendar-sync', async (req, res) => {
             const varSku = shopNode.sku;
             if (!varSku) continue;
 
-            const isNextDay = nextDaySkus.has(varSku);
+            // Froogle CSV mode: match on product-level prefix (UD-{productId})
+            // CFS API mode: exact variant SKU match
+            let isNextDay;
+            if (froogleMode) {
+              // Extract product-level SKU from variant SKU
+              // "UD-144246-17238185" → "UD-144246"
+              // "UD-144246"          → "UD-144246" (no variant suffix)
+              const m = varSku.match(/^(UD-\d+)/);
+              const productSku = m ? m[1] : varSku;
+              isNextDay = nextDaySkus.has(productSku);
+            } else {
+              isNextDay = nextDaySkus.has(varSku);
+            }
+
             if (!isNextDay) {
               skipped++;
               log.push({ sku: varSku, handle, status: 'skipped',
