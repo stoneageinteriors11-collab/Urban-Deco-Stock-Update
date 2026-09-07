@@ -985,19 +985,32 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
         for (const item of cfsProducts) {
           const prodId  = String(item.productId);
           const prodDt  = (item.deliveryTime || '').trim();
-          if (Array.isArray(item.variants)) {
+          const hasVariants = Array.isArray(item.variants) && item.variants.length > 0;
+
+          if (hasVariants) {
+            // Products with sub-variants → use variant-level SKU: UD-{prodId}-{varId}
             for (const v of item.variants) {
               const varId  = String(v.variantId);
               const varSku = `UD-${prodId}-${varId}`;
               const dt     = (v.deliveryTime || prodDt || '').trim();
-              const onHand = Number(v.onHand ?? 0);
+              const onHand = Number(v.onHand ?? item.onHand ?? 0);
               cfsVariantMap.set(varSku, {
-                isNextDay:    dt === 'Next Day',
+                isNextDay:    dt.toLowerCase() === 'next day',
                 inStock:      onHand > 0,
                 deliveryTime: dt,
                 onHand,
               });
             }
+          } else {
+            // No sub-variants → product-level SKU only: UD-{prodId}
+            const prodSku = `UD-${prodId}`;
+            const onHand  = Number(item.onHand ?? 0);
+            cfsVariantMap.set(prodSku, {
+              isNextDay:    prodDt.toLowerCase() === 'next day',
+              inStock:      onHand > 0,
+              deliveryTime: prodDt,
+              onHand,
+            });
           }
         }
         const nextDayInStock = [...cfsVariantMap.values()].filter(v => v.isNextDay && v.inStock).length;
