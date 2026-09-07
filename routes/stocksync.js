@@ -1138,12 +1138,30 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
               }
 
               if (!cfsInStock) {
-                skipped++;
-                varLogs.push({
-                  sku: varSku, handle, status: 'skipped',
-                  cfsOnHand, cfsInStock: false,
-                  message: `Next Day but CFS out of stock (onHand: ${cfsOnHand}) — calendar not set`,
-                });
+                // Out of stock — set vshowcalendar=false on the variant if it isn't already
+                const existingVarOos = metafieldMap(shopNode.metafields);
+                const curVShowCalOos = existingVarOos['vshowcalendar'] ?? null;
+                const calNeedsDisable = curVShowCalOos !== 'false';
+                if (calNeedsDisable) {
+                  updatedCount++;
+                  allMetafields.push({ ownerId: shopNode.id, namespace: 'custom',
+                    key: 'vshowcalendar', value: 'false', type: 'single_line_text_field' });
+                  varLogs.push({
+                    sku: varSku, handle,
+                    status:    dryRun ? 'dry_run' : 'updated',
+                    cfsOnHand, cfsInStock: false,
+                    calBefore: curVShowCalOos ?? '(not set)',
+                    calAfter:  'false',
+                    message:   `Next Day but CFS out of stock (onHand: ${cfsOnHand}) — vshowcalendar set to false`,
+                  });
+                } else {
+                  skipped++;
+                  varLogs.push({
+                    sku: varSku, handle, status: 'skipped',
+                    cfsOnHand, cfsInStock: false,
+                    message: `Next Day but out of stock — vshowcalendar already false`,
+                  });
+                }
                 continue;
               }
             }
@@ -1192,7 +1210,10 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
           }
 
           // ── Product-level metafields ────────────────────────────────────────
+          // productHasNextDay = at least one in-stock Next Day variant was found.
+          // If no in-stock variant but product currently has showcalendar=true → set false.
           if (productHasNextDay && !productCalendarWritten) {
+            // ── In-stock path: enable product calendar ──────────────────────
             productCalendarWritten = true;
             const curShowCal      = existingProd['showcalendar']       ?? null;
             const curProdNotif    = existingProd['vnotificationtitle']  ?? null;
@@ -1222,6 +1243,22 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
             } else {
               varLogs.push({ sku: '-', handle, status: 'skipped',
                 message: 'Product showcalendar=true and vnotificationtitle=Next Day — no change' });
+            }
+          } else if (!productHasNextDay && !productCalendarWritten) {
+            // ── Out-of-stock path: disable product calendar if currently enabled ──
+            const curShowCal = existingProd['showcalendar'] ?? null;
+            if (curShowCal === 'true') {
+              productCalendarWritten = true;
+              allMetafields.push({ ownerId: product.id, namespace: 'custom',
+                key: 'showcalendar', value: 'false', type: 'single_line_text_field' });
+              updatedCount++;
+              varLogs.push({
+                sku: '-', handle,
+                status:    dryRun ? 'dry_run' : 'updated',
+                calBefore: 'true',
+                calAfter:  'false',
+                message:   'All Next Day variants out of stock — product showcalendar set to false',
+              });
             }
           }
 
