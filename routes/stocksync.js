@@ -11,15 +11,25 @@ const { compareVariants } = require('../utils/matchVariants');
 
 const router = express.Router();
 
-// ── Cancel flag ───────────────────────────────────────────────────────────────
-// Simple module-level flag. The sync loop checks it each iteration.
-// Resets to false at the start of every new sync.
-let cancelRequested = false;
+// ── Per-request cancel map ────────────────────────────────────────────────────
+// Maps runId → boolean (true = cancelled).
+// Multiple concurrent syncs can be cancelled independently.
+const cancelMap = new Map();
+
+function isCancelled(runId) { return cancelMap.get(runId) === true; }
+function makeRunId()        { return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`; }
 
 // ── POST /api/stock/cancel ────────────────────────────────────────────────────
 router.post('/cancel', (req, res) => {
-  cancelRequested = true;
-  console.log('  ⛔ Stock sync cancel requested');
+  const { runId } = req.body || {};
+  if (runId && cancelMap.has(runId)) {
+    cancelMap.set(runId, true);
+    console.log(`  ⛔ Sync cancel requested (runId: ${runId})`);
+  } else {
+    // Fallback: cancel all active runs
+    for (const [id] of cancelMap) cancelMap.set(id, true);
+    console.log('  ⛔ Sync cancel requested (all active runs)');
+  }
   res.json({ ok: true });
 });
 
@@ -86,9 +96,6 @@ const GET_LOCATIONS_QUERY = `
   }
 `;
 
-// ── Metafields-only query (no locationId required) ────────────────────────────
-// Uses connection format (compatible with all API versions).
-// Fetches the "custom" namespace and we filter keys client-side.
 const GET_PRODUCT_METAFIELDS_QUERY = `
   query getProductMetafields($handle: String!) {
     productByHandle(handle: $handle) {
@@ -113,7 +120,6 @@ const GET_PRODUCT_METAFIELDS_QUERY = `
   }
 `;
 
-// ── Full query including inventory level (requires read_locations scope) ───────
 const GET_PRODUCT_STOCK_QUERY = `
   query getProductStock($handle: String!, $locationId: ID!) {
     productByHandle(handle: $handle) {
@@ -143,9 +149,6 @@ const GET_PRODUCT_STOCK_QUERY = `
   }
 `;
 
-// ── Bulk product fetch queries (used by /sync-api — no CSV upload needed) ─────
-
-// Without inventory quantities (fallback when read_inventory scope is missing)
 const GET_PRODUCTS_BULK_QUERY = `
   query getProductsBulk($first: Int!, $after: String, $query: String) {
     products(first: $first, after: $after, query: $query) {
@@ -173,7 +176,6 @@ const GET_PRODUCTS_BULK_QUERY = `
   }
 `;
 
-// With inventory quantities (requires read_inventory scope — added after re-auth)
 const GET_PRODUCTS_BULK_QUERY_WITH_INV = `
   query getProductsBulkWithInv($first: Int!, $after: String, $locationId: ID!, $query: String) {
     products(first: $first, after: $after, query: $query) {
@@ -233,10 +235,8 @@ function parseSku(sku) {
   return { prodId: parts[1] || null, varId: parts[2] || null };
 }
 
-// Accepts either connection format { edges: [{node}] } or plain array [{key,value}]
 function metafieldMap(metafields) {
   const map = {};
-  // Connection format returned by the updated queries
   const nodes = metafields?.edges
     ? metafields.edges.map(e => e.node)
     : (metafields || []);
@@ -259,7 +259,6 @@ function deliveryTimeIsShort(deliveryTime) {
   return false;
 }
 
-// Format a metafield diff in plain readable language
 function diffStr(oldVal, newVal) {
   const old = oldVal ?? null;
   if (old === newVal) return `currently "${newVal}" (no change)`;
@@ -267,27 +266,26 @@ function diffStr(oldVal, newVal) {
   return `currently "${old}" — will change to "${newVal}"`;
 }
 
-// Format an inventory diff in plain readable language
 function diffQty(currentQty, newQty) {
   if (currentQty === null) return `current value unknown — will set to ${newQty}`;
   if (currentQty === newQty) return `currently ${newQty} (no change)`;
   return `currently ${currentQty} — will set to ${newQty}`;
 }
 
+// ── Batch metafield writer (chunks of 25) ─────────────────────────────────────
+async function writeMetafieldsBatched(client, allMetafields, logTarget, handle) {
+  for (let i = 0; i < allMetafields.length; i += 25) {
+    const chunk = allMetafields.slice(i, i + 25);
+    const mfResult = await gql(client, METAFIELDS_SET_MUTATION, { metafields: chunk });
+    const mfErrors = mfResult?.metafieldsSet?.userErrors || [];
+    if (mfErrors.length) {
+      logTarget.push({ sku: '-', handle, status: 'warning',
+        message: `Metafield batch error: ${mfErrors.map(e => e.message).join(', ')}` });
+    }
+  }
+}
+
 // ── POST /api/stock/sync ──────────────────────────────────────────────────────
-//
-// Required uploads: shopifyFile1
-// Optional uploads: shopifyFile2
-// Body field:       dryRun (boolean, default true)
-//
-// CFS stock data is fetched directly from the CFS API — no file uploads needed.
-//
-// Dry run  — always reads current metafields (old→new diff in log); no writes.
-//            Inventory diff shown as "would set to X" if read_locations missing.
-// Live run — tries to get location for inventory comparison; if read_locations
-//            scope is missing, metafields are still synced, inventory is skipped
-//            with a one-time warning in the log.
-//
 router.post(
   '/sync',
   upload.fields([
@@ -302,26 +300,23 @@ router.post(
       const dryRun = req.body?.dryRun !== 'false' && req.body?.dryRun !== false;
 
       if (!files.shopifyFile1) {
-        return res.status(400).json({
-          error: 'Please upload at least one Shopify export file.',
-        });
+        return res.status(400).json({ error: 'Please upload at least one Shopify export file.' });
       }
 
       const shopifyFile1Path = files.shopifyFile1[0].path;
       const shopifyFile2Path = files.shopifyFile2?.[0]?.path || null;
-
       uploadedPaths.push(shopifyFile1Path);
       if (shopifyFile2Path) uploadedPaths.push(shopifyFile2Path);
 
-      // ── Fetch CFS stock data from API ─────────────────────────────────────
-      console.log('▶ Stock sync — fetching CFS data from API…');
+      const runId = makeRunId();
+      cancelMap.set(runId, false);
+
+      console.log('▶ Stock sync (CSV) — fetching CFS data…');
       const cfsProducts = await fetchCfsProducts();
       const { prodStockBySku, prodStockByProdId, varStockBySku, varStockByAttrId } =
         buildStockData(cfsProducts);
-      console.log(`  ✓ ${cfsProducts.length} products from CFS API`);
-      console.log(`  ✓ ${prodStockBySku.size} product stock records, ${varStockBySku.size} variant stock records`);
+      console.log(`  ✓ ${cfsProducts.length} CFS products`);
 
-      // ── Parse Shopify exports ─────────────────────────────────────────────
       console.log('▶ Streaming Shopify export…');
       const shopifyVariants = await streamShopifyVariants(shopifyFile1Path);
       if (shopifyFile2Path) {
@@ -330,42 +325,20 @@ router.post(
       }
       console.log(`  ✓ ${shopifyVariants.length} Shopify variants`);
 
-      // ── Shopify client (always needed) ────────────────────────────────────
-      let client       = null;
-      let locationId   = null;   // null = read_locations scope missing
-      let hasLocations = false;
-      try {
-        client = graphqlClient();
-      } catch (err) {
-        return res.status(400).json({ error: err.message });
-      }
+      let client, locationId = null, hasLocations = false;
+      try { client = graphqlClient(); }
+      catch (err) { cancelMap.delete(runId); return res.status(400).json({ error: err.message }); }
 
-      // Try to get location — needed both for dry-run qty comparison and live inventory writes.
       try {
         const locData = await gql(client, GET_LOCATIONS_QUERY);
         const locs    = (locData?.locations?.edges || []).map(e => e.node);
-        console.log(`  ℹ Locations found: ${locs.map(l => `"${l.name}"`).join(', ') || 'none'}`);
         const loc     = locs.find(l => /^shop$/i.test(l.name))
                      || locs.find(l => /shop|warehouse|main/i.test(l.name))
                      || locs[0];
-        if (loc) {
-          locationId   = loc.id;
-          hasLocations = true;
-          console.log(`  ✓ Using location: "${loc.name}" (${loc.id})`);
-        } else {
-          console.warn('  ⚠ No locations returned by Shopify — inventory sync will be skipped');
-        }
-      } catch (locErr) {
-        const locErrMsg = locErr.response?.data
-          ? JSON.stringify(locErr.response.data)
-          : locErr.message;
-        console.warn('  ⚠ Location fetch failed:', locErrMsg);
-      }
+        if (loc) { locationId = loc.id; hasLocations = true; }
+      } catch (_) {}
 
-      // Reset cancel flag for this run
-      cancelRequested = false;
-
-      // ── SSE setup ─────────────────────────────────────────────────────────
+      // ── SSE setup ───────────────────────────────────────────────────────────
       res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
@@ -374,20 +347,15 @@ router.post(
       res.flushHeaders();
       const send = obj => res.write(`data: ${JSON.stringify(obj)}\n\n`);
 
-      const log = [];
-      let newCount     = 0;
-      let updatedCount = 0;
-      let skipped      = 0;
-      let failed       = 0;
-      let processed    = 0;
+      // Send runId immediately so client can cancel this specific run
+      send({ type: 'run_id', runId });
 
-      // Warn once in the log if inventory sync is unavailable
+      const log = [];
+      let newCount = 0, updatedCount = 0, skipped = 0, failed = 0, processed = 0;
+
       if (!hasLocations) {
         log.push({ sku: '-', handle: '-', status: 'warning',
-          message: 'Inventory sync disabled — token missing read_locations scope.\n' +
-            'Fix: in Shopify Admin go to Settings → Apps & sales channels → find this app → Uninstall it.\n' +
-            'Then click "Connect to Shopify" here to re-authorise and get a fresh token with the correct scopes.\n' +
-            'inoutstock metafields will still be synced this run.' });
+          message: 'Inventory sync disabled — token missing read_locations scope. Reconnect Shopify to fix.' });
       }
 
       const byHandle = new Map();
@@ -396,264 +364,197 @@ router.post(
         byHandle.get(v.handle).push(v);
       }
       const totalProducts = byHandle.size;
-      console.log(`▶ Processing ${shopifyVariants.length} variants across ${totalProducts} products (dryRun=${dryRun}, inventory=${hasLocations ? 'yes' : 'no'})`);
 
-      try { // outer try
-
-      for (const [handle, variantsForProduct] of byHandle) {
-        // Check cancel flag before each product
-        if (cancelRequested) {
-          console.log(`  ⛔ Sync cancelled at product ${processed + 1}/${totalProducts}`);
-          send({ type: 'done', success: true, cancelled: true, dryRun,
-            newCount, updatedCount, skipped, failed, total: shopifyVariants.length, log });
-          res.end();
-          return;
-        }
-
-        try {
-          // ── Skip non-active Shopify products ───────────────────────────────
-          const productStatus = (variantsForProduct[0].status || '').toLowerCase();
-          if (productStatus && productStatus !== 'active') {
-            skipped += variantsForProduct.length;
-            log.push({ sku: variantsForProduct[0].variantSku, handle, status: 'skipped',
-              message: `Shopify product is ${productStatus.toUpperCase()} — skipped (only ACTIVE products are synced)` });
-            processed++;
-            send({ type: 'progress', processed, totalProducts, newCount, updatedCount, skipped, failed });
-            continue;
+      try {
+        for (const [handle, variantsForProduct] of byHandle) {
+          if (isCancelled(runId)) {
+            send({ type: 'done', success: true, cancelled: true, dryRun,
+              newCount, updatedCount, skipped, failed, total: shopifyVariants.length, log });
+            res.end(); return;
           }
 
-          // Representative SKU used only for error log entries — all CFS data is
-          // looked up per-variant inside the loop by exact Shopify SKU match.
-          const repSku = variantsForProduct[0].variantSku;
-
-          // ── Fetch current Shopify values ───────────────────────────────────
-          // Always use the inventory query when we have a location so dry-run
-          // can show the real current qty. Falls back to metafields-only when
-          // locationId is null (read_locations scope missing).
-          let productData;
-          if (locationId) {
-            productData = await gql(client, GET_PRODUCT_STOCK_QUERY, { handle, locationId });
-          } else {
-            productData = await gql(client, GET_PRODUCT_METAFIELDS_QUERY, { handle });
-          }
-
-          const product = productData?.productByHandle;
-          if (!product) {
-            failed++;
-            log.push({ sku: repSku, handle, status: 'failed', message: 'Product not found on Shopify' });
-            processed++;
-            send({ type: 'progress', processed, totalProducts, newCount, updatedCount, skipped, failed });
-            continue;
-          }
-
-          const shopifyNodes = product.variants.edges.map(e => e.node);
-          const existingProd = metafieldMap(product.metafields);
-
-          // ── Per-variant ────────────────────────────────────────────────────
-          // Product-level inoutstock is written once, derived from the first variant
-          // that has a CFS match (avoids needing a "representative SKU" for the product).
-          let productInoutWritten = false;
-
-          for (const shopNode of shopifyNodes) {
-            const varSku = shopNode.sku;
-            if (!varSku) continue;
-
-            // Strict exact-SKU lookup: Shopify Variant SKU → CFS "Shopify SKU" column.
-            // Variant feed first (full SKU e.g. UD-156928-16939645), then product feed
-            // (product-level SKU e.g. UD-1243174 or UD-1243180). No fuzzy matching.
-            const varStock     = varStockBySku.get(varSku);
-            const varProdStock = varStock ? null : prodStockBySku.get(varSku);
-
-            if (!varStock && !varProdStock) {
-              skipped++;
-              log.push({ sku: varSku, handle, status: 'skipped',
-                message: 'No CFS stock data found for this variant SKU — skipped' });
+          try {
+            const productStatus = (variantsForProduct[0].status || '').toLowerCase();
+            if (productStatus && productStatus !== 'active') {
+              skipped += variantsForProduct.length;
+              log.push({ sku: variantsForProduct[0].variantSku, handle, status: 'skipped',
+                message: `Shopify product is ${productStatus.toUpperCase()} — skipped` });
+              processed++;
+              send({ type: 'progress', processed, totalProducts, newCount, updatedCount, skipped, failed });
               continue;
             }
 
-            // Delivery time is always the source of truth — never trust vinOutStock directly
-            const vDeliveryTime = varStock ? varStock.vNotificationTitle : varProdStock.deliveryTime;
-            const vDueDate      = varStock ? (varStock.vDueDate || '') : (varProdStock?.dueDate || '');
-            const vIsShortLead  = deliveryTimeIsShort(vDeliveryTime);
-            const vInOutStock   = vIsShortLead ? 'IN STOCK' : 'OUT OF STOCK';
-
-            // Product-level inoutstock + duedate: write once from the first matched variant
-            if (!productInoutWritten) {
-              productInoutWritten = true;
-              const prodInoutCur = existingProd['inoutstock'] ?? null;
-              const prodMfToWrite = [];
-              if (prodInoutCur !== vInOutStock) {
-                prodMfToWrite.push({
-                  ownerId: product.id, namespace: 'custom', key: 'inoutstock',
-                  value: vInOutStock, type: 'single_line_text_field',
-                });
-              }
-              if (vDueDate) {
-                prodMfToWrite.push({
-                  ownerId: product.id, namespace: 'custom', key: 'duedate',
-                  value: vDueDate, type: 'single_line_text_field',
-                });
-              }
-              if (!dryRun && prodMfToWrite.length > 0) {
-                const mfResult = await gql(client, METAFIELDS_SET_MUTATION, { metafields: prodMfToWrite });
-                const mfErrors = mfResult?.metafieldsSet?.userErrors || [];
-                if (mfErrors.length) {
-                  log.push({ sku: varSku, handle, status: 'warning',
-                    message: `Product metafield error: ${mfErrors.map(e => e.message).join(', ')}` });
-                }
-              }
-            }
-
-            const existingVar = metafieldMap(shopNode.metafields);
-            // currentQty is null when locationId is missing (no read_locations scope)
-            const invLevel    = shopNode.inventoryItem?.inventoryLevel;
-            const currentQty  = invLevel?.quantities?.find(q => q.name === 'available')?.quantity ?? null;
-            const invItemId   = shopNode.inventoryItem?.id;
-
-            // ── Variant metafields: inoutstock + vnotificationtitle + duedate ─
-            // Only push each field if the CFS value differs from what Shopify already has.
-            const varMfToWrite  = [];
-            const vInoutCur     = existingVar['inoutstock'] ?? null;
-            const vInoutChanged = vInoutCur !== vInOutStock;
-            if (vInoutChanged) {
-              varMfToWrite.push({
-                ownerId: shopNode.id, namespace: 'custom', key: 'inoutstock',
-                value: vInOutStock, type: 'single_line_text_field',
-              });
-            }
-            if (vDeliveryTime && existingVar['vnotificationtitle'] !== vDeliveryTime) {
-              varMfToWrite.push({
-                ownerId: shopNode.id, namespace: 'custom', key: 'vnotificationtitle',
-                value: vDeliveryTime, type: 'single_line_text_field',
-              });
-            }
-            if (vDueDate && existingVar['duedate'] !== vDueDate) {
-              varMfToWrite.push({
-                ownerId: shopNode.id, namespace: 'custom', key: 'duedate',
-                value: vDueDate, type: 'single_line_text_field',
-              });
-            }
-
-            // ── Inventory quantity logic ──────────────────────────────────
-            // Step 1 (pre-sync): always match CFS onHand, then delivery time rules override.
-            // OUT OF STOCK: always set qty to 0 (regardless of CFS onHand)
-            // IN STOCK:     always sync to CFS onHand; fallback to 2 if CFS onHand is 0
-            const cfsOnHand = varStock ? (varStock.vOnHand ?? 0) : (varProdStock?.onHand ?? 0);
-            let targetQty;
-            let shouldWriteInv;
-            if (!vIsShortLead) {
-              // OUT OF STOCK — force 0
-              targetQty      = 0;
-              shouldWriteInv = locationId !== null && currentQty !== 0;
+            const repSku = variantsForProduct[0].variantSku;
+            let productData;
+            if (locationId) {
+              productData = await gql(client, GET_PRODUCT_STOCK_QUERY, { handle, locationId });
             } else {
-              // IN STOCK — always sync qty to CFS onHand (fallback 2 when onHand is 0)
-              targetQty      = cfsOnHand > 0 ? cfsOnHand : 2;
-              shouldWriteInv = locationId !== null && currentQty !== targetQty;
+              productData = await gql(client, GET_PRODUCT_METAFIELDS_QUERY, { handle });
             }
 
-            // ── Live: write if changed ─────────────────────────────────────
-            if (!dryRun) {
-              if (varMfToWrite.length > 0) {
-                const vmfResult = await gql(client, METAFIELDS_SET_MUTATION, { metafields: varMfToWrite });
-                const vmfErrors = vmfResult?.metafieldsSet?.userErrors || [];
-                if (vmfErrors.length) {
-                  log.push({ sku: varSku, handle, status: 'warning',
-                    message: `Variant metafield error: ${vmfErrors.map(e => e.message).join(', ')}` });
+            const product = productData?.productByHandle;
+            if (!product) {
+              failed++;
+              log.push({ sku: repSku, handle, status: 'failed', message: 'Product not found on Shopify' });
+              processed++;
+              send({ type: 'progress', processed, totalProducts, newCount, updatedCount, skipped, failed });
+              continue;
+            }
+
+            const shopifyNodes = product.variants.edges.map(e => e.node);
+            const existingProd = metafieldMap(product.metafields);
+
+            // ── Collect phase: gather all writes for this product ─────────────
+            const allMetafields    = []; // batched in chunks of 25
+            const allInventory     = []; // sent in one call
+            const varLogs          = [];
+            let   productInoutWritten = false;
+
+            for (const shopNode of shopifyNodes) {
+              const varSku = shopNode.sku;
+              if (!varSku) continue;
+
+              const varStock     = varStockBySku.get(varSku);
+              const varProdStock = varStock ? null : prodStockBySku.get(varSku);
+
+              if (!varStock && !varProdStock) {
+                skipped++;
+                varLogs.push({ sku: varSku, handle, status: 'skipped',
+                  message: 'No CFS stock data found for this variant SKU — skipped' });
+                continue;
+              }
+
+              const vDeliveryTime = varStock ? varStock.vNotificationTitle : varProdStock.deliveryTime;
+              const vDueDate      = varStock ? (varStock.vDueDate || '') : (varProdStock?.dueDate || '');
+              const vIsShortLead  = deliveryTimeIsShort(vDeliveryTime);
+              const vInOutStock   = vIsShortLead ? 'IN STOCK' : 'OUT OF STOCK';
+
+              // Product-level metafields — once
+              if (!productInoutWritten) {
+                productInoutWritten = true;
+                const prodInoutCur = existingProd['inoutstock'] ?? null;
+                if (prodInoutCur !== vInOutStock) {
+                  allMetafields.push({ ownerId: product.id, namespace: 'custom',
+                    key: 'inoutstock', value: vInOutStock, type: 'single_line_text_field' });
+                }
+                if (vDueDate) {
+                  allMetafields.push({ ownerId: product.id, namespace: 'custom',
+                    key: 'duedate', value: vDueDate, type: 'single_line_text_field' });
                 }
               }
 
-              if (invItemId && locationId && shouldWriteInv) {
+              const existingVar = metafieldMap(shopNode.metafields);
+              const invLevel    = shopNode.inventoryItem?.inventoryLevel;
+              const currentQty  = invLevel?.quantities?.find(q => q.name === 'available')?.quantity ?? null;
+              const invItemId   = shopNode.inventoryItem?.id;
+
+              // Variant metafields
+              const mfStart       = allMetafields.length;
+              const vInoutCur     = existingVar['inoutstock'] ?? null;
+              const vInoutChanged = vInoutCur !== vInOutStock;
+              if (vInoutChanged) {
+                allMetafields.push({ ownerId: shopNode.id, namespace: 'custom',
+                  key: 'inoutstock', value: vInOutStock, type: 'single_line_text_field' });
+              }
+              if (vDeliveryTime && existingVar['vnotificationtitle'] !== vDeliveryTime) {
+                allMetafields.push({ ownerId: shopNode.id, namespace: 'custom',
+                  key: 'vnotificationtitle', value: vDeliveryTime, type: 'single_line_text_field' });
+              }
+              if (vDueDate && existingVar['duedate'] !== vDueDate) {
+                allMetafields.push({ ownerId: shopNode.id, namespace: 'custom',
+                  key: 'duedate', value: vDueDate, type: 'single_line_text_field' });
+              }
+              const varMfChanged = allMetafields.length > mfStart;
+
+              // Inventory
+              const cfsOnHand = varStock ? (varStock.vOnHand ?? 0) : (varProdStock?.onHand ?? 0);
+              let targetQty, shouldWriteInv;
+              if (!vIsShortLead) {
+                targetQty      = 0;
+                shouldWriteInv = locationId !== null && currentQty !== 0;
+              } else {
+                targetQty      = cfsOnHand > 0 ? cfsOnHand : 2;
+                shouldWriteInv = locationId !== null && currentQty !== targetQty;
+              }
+              if (shouldWriteInv && invItemId && locationId) {
+                allInventory.push({
+                  inventoryItemId: invItemId, locationId,
+                  quantity: targetQty, changeFromQuantity: currentQty ?? 0,
+                });
+              }
+
+              // Log entry
+              const anyChanged = vInoutChanged || shouldWriteInv || varMfChanged;
+              if (!anyChanged && currentQty !== null) {
+                skipped++;
+                varLogs.push({ sku: varSku, handle, status: 'skipped',
+                  message: `All values already correct — no changes needed\n  inoutstock: "${vInOutStock}" (no change)\n  qty:        ${currentQty} (no change)` });
+              } else {
+                const isNew     = vInoutCur === null || currentQty === null;
+                const status    = dryRun ? 'dry_run' : (isNew ? 'new' : 'updated');
+                const ruleLabel = vIsShortLead ? 'IN STOCK' : 'OUT OF STOCK';
+                const delivery  = vDeliveryTime || 'n/a';
+                const inoutChange = diffStr(vInoutCur, vInOutStock);
+                let qtyChange;
+                if (locationId !== null) {
+                  if (!vIsShortLead) {
+                    qtyChange = diffQty(currentQty, 0);
+                  } else {
+                    const tgt = cfsOnHand > 0 ? cfsOnHand : 2;
+                    const note = cfsOnHand > 0 ? ` (CFS onHand: ${cfsOnHand})` : ' (CFS onHand: 0, using fallback)';
+                    qtyChange = currentQty === tgt
+                      ? `currently ${currentQty} (no change — already matches CFS)`
+                      : `currently ${currentQty ?? 'unknown'} — will set to ${tgt}${note}`;
+                  }
+                } else {
+                  qtyChange = !vIsShortLead
+                    ? 'would set to 0 — reconnect Shopify to enable inventory reads'
+                    : `would set to ${cfsOnHand > 0 ? cfsOnHand : 2} — reconnect Shopify to enable inventory reads`;
+                }
+                if (isNew) newCount++; else updatedCount++;
+                varLogs.push({ sku: varSku, handle, status, rule: ruleLabel, delivery, inoutChange, qtyChange, dueDateChange: vDueDate || '' });
+              }
+            }
+
+            // ── Write phase (skipped in dry run) ─────────────────────────────
+            if (!dryRun) {
+              await writeMetafieldsBatched(client, allMetafields, varLogs, handle);
+              if (allInventory.length > 0) {
                 const invResult = await gql(client, INVENTORY_SET_MUTATION, {
-                  input: {
-                    name: 'available', reason: 'correction',
-                    quantities: [{ inventoryItemId: invItemId, locationId, quantity: targetQty, changeFromQuantity: currentQty ?? 0 }],
-                  },
+                  input: { name: 'available', reason: 'correction', quantities: allInventory },
                 });
                 const invErrors = invResult?.inventorySetQuantities?.userErrors || [];
                 if (invErrors.length) {
-                  log.push({ sku: varSku, handle, status: 'warning',
-                    message: `Inventory set error: ${invErrors.map(e => e.message).join(', ')}` });
+                  varLogs.push({ sku: '-', handle, status: 'warning',
+                    message: `Inventory batch error: ${invErrors.map(e => e.message).join(', ')}` });
                 }
               }
             }
 
-            // ── Build log entry ────────────────────────────────────────────
-            // anyChanged covers: inoutstock metafield, inventory qty, and any other metafield
-            // (vnotificationtitle, duedate) — so a product is only skipped when truly nothing changes
-            const anyChanged = vInoutChanged || shouldWriteInv || varMfToWrite.length > 0;
+            log.push(...varLogs);
+            await sleep(dryRun ? 30 : 100);
 
-            if (!anyChanged && currentQty !== null) {
-              // Everything already correct and we could verify — truly skipped
-              skipped++;
-              log.push({ sku: varSku, handle, status: 'skipped',
-                message: `All values already correct — no changes needed\n` +
-                  `  inoutstock: "${vInOutStock}" (no change)\n` +
-                  `  qty:        ${currentQty} (no change)`,
-              });
-            } else {
-              const isNew  = vInoutCur === null || currentQty === null;
-              const status = dryRun ? 'dry_run' : (isNew ? 'new' : 'updated');
-              const ruleLabel   = vIsShortLead ? 'IN STOCK' : 'OUT OF STOCK';
-              const delivery    = vDeliveryTime || 'n/a';
-
-              const inoutChange = diffStr(vInoutCur, vInOutStock);
-
-              let qtyChange;
-              if (locationId !== null) {
-                if (!vIsShortLead) {
-                  qtyChange = diffQty(currentQty, 0);
-                } else {
-                  // IN STOCK — always sync to CFS onHand
-                  const tgt = cfsOnHand > 0 ? cfsOnHand : 2;
-                  const onHandNote = cfsOnHand > 0 ? ` (CFS onHand: ${cfsOnHand})` : ' (CFS onHand: 0, using fallback)';
-                  if (currentQty === tgt) {
-                    qtyChange = `currently ${currentQty} (no change — already matches CFS)`;
-                  } else {
-                    qtyChange = `currently ${currentQty ?? 'unknown'} — will set to ${tgt}${onHandNote}`;
-                  }
-                }
-              } else {
-                qtyChange = !vIsShortLead
-                  ? 'would set to 0 — reconnect Shopify to enable inventory reads'
-                  : `would set to ${cfsOnHand > 0 ? cfsOnHand : 2} — reconnect Shopify to enable inventory reads`;
-              }
-
-              if (!dryRun) {
-                if (isNew) newCount++; else updatedCount++;
-              } else {
-                if (isNew) newCount++; else updatedCount++;
-              }
-
-              log.push({ sku: varSku, handle, status, rule: ruleLabel, delivery, inoutChange, qtyChange,
-                dueDateChange: vDueDate || '' });
-            }
+          } catch (prodErr) {
+            failed++;
+            console.error(`  ✗ Error on handle "${handle}":`, prodErr.message);
+            log.push({ sku: '-', handle, status: 'failed', message: prodErr.message });
           }
 
-          await sleep(dryRun ? 100 : 250);
+          processed++;
+          send({ type: 'progress', processed, totalProducts, newCount, updatedCount, skipped, failed });
 
-        } catch (prodErr) {
-          failed++;
-          console.error(`  ✗ Error on handle "${handle}":`, prodErr.message);
-          log.push({ sku: '-', handle, status: 'failed', message: prodErr.message });
+          if (processed % 50 === 0 || processed === totalProducts) {
+            console.log(`  … ${processed}/${totalProducts} — new:${newCount} updated:${updatedCount} skipped:${skipped} failed:${failed}`);
+          }
         }
-
-        processed++;
-        send({ type: 'progress', processed, totalProducts, newCount, updatedCount, skipped, failed });
-
-        if (processed % 50 === 0 || processed === totalProducts) {
-          console.log(`  … ${processed}/${totalProducts} — new: ${newCount}, updated: ${updatedCount}, skipped: ${skipped}, failed: ${failed}`);
-        }
-      }
-
       } catch (outerErr) {
-        console.error(`  ✗ Unexpected error at product ${processed}/${totalProducts}:`, outerErr.message);
+        console.error(`  ✗ Unexpected outer error:`, outerErr.message);
         send({ type: 'done', success: false, error: `Server error: ${outerErr.message}`,
           dryRun, newCount, updatedCount, skipped, failed, total: shopifyVariants.length, log });
-        res.end();
-        return;
+        res.end(); return;
       }
 
-      console.log(`  ✓ Stock sync done — new: ${newCount}, updated: ${updatedCount}, skipped: ${skipped}, failed: ${failed}`);
+      console.log(`  ✓ Stock sync done — new:${newCount} updated:${updatedCount} skipped:${skipped} failed:${failed}`);
       send({ type: 'done', success: true, dryRun, newCount, updatedCount, skipped, failed, total: shopifyVariants.length, log });
       res.end();
 
@@ -663,31 +564,26 @@ router.post(
       else res.end();
     } finally {
       uploadedPaths.forEach(tryUnlink);
+      // runId cleanup happens after res.end() — keep it so cancel doesn't error
+      setTimeout(() => {
+        const { runId } = res.locals || {};
+        if (runId) cancelMap.delete(runId);
+      }, 5000);
     }
   }
 );
 
 // ── POST /api/stock/sync-api ──────────────────────────────────────────────────
-//
-// API-driven sync — fetches Shopify product data directly (no CSV upload).
-// Streams SSE in two phases:
-//   Phase 1 — Fetch CFS + location + all Shopify products (paginated)
-//   Phase 2 — Compare with CFS and write updates (same logic as /sync)
-//
-// Requires read_inventory scope for inventory qty. Without it metafields still
-// sync and a one-time warning is shown in the log.
-//
-// Render keep-alive: sends SSE comment pings every 15s to prevent timeout.
-//
 router.post('/sync-api', async (req, res) => {
   try {
     const dryRun = req.body?.dryRun !== 'false' && req.body?.dryRun !== false;
+    const runId  = makeRunId();
+    cancelMap.set(runId, false);
 
     let client;
     try { client = graphqlClient(); }
-    catch (err) { return res.status(400).json({ error: err.message }); }
+    catch (err) { cancelMap.delete(runId); return res.status(400).json({ error: err.message }); }
 
-    // ── SSE headers — open stream immediately (keeps Render connection alive) ──
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -695,14 +591,13 @@ router.post('/sync-api', async (req, res) => {
     if (res.socket) res.socket.setNoDelay(true);
     res.flushHeaders();
 
-    const send = obj => res.write(`data: ${JSON.stringify(obj)}\n\n`);
-
-    // Keepalive ping every 15 s — prevents Render from closing idle connections
+    const send     = obj => res.write(`data: ${JSON.stringify(obj)}\n\n`);
     const keepalive = setInterval(() => res.write(': ping\n\n'), 15000);
-    const cleanup   = () => clearInterval(keepalive);
+    const cleanup   = () => { clearInterval(keepalive); setTimeout(() => cancelMap.delete(runId), 5000); };
 
     try {
-      cancelRequested = false;
+      // Send runId immediately so client can cancel this specific run
+      send({ type: 'run_id', runId });
 
       // ── Phase 1a: CFS stock data ──────────────────────────────────────────
       send({ type: 'status', phase: 'cfs', message: 'Fetching CFS stock data…' });
@@ -712,42 +607,34 @@ router.post('/sync-api', async (req, res) => {
         message: `CFS: ${cfsProducts.length} products, ${varStockBySku.size} variant records` });
 
       // ── Phase 1b: Shopify location ────────────────────────────────────────
-      let locationId   = null;
-      let hasLocations = false;
+      let locationId = null, hasLocations = false;
       send({ type: 'status', phase: 'location', message: 'Fetching Shopify location…' });
       try {
         const locData = await gql(client, GET_LOCATIONS_QUERY);
         const locs    = (locData?.locations?.edges || []).map(e => e.node);
-        console.log(`  ℹ Locations: ${locs.map(l => `"${l.name}"`).join(', ') || 'none'}`);
         const loc     = locs.find(l => /^shop$/i.test(l.name))
                      || locs.find(l => /shop|warehouse|main/i.test(l.name))
                      || locs[0];
         if (loc) {
-          locationId   = loc.id;
-          hasLocations = true;
-          send({ type: 'status', phase: 'location-done',
-            message: `Location: "${loc.name}"` });
+          locationId = loc.id; hasLocations = true;
+          send({ type: 'status', phase: 'location-done', message: `Location: "${loc.name}"` });
         } else {
-          send({ type: 'status', phase: 'location-warn',
-            message: 'No location found — inventory sync will be skipped' });
+          send({ type: 'status', phase: 'location-warn', message: 'No location found — inventory sync will be skipped' });
         }
-      } catch (locErr) {
-        send({ type: 'status', phase: 'location-warn',
-          message: 'Location fetch failed — inventory sync will be skipped' });
+      } catch (_) {
+        send({ type: 'status', phase: 'location-warn', message: 'Location fetch failed — inventory sync will be skipped' });
       }
 
       // ── Phase 1c: Paginated Shopify product fetch ─────────────────────────
       send({ type: 'status', phase: 'shopify-fetch', message: 'Fetching Shopify products…' });
 
-      const byHandle = new Map();      // handle → product GraphQL node
+      const byHandle = new Map();
       let   cursor   = null;
-      const PAGE     = 50;             // safe limit for nested variant data
-      const QUERY    = locationId
-        ? GET_PRODUCTS_BULK_QUERY_WITH_INV
-        : GET_PRODUCTS_BULK_QUERY;
+      const PAGE     = 50;
+      const QUERY    = locationId ? GET_PRODUCTS_BULK_QUERY_WITH_INV : GET_PRODUCTS_BULK_QUERY;
 
       while (true) {
-        if (cancelRequested) {
+        if (isCancelled(runId)) {
           send({ type: 'done', success: true, cancelled: true, dryRun,
             newCount: 0, updatedCount: 0, skipped: 0, failed: 0, total: 0, log: [] });
           cleanup(); res.end(); return;
@@ -765,18 +652,15 @@ router.post('/sync-api', async (req, res) => {
           if (edge.node?.handle) byHandle.set(edge.node.handle, edge.node);
         }
 
-        const fetched = byHandle.size;
-        send({ type: 'fetch-progress', fetched, hasMore: page.pageInfo.hasNextPage });
-        console.log(`  📦 Fetched ${fetched} products so far…`);
-
+        send({ type: 'fetch-progress', fetched: byHandle.size, hasMore: page.pageInfo.hasNextPage });
         if (!page.pageInfo.hasNextPage) break;
         cursor = page.pageInfo.endCursor;
-        await sleep(200); // stay within 2 req/s burst budget
+        await sleep(200);
       }
 
       const totalProducts = byHandle.size;
       send({ type: 'fetch-done', total: totalProducts });
-      console.log(`  ✅ Done fetching — ${totalProducts} Shopify products total (dryRun=${dryRun}, inventory=${hasLocations})`);
+      console.log(`  ✅ Done fetching — ${totalProducts} products (dryRun=${dryRun}, inventory=${hasLocations})`);
 
       // ── Phase 2: Sync ─────────────────────────────────────────────────────
       const log = [];
@@ -784,19 +668,17 @@ router.post('/sync-api', async (req, res) => {
 
       if (!hasLocations) {
         log.push({ sku: '-', handle: '-', status: 'warning',
-          message: 'Inventory sync disabled — token is missing read_locations or read_inventory scope.\n' +
-            'Fix: Disconnect then reconnect Shopify (OAuth) to get an updated token with all scopes.' });
+          message: 'Inventory sync disabled — token is missing read_locations or read_inventory scope. Reconnect Shopify to fix.' });
       }
 
       for (const [handle, product] of byHandle) {
-        if (cancelRequested) {
+        if (isCancelled(runId)) {
           send({ type: 'done', success: true, cancelled: true, dryRun,
             newCount, updatedCount, skipped, failed, total: totalProducts, log });
           cleanup(); res.end(); return;
         }
 
         try {
-          // Skip non-active products
           const productStatus = (product.status || '').toLowerCase();
           if (productStatus && productStatus !== 'active') {
             const varCount = product.variants?.edges?.length || 0;
@@ -810,6 +692,11 @@ router.post('/sync-api', async (req, res) => {
 
           const shopifyNodes   = (product.variants?.edges || []).map(e => e.node);
           const existingProd   = metafieldMap(product.metafields);
+
+          // ── Collect phase ─────────────────────────────────────────────────
+          const allMetafields    = [];
+          const allInventory     = [];
+          const varLogs          = [];
           let   productInoutWritten = false;
 
           for (const shopNode of shopifyNodes) {
@@ -821,7 +708,7 @@ router.post('/sync-api', async (req, res) => {
 
             if (!varStock && !varProdStock) {
               skipped++;
-              log.push({ sku: varSku, handle, status: 'skipped',
+              varLogs.push({ sku: varSku, handle, status: 'skipped',
                 message: 'No CFS stock data found for this variant SKU — skipped' });
               continue;
             }
@@ -831,135 +718,108 @@ router.post('/sync-api', async (req, res) => {
             const vIsShortLead  = deliveryTimeIsShort(vDeliveryTime);
             const vInOutStock   = vIsShortLead ? 'IN STOCK' : 'OUT OF STOCK';
 
-            // Product-level inoutstock + duedate — write once from first matched variant
+            // Product-level metafields — once per product
             if (!productInoutWritten) {
               productInoutWritten = true;
-              const prodInoutCur  = existingProd['inoutstock'] ?? null;
-              const prodMfToWrite = [];
+              const prodInoutCur = existingProd['inoutstock'] ?? null;
               if (prodInoutCur !== vInOutStock) {
-                prodMfToWrite.push({ ownerId: product.id, namespace: 'custom', key: 'inoutstock',
-                  value: vInOutStock, type: 'single_line_text_field' });
+                allMetafields.push({ ownerId: product.id, namespace: 'custom',
+                  key: 'inoutstock', value: vInOutStock, type: 'single_line_text_field' });
               }
               if (vDueDate) {
-                prodMfToWrite.push({ ownerId: product.id, namespace: 'custom', key: 'duedate',
-                  value: vDueDate, type: 'single_line_text_field' });
-              }
-              if (!dryRun && prodMfToWrite.length > 0) {
-                const mfResult = await gql(client, METAFIELDS_SET_MUTATION, { metafields: prodMfToWrite });
-                const mfErrors = mfResult?.metafieldsSet?.userErrors || [];
-                if (mfErrors.length) {
-                  log.push({ sku: varSku, handle, status: 'warning',
-                    message: `Product metafield error: ${mfErrors.map(e => e.message).join(', ')}` });
-                }
+                allMetafields.push({ ownerId: product.id, namespace: 'custom',
+                  key: 'duedate', value: vDueDate, type: 'single_line_text_field' });
               }
             }
 
-            const existingVar  = metafieldMap(shopNode.metafields);
-            const invLevel     = shopNode.inventoryItem?.inventoryLevel;
-            const currentQty   = invLevel?.quantities?.find(q => q.name === 'available')?.quantity ?? null;
-            const invItemId    = shopNode.inventoryItem?.id;
+            const existingVar = metafieldMap(shopNode.metafields);
+            const invLevel    = shopNode.inventoryItem?.inventoryLevel;
+            const currentQty  = invLevel?.quantities?.find(q => q.name === 'available')?.quantity ?? null;
+            const invItemId   = shopNode.inventoryItem?.id;
 
-            // Variant metafields: inoutstock + vnotificationtitle + duedate
-            // Only push each field if the CFS value differs from what Shopify already has.
-            const varMfToWrite  = [];
+            // Variant metafields
+            const mfStart       = allMetafields.length;
             const vInoutCur     = existingVar['inoutstock'] ?? null;
             const vInoutChanged = vInoutCur !== vInOutStock;
             if (vInoutChanged) {
-              varMfToWrite.push({ ownerId: shopNode.id, namespace: 'custom', key: 'inoutstock',
-                value: vInOutStock, type: 'single_line_text_field' });
+              allMetafields.push({ ownerId: shopNode.id, namespace: 'custom',
+                key: 'inoutstock', value: vInOutStock, type: 'single_line_text_field' });
             }
             if (vDeliveryTime && existingVar['vnotificationtitle'] !== vDeliveryTime) {
-              varMfToWrite.push({ ownerId: shopNode.id, namespace: 'custom', key: 'vnotificationtitle',
-                value: vDeliveryTime, type: 'single_line_text_field' });
+              allMetafields.push({ ownerId: shopNode.id, namespace: 'custom',
+                key: 'vnotificationtitle', value: vDeliveryTime, type: 'single_line_text_field' });
             }
             if (vDueDate && existingVar['duedate'] !== vDueDate) {
-              varMfToWrite.push({ ownerId: shopNode.id, namespace: 'custom', key: 'duedate',
-                value: vDueDate, type: 'single_line_text_field' });
+              allMetafields.push({ ownerId: shopNode.id, namespace: 'custom',
+                key: 'duedate', value: vDueDate, type: 'single_line_text_field' });
             }
+            const varMfChanged = allMetafields.length > mfStart;
 
-            // Inventory quantity logic
-            // Step 1 (pre-sync): always match CFS onHand, then delivery time rules override.
-            // OUT OF STOCK: always set qty to 0 (regardless of CFS onHand)
-            // IN STOCK:     always sync to CFS onHand; fallback to 2 if CFS onHand is 0
+            // Inventory
             const cfsOnHand = varStock ? (varStock.vOnHand ?? 0) : (varProdStock?.onHand ?? 0);
             let targetQty, shouldWriteInv;
             if (!vIsShortLead) {
-              // OUT OF STOCK — force 0
               targetQty      = 0;
               shouldWriteInv = locationId !== null && currentQty !== 0;
             } else {
-              // IN STOCK — always sync qty to CFS onHand (fallback 2 when onHand is 0)
               targetQty      = cfsOnHand > 0 ? cfsOnHand : 2;
               shouldWriteInv = locationId !== null && currentQty !== targetQty;
             }
-
-            // Live writes
-            if (!dryRun) {
-              if (varMfToWrite.length > 0) {
-                const vmfResult = await gql(client, METAFIELDS_SET_MUTATION, { metafields: varMfToWrite });
-                const vmfErrors = vmfResult?.metafieldsSet?.userErrors || [];
-                if (vmfErrors.length) {
-                  log.push({ sku: varSku, handle, status: 'warning',
-                    message: `Variant metafield error: ${vmfErrors.map(e => e.message).join(', ')}` });
-                }
-              }
-              if (invItemId && locationId && shouldWriteInv) {
-                const invResult = await gql(client, INVENTORY_SET_MUTATION, {
-                  input: { name: 'available', reason: 'correction',
-                    quantities: [{ inventoryItemId: invItemId, locationId, quantity: targetQty, changeFromQuantity: currentQty ?? 0 }] },
-                });
-                const invErrors = invResult?.inventorySetQuantities?.userErrors || [];
-                if (invErrors.length) {
-                  log.push({ sku: varSku, handle, status: 'warning',
-                    message: `Inventory set error: ${invErrors.map(e => e.message).join(', ')}` });
-                }
-              }
+            if (shouldWriteInv && invItemId && locationId) {
+              allInventory.push({
+                inventoryItemId: invItemId, locationId,
+                quantity: targetQty, changeFromQuantity: currentQty ?? 0,
+              });
             }
 
-            // Build log entry
-            // anyChanged covers: inoutstock metafield, inventory qty, and any other metafield
-            // (vnotificationtitle, duedate) — so a product is only skipped when truly nothing changes
-            const anyChanged = vInoutChanged || shouldWriteInv || varMfToWrite.length > 0;
-
+            // Log entry
+            const anyChanged = vInoutChanged || shouldWriteInv || varMfChanged;
             if (!anyChanged && currentQty !== null) {
               skipped++;
-              log.push({ sku: varSku, handle, status: 'skipped',
-                message: `All values already correct — no changes needed\n` +
-                  `  inoutstock: "${vInOutStock}" (no change)\n` +
-                  `  qty:        ${currentQty} (no change)` });
+              varLogs.push({ sku: varSku, handle, status: 'skipped',
+                message: `All values already correct — no changes needed\n  inoutstock: "${vInOutStock}" (no change)\n  qty:        ${currentQty} (no change)` });
             } else {
-              const isNew  = vInoutCur === null || currentQty === null;
-              const status = dryRun ? 'dry_run' : (isNew ? 'new' : 'updated');
-              const ruleLabel   = vIsShortLead ? 'IN STOCK' : 'OUT OF STOCK';
-              const delivery    = vDeliveryTime || 'n/a';
-
+              const isNew     = vInoutCur === null || currentQty === null;
+              const status    = dryRun ? 'dry_run' : (isNew ? 'new' : 'updated');
+              const ruleLabel = vIsShortLead ? 'IN STOCK' : 'OUT OF STOCK';
+              const delivery  = vDeliveryTime || 'n/a';
               const inoutChange = diffStr(vInoutCur, vInOutStock);
-
               let qtyChange;
               if (locationId !== null) {
                 if (!vIsShortLead) {
                   qtyChange = diffQty(currentQty, 0);
                 } else {
-                  // IN STOCK — always sync to CFS onHand
-                  const tgt = cfsOnHand > 0 ? cfsOnHand : 2;
-                  const onHandNote = cfsOnHand > 0 ? ` (CFS onHand: ${cfsOnHand})` : ' (CFS onHand: 0, using fallback)';
-                  if (currentQty === tgt) {
-                    qtyChange = `currently ${currentQty} (no change — already matches CFS)`;
-                  } else {
-                    qtyChange = `currently ${currentQty ?? 'unknown'} — will set to ${tgt}${onHandNote}`;
-                  }
+                  const tgt  = cfsOnHand > 0 ? cfsOnHand : 2;
+                  const note = cfsOnHand > 0 ? ` (CFS onHand: ${cfsOnHand})` : ' (CFS onHand: 0, using fallback)';
+                  qtyChange = currentQty === tgt
+                    ? `currently ${currentQty} (no change — already matches CFS)`
+                    : `currently ${currentQty ?? 'unknown'} — will set to ${tgt}${note}`;
                 }
               } else {
                 qtyChange = 'inventory reads disabled — reconnect Shopify to enable';
               }
-
               if (isNew) newCount++; else updatedCount++;
-              log.push({ sku: varSku, handle, status, rule: ruleLabel, delivery, inoutChange, qtyChange,
-                dueDateChange: vDueDate || '' });
+              varLogs.push({ sku: varSku, handle, status, rule: ruleLabel, delivery, inoutChange, qtyChange, dueDateChange: vDueDate || '' });
             }
-          } // end per-variant
+          }
 
-          await sleep(dryRun ? 50 : 200);
+          // ── Write phase (skipped in dry run) ─────────────────────────────
+          if (!dryRun) {
+            await writeMetafieldsBatched(client, allMetafields, varLogs, handle);
+            if (allInventory.length > 0) {
+              const invResult = await gql(client, INVENTORY_SET_MUTATION, {
+                input: { name: 'available', reason: 'correction', quantities: allInventory },
+              });
+              const invErrors = invResult?.inventorySetQuantities?.userErrors || [];
+              if (invErrors.length) {
+                varLogs.push({ sku: '-', handle, status: 'warning',
+                  message: `Inventory batch error: ${invErrors.map(e => e.message).join(', ')}` });
+              }
+            }
+          }
+
+          log.push(...varLogs);
+          await sleep(dryRun ? 30 : 100);
 
         } catch (prodErr) {
           failed++;
@@ -976,8 +836,7 @@ router.post('/sync-api', async (req, res) => {
       }
 
       console.log(`  ✓ API sync done — new:${newCount} updated:${updatedCount} skipped:${skipped} failed:${failed}`);
-      send({ type: 'done', success: true, dryRun,
-        newCount, updatedCount, skipped, failed, total: totalProducts, log });
+      send({ type: 'done', success: true, dryRun, newCount, updatedCount, skipped, failed, total: totalProducts, log });
 
     } finally {
       cleanup();
@@ -992,37 +851,23 @@ router.post('/sync-api', async (req, res) => {
 });
 
 // ── POST /api/stock/compare-api ───────────────────────────────────────────────
-// API-mode compare: fetches Shopify products via GraphQL instead of CSV upload.
-// Returns the same JSON structure as POST /api/compare (upload.js).
 router.post('/compare-api', async (req, res) => {
   try {
     const client = graphqlClient();
 
-    // 1. CFS data
     console.log('▶ [compare-api] Fetching CFS product data…');
     const cfsProducts = await fetchCfsProducts();
     const {
-      validProductSKUs,
-      cfsProductIds,
-      validVariantSKUs,
-      cfsVariantAttrIds,
-      productCodesBySku,
-      productCodesByProdId,
-      cfsProductCodeToStatus,
-      variantCodesBySku,
-      variantCodesByAttrId,
-      cfsVarCodeSet,
+      validProductSKUs, cfsProductIds, validVariantSKUs, cfsVariantAttrIds,
+      productCodesBySku, productCodesByProdId, cfsProductCodeToStatus,
+      variantCodesBySku, variantCodesByAttrId, cfsVarCodeSet,
     } = buildCompareData(cfsProducts);
-    console.log(`  ✓ ${validProductSKUs.size} product SKUs, ${validVariantSKUs.size} variant SKUs`);
 
-    // 2. Fetch Shopify products via API (no inventory needed for compare)
     console.log('▶ [compare-api] Fetching Shopify products…');
     const byHandle = new Map();
     let cursor = null;
-    const PAGE = 50;
-
     while (true) {
-      const vars = { first: PAGE, query: 'vendor:"Urban Deco"' };
+      const vars = { first: 50, query: 'vendor:"Urban Deco"' };
       if (cursor) vars.after = cursor;
       const data = await gql(client, GET_PRODUCTS_BULK_QUERY, vars);
       const page = data?.products;
@@ -1030,14 +875,12 @@ router.post('/compare-api', async (req, res) => {
       for (const edge of (page.edges || [])) {
         if (edge.node?.handle) byHandle.set(edge.node.handle, edge.node);
       }
-      console.log(`  📦 Fetched ${byHandle.size} products so far…`);
       if (!page.pageInfo.hasNextPage) break;
       cursor = page.pageInfo.endCursor;
       await sleep(200);
     }
     console.log(`  ✅ ${byHandle.size} Shopify products fetched`);
 
-    // 3. Map GraphQL nodes → shopifyVariants shape expected by compareVariants()
     function getMeta(edges, key) {
       const node = (edges || []).map(e => e.node).find(n => n.key === key);
       return node?.value || '';
@@ -1048,42 +891,28 @@ router.post('/compare-api', async (req, res) => {
       const productMeta = product.metafields?.edges || [];
       const shopifyProductCode = getMeta(productMeta, 'product_code');
       const status = (product.status || '').toLowerCase();
-
       for (const ve of (product.variants?.edges || [])) {
         const variant = ve.node;
         if (!variant.sku) continue;
         const variantMeta = variant.metafields?.edges || [];
         shopifyVariants.push({
-          handle:             product.handle,
-          title:              product.title || '',
-          variantSku:         variant.sku,
-          option1:            '',
-          option2:            '',
-          barcode:            '',
-          inventoryQty:       '',
-          status,
-          shopifyVariantCode: getMeta(variantMeta, 'variant_code'),
-          shopifyProductCode,
+          handle: product.handle, title: product.title || '',
+          variantSku: variant.sku, option1: '', option2: '', barcode: '', inventoryQty: '',
+          status, shopifyVariantCode: getMeta(variantMeta, 'variant_code'), shopifyProductCode,
         });
       }
     }
-    console.log(`  ✓ ${shopifyVariants.length} variants mapped`);
 
-    // 4. Compare
-    console.log('▶ [compare-api] Running comparison…');
     const { results, summary } = compareVariants(
       shopifyVariants, validVariantSKUs, validProductSKUs, cfsProductIds, cfsVariantAttrIds,
       productCodesBySku, productCodesByProdId, variantCodesBySku, variantCodesByAttrId,
       cfsVarCodeSet, cfsProductCodeToStatus,
     );
-    console.log(`  ✓ ${summary.orphaned} orphaned, ${summary.ok} OK, ${summary.draft} draft, ${summary.cfsInactive} cfs-inactive, ${summary.cfsProduct} cfs-product`);
 
     res.json({
-      success:          true,
-      results,
-      summary,
-      cfsProductIds:    [...cfsProductIds.entries()],
-      cfsVariantAttrIds:[...cfsVariantAttrIds],
+      success: true, results, summary,
+      cfsProductIds:     [...cfsProductIds.entries()],
+      cfsVariantAttrIds: [...cfsVariantAttrIds],
     });
 
   } catch (err) {
@@ -1093,38 +922,22 @@ router.post('/compare-api', async (req, res) => {
 });
 
 // ── POST /api/stock/calendar-sync ────────────────────────────────────────────
-//
-// Step 6 — Calendar Sync
-// Accepts an optional Froogle CSV upload (field name: froogleCsv).
-//   • If CSV supplied  → reads 'Shopify SKU' + 'Delivery Time' columns; builds
-//                        a Set of product-level SKUs (e.g. "UD-144246") where
-//                        Delivery Time === 'Next Day'. All Shopify variants whose
-//                        SKU starts with that product prefix are treated as Next Day.
-//   • If no CSV        → falls back to CFS API deliveryTime field (original logic).
-//
-// Matches those SKUs in Shopify and writes:
-//   product:  custom.showcalendar     = 'true'
-//   variant:  custom.vshowcalendar    = 'true'
-//             custom.vnotificationtitle = 'Next Day'
-//
-// Streams SSE events (same pattern as /sync-api).
-// Re-uses the module-level cancelRequested flag — safe since only one sync
-// runs at a time.
-//
 router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
   const uploadedFile = req.file ? req.file.path : null;
 
   try {
     const dryRun = req.body?.dryRun !== 'false' && req.body?.dryRun !== false;
+    const runId  = makeRunId();
+    cancelMap.set(runId, false);
 
     let client;
     try { client = graphqlClient(); }
     catch (err) {
+      cancelMap.delete(runId);
       if (uploadedFile) tryUnlink(uploadedFile);
       return res.status(400).json({ error: err.message });
     }
 
-    // ── SSE headers ───────────────────────────────────────────────────────────
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -1132,73 +945,52 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
     if (res.socket) res.socket.setNoDelay(true);
     res.flushHeaders();
 
-    const send    = obj => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+    const send      = obj => res.write(`data: ${JSON.stringify(obj)}\n\n`);
     const keepalive = setInterval(() => res.write(': ping\n\n'), 15000);
     const cleanup   = () => {
       clearInterval(keepalive);
       if (uploadedFile) tryUnlink(uploadedFile);
+      setTimeout(() => cancelMap.delete(runId), 5000);
     };
 
-    // Counters declared here so inner catch can reference them
     let log = [], updatedCount = 0, skipped = 0, failed = 0, processed = 0, totalProducts = 0;
-
-    // froogleMode = true  → nextDaySkus contains PRODUCT-level SKUs (UD-{productId})
-    //                        match variant by prefix
-    // froogleMode = false → nextDaySkus contains VARIANT-level SKUs (UD-{prodId}-{varId})
-    //                        exact match
     let froogleMode = false;
 
     try {
-      cancelRequested = false;
+      // Send runId immediately so client can cancel this specific run
+      send({ type: 'run_id', runId });
 
       // ── Phase 1a: Build the Next Day SKU set ────────────────────────────────
       const nextDaySkus = new Set();
 
       if (uploadedFile) {
-        // ── Froogle CSV path ─────────────────────────────────────────────────
         froogleMode = true;
         send({ type: 'status', phase: 'cfs', message: 'Parsing Froogle CSV for Next Day products…' });
-
         const rows = await getRows(uploadedFile);
         for (const row of rows) {
           const sku = String(row['Shopify SKU'] || '').trim();
           const dt  = String(row['Delivery Time'] || '').trim();
-          if (sku && dt === 'Next Day') {
-            nextDaySkus.add(sku); // product-level e.g. "UD-144246"
-          }
+          if (sku && dt === 'Next Day') nextDaySkus.add(sku);
         }
-
         send({ type: 'status', phase: 'cfs-done',
           message: `Froogle CSV: ${rows.length} rows — ${nextDaySkus.size} Next Day product SKUs found` });
-
       } else {
-        // ── CFS API primary path ──────────────────────────────────────────────
-        // Builds product-level SKUs (UD-{productId}) and uses prefix matching,
-        // same as Froogle mode. A product is "Next Day" if:
-        //   • its own deliveryTime === 'Next Day', OR
-        //   • any of its variants has deliveryTime === 'Next Day'
-        froogleMode = true; // both paths now use prefix matching
+        froogleMode = true;
         send({ type: 'status', phase: 'cfs', message: 'Fetching CFS product data…' });
         const cfsProducts = await fetchCfsProducts();
-
         for (const item of cfsProducts) {
           const prodId = String(item.productId);
-          // Product-level delivery time
           if ((item.deliveryTime || '') === 'Next Day') {
-            nextDaySkus.add(`UD-${prodId}`);
-            continue;
+            nextDaySkus.add(`UD-${prodId}`); continue;
           }
-          // Variant-level delivery time (any variant marks the whole product)
           if (Array.isArray(item.variants)) {
             for (const v of item.variants) {
               if ((v.deliveryTime || '') === 'Next Day') {
-                nextDaySkus.add(`UD-${prodId}`);
-                break;
+                nextDaySkus.add(`UD-${prodId}`); break;
               }
             }
           }
         }
-
         send({ type: 'status', phase: 'cfs-done',
           message: `CFS: ${cfsProducts.length} products — ${nextDaySkus.size} Next Day product SKUs found` });
       }
@@ -1208,16 +1000,15 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
 
       const byHandle = new Map();
       let   cursor   = null;
-      const PAGE     = 50;
 
       while (true) {
-        if (cancelRequested) {
+        if (isCancelled(runId)) {
           send({ type: 'done', success: true, cancelled: true, dryRun,
             updatedCount: 0, skipped: 0, failed: 0, total: 0, log: [] });
           cleanup(); res.end(); return;
         }
 
-        const vars = { first: PAGE, query: 'vendor:"Urban Deco"' };
+        const vars = { first: 50, query: 'vendor:"Urban Deco"' };
         if (cursor) vars.after = cursor;
 
         const data = await gql(client, GET_PRODUCTS_BULK_QUERY, vars);
@@ -1227,9 +1018,7 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
         for (const edge of (page.edges || [])) {
           if (edge.node?.handle) byHandle.set(edge.node.handle, edge.node);
         }
-
         send({ type: 'fetch-progress', fetched: byHandle.size, hasMore: page.pageInfo.hasNextPage });
-        console.log(`  📦 [calendar] Fetched ${byHandle.size} products so far…`);
 
         if (!page.pageInfo.hasNextPage) break;
         cursor = page.pageInfo.endCursor;
@@ -1238,11 +1027,10 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
 
       totalProducts = byHandle.size;
       send({ type: 'fetch-done', total: totalProducts, nextDayCount: nextDaySkus.size });
-      console.log(`  ✅ [calendar] Done fetching — ${totalProducts} Shopify products (nextDay SKUs: ${nextDaySkus.size}, dryRun=${dryRun})`);
 
       // ── Phase 2: Calendar sync ───────────────────────────────────────────────
       for (const [handle, product] of byHandle) {
-        if (cancelRequested) {
+        if (isCancelled(runId)) {
           send({ type: 'done', success: true, cancelled: true, dryRun,
             updatedCount, skipped, failed, total: totalProducts, log });
           cleanup(); res.end(); return;
@@ -1266,82 +1054,58 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
           let productHasNextDay      = false;
           let productCalendarWritten = false;
 
+          // ── Collect variant metafields ────────────────────────────────────
+          const allMetafields = [];
+          const varLogs       = [];
+
           for (const shopNode of shopifyNodes) {
             const varSku = shopNode.sku;
             if (!varSku) continue;
 
-            // Froogle CSV mode: match on product-level prefix (UD-{productId})
-            // CFS API mode: exact variant SKU match
             let isNextDay;
             if (froogleMode) {
-              // Extract product-level SKU from variant SKU
-              // "UD-144246-17238185" → "UD-144246"
-              // "UD-144246"          → "UD-144246" (no variant suffix)
               const m = varSku.match(/^(UD-\d+)/);
-              const productSku = m ? m[1] : varSku;
-              isNextDay = nextDaySkus.has(productSku);
+              isNextDay = nextDaySkus.has(m ? m[1] : varSku);
             } else {
               isNextDay = nextDaySkus.has(varSku);
             }
 
             if (!isNextDay) {
               skipped++;
-              log.push({ sku: varSku, handle, status: 'skipped',
+              varLogs.push({ sku: varSku, handle, status: 'skipped',
                 message: 'Not a Next Day delivery variant — skipped' });
               continue;
             }
 
             productHasNextDay = true;
-
             const existingVar  = metafieldMap(shopNode.metafields);
-            const varMfToWrite = [];
-
-            // Read inoutstock for display in log (not changed by this sync)
             const curInoutstock = existingVar['inoutstock'] ?? '(not set)';
 
-            // Skip OUT OF STOCK variants — calendar only applies to in-stock items
             if (curInoutstock === 'OUT OF STOCK') {
               skipped++;
-              log.push({ sku: varSku, handle, status: 'skipped',
-                inoutstock: curInoutstock,
-                message: 'OUT OF STOCK — calendar not set' });
+              varLogs.push({ sku: varSku, handle, status: 'skipped',
+                inoutstock: curInoutstock, message: 'OUT OF STOCK — calendar not set' });
               continue;
             }
 
-            // vshowcalendar
             const curVShowCal    = existingVar['vshowcalendar'] ?? null;
             const vShowCalChanged = curVShowCal !== 'true';
             if (vShowCalChanged) {
-              varMfToWrite.push({
-                ownerId: shopNode.id, namespace: 'custom', key: 'vshowcalendar',
-                value: 'true', type: 'single_line_text_field',
-              });
+              allMetafields.push({ ownerId: shopNode.id, namespace: 'custom',
+                key: 'vshowcalendar', value: 'true', type: 'single_line_text_field' });
             }
 
-            // vnotificationtitle → 'Next Day'
             const curVNotif    = existingVar['vnotificationtitle'] ?? null;
             const vNotifChanged = curVNotif !== 'Next Day';
             if (vNotifChanged) {
-              varMfToWrite.push({
-                ownerId: shopNode.id, namespace: 'custom', key: 'vnotificationtitle',
-                value: 'Next Day', type: 'single_line_text_field',
-              });
+              allMetafields.push({ ownerId: shopNode.id, namespace: 'custom',
+                key: 'vnotificationtitle', value: 'Next Day', type: 'single_line_text_field' });
             }
 
-            const anyVarChanged = varMfToWrite.length > 0;
-
-            if (!dryRun && anyVarChanged) {
-              const vmfResult = await gql(client, METAFIELDS_SET_MUTATION, { metafields: varMfToWrite });
-              const vmfErrors = vmfResult?.metafieldsSet?.userErrors || [];
-              if (vmfErrors.length) {
-                log.push({ sku: varSku, handle, status: 'warning',
-                  message: `Variant metafield error: ${vmfErrors.map(e => e.message).join(', ')}` });
-              }
-            }
-
+            const anyVarChanged = vShowCalChanged || vNotifChanged;
             if (anyVarChanged) {
               updatedCount++;
-              log.push({
+              varLogs.push({
                 sku: varSku, handle,
                 status:       dryRun ? 'dry_run' : 'updated',
                 inoutstock:   curInoutstock,
@@ -1354,55 +1118,53 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
               });
             } else {
               skipped++;
-              log.push({ sku: varSku, handle, status: 'skipped',
+              varLogs.push({ sku: varSku, handle, status: 'skipped',
                 inoutstock: curInoutstock,
                 message: 'Already correct — vshowcalendar=true and vnotificationtitle=Next Day' });
             }
           }
 
-          // ── Product-level: showcalendar + vnotificationtitle ────────────────
+          // ── Product-level metafields ────────────────────────────────────────
           if (productHasNextDay && !productCalendarWritten) {
             productCalendarWritten = true;
-            const curShowCal      = existingProd['showcalendar']      ?? null;
-            const curProdNotif    = existingProd['vnotificationtitle'] ?? null;
+            const curShowCal      = existingProd['showcalendar']       ?? null;
+            const curProdNotif    = existingProd['vnotificationtitle']  ?? null;
             const showCalChanged  = curShowCal   !== 'true';
             const prodNotifChanged = curProdNotif !== 'Next Day';
 
-            const prodMfToWrite = [];
             if (showCalChanged) {
-              prodMfToWrite.push({ ownerId: product.id, namespace: 'custom',
+              allMetafields.push({ ownerId: product.id, namespace: 'custom',
                 key: 'showcalendar', value: 'true', type: 'single_line_text_field' });
             }
             if (prodNotifChanged) {
-              prodMfToWrite.push({ ownerId: product.id, namespace: 'custom',
+              allMetafields.push({ ownerId: product.id, namespace: 'custom',
                 key: 'vnotificationtitle', value: 'Next Day', type: 'single_line_text_field' });
             }
 
-            if (!dryRun && prodMfToWrite.length) {
-              const mfResult = await gql(client, METAFIELDS_SET_MUTATION, { metafields: prodMfToWrite });
-              const mfErrors = mfResult?.metafieldsSet?.userErrors || [];
-              if (mfErrors.length) {
-                log.push({ sku: '-', handle, status: 'warning',
-                  message: `Product metafield error: ${mfErrors.map(e => e.message).join(', ')}` });
-              }
-            }
-
             if (showCalChanged || prodNotifChanged) {
-              log.push({
+              varLogs.push({
                 sku: '-', handle,
-                status:           dryRun ? 'dry_run' : 'updated',
-                calBefore:        curShowCal   ?? '(not set)',
-                calAfter:         'true',
-                notifBefore:      curProdNotif ?? '(not set)',
-                notifAfter:       'Next Day',
-                calChanged:       showCalChanged,
-                notifChanged:     prodNotifChanged,
+                status:       dryRun ? 'dry_run' : 'updated',
+                calBefore:    curShowCal   ?? '(not set)',
+                calAfter:     'true',
+                notifBefore:  curProdNotif ?? '(not set)',
+                notifAfter:   'Next Day',
+                calChanged:   showCalChanged,
+                notifChanged: prodNotifChanged,
               });
             } else {
-              log.push({ sku: '-', handle, status: 'skipped',
+              varLogs.push({ sku: '-', handle, status: 'skipped',
                 message: 'Product showcalendar=true and vnotificationtitle=Next Day — no change' });
             }
           }
+
+          // ── Write phase (skipped in dry run) ─────────────────────────────
+          if (!dryRun) {
+            await writeMetafieldsBatched(client, allMetafields, varLogs, handle);
+          }
+
+          log.push(...varLogs);
+          await sleep(dryRun ? 30 : 100);
 
         } catch (prodErr) {
           failed++;
@@ -1414,11 +1176,11 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
         send({ type: 'progress', processed, totalProducts, updatedCount, skipped, failed });
 
         if (processed % 50 === 0 || processed === totalProducts) {
-          console.log(`  … [calendar] ${processed}/${totalProducts} — updated: ${updatedCount}, skipped: ${skipped}, failed: ${failed}`);
+          console.log(`  … [calendar] ${processed}/${totalProducts} — updated:${updatedCount} skipped:${skipped} failed:${failed}`);
         }
       }
 
-      console.log(`  ✓ [calendar] Done — updated: ${updatedCount}, skipped: ${skipped}, failed: ${failed}`);
+      console.log(`  ✓ [calendar] Done — updated:${updatedCount} skipped:${skipped} failed:${failed}`);
       send({ type: 'done', success: true, dryRun, updatedCount, skipped, failed, total: totalProducts, log });
       res.end();
 
