@@ -963,10 +963,12 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
       // Send runId immediately so client can cancel this specific run
       send({ type: 'run_id', runId });
 
-      // ── Phase 1a: Build per-variant CFS data map ────────────────────────────
-      // cfsVariantMap: variantSku → { isNextDay, inStock, deliveryTime, onHand }
-      const cfsVariantMap = new Map();
-      const nextDaySkus   = new Set(); // kept for Froogle CSV mode fallback
+      // ── Phase 1a: Fetch CFS data ─────────────────────────────────────────────
+      // Froogle CSV mode uses nextDaySkus (product-level SKUs).
+      // API mode uses cfsVarStockMap / cfsProdStockMap for per-variant dual-lookup.
+      const nextDaySkus    = new Set();
+      let   cfsVarStockMap  = null; // Map<varSku,  varRecord>  — API mode only
+      let   cfsProdStockMap = null; // Map<prodSku, prodRecord> — API mode only
 
       if (uploadedFile) {
         froogleMode = true;
@@ -982,46 +984,13 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
       } else {
         send({ type: 'status', phase: 'cfs', message: 'Fetching CFS product data…' });
         const cfsProducts = await fetchCfsProducts();
-        // Use buildStockData — same logic as stock sync, correctly resolves delivery time
-        // with variant→product fallback and maps to vNotificationTitle
+        // buildStockData mirrors the stock-sync logic: variant delivery time falls
+        // back to the parent product's when absent, stored as vNotificationTitle.
         const { prodStockBySku, varStockBySku } = buildStockData(cfsProducts);
-
-        // Variant-level entries (products with sub-variants)
-        for (const [sku, rec] of varStockBySku) {
-          const dt     = (rec.vNotificationTitle || '').trim();
-          const onHand = Number(rec.vOnHand ?? 0);
-          cfsVariantMap.set(sku, {
-            isNextDay:    dt.toLowerCase() === 'next day',
-            inStock:      onHand > 0,
-            deliveryTime: dt,
-            onHand,
-          });
-        }
-        // Product-level entries (products without sub-variants, SKU = UD-{prodId})
-        for (const [sku, rec] of prodStockBySku) {
-          if (!cfsVariantMap.has(sku)) {
-            const dt     = (rec.deliveryTime || '').trim();
-            const onHand = Number(rec.onHand ?? 0);
-            cfsVariantMap.set(sku, {
-              isNextDay:    dt.toLowerCase() === 'next day',
-              inStock:      onHand > 0,
-              deliveryTime: dt,
-              onHand,
-            });
-          }
-        }
-
-        const nextDayInStock = [...cfsVariantMap.values()].filter(v => v.isNextDay && v.inStock).length;
-        const nextDayTotal   = [...cfsVariantMap.values()].filter(v => v.isNextDay).length;
+        cfsVarStockMap  = varStockBySku;
+        cfsProdStockMap = prodStockBySku;
         send({ type: 'status', phase: 'cfs-done',
-          message: `CFS: ${cfsProducts.length} products — ${nextDayTotal} Next Day variants (${nextDayInStock} in stock)` });
-      }
-
-      // ── Debug: dump first 5 Next Day entries from cfsVariantMap ─────────────
-      {
-        const ndEntries = [...cfsVariantMap.entries()].filter(([, v]) => v.isNextDay).slice(0, 5);
-        console.log(`  [calendar-debug] cfsVariantMap size: ${cfsVariantMap.size}, Next Day count: ${[...cfsVariantMap.values()].filter(v => v.isNextDay).length}`);
-        console.log(`  [calendar-debug] Sample Next Day keys:`, JSON.stringify(ndEntries.map(([k, v]) => `${k} (onHand:${v.onHand})`)));
+          message: `CFS: ${cfsProducts.length} products fetched (${varStockBySku.size} sub-variants, ${prodStockBySku.size} base products)` });
       }
 
       // ── Phase 1b: Paginated Shopify product fetch ────────────────────────────
@@ -1056,20 +1025,7 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
       }
 
       totalProducts = byHandle.size;
-      send({ type: 'fetch-done', total: totalProducts, nextDayCount: nextDaySkus.size });
-
-      // ── Debug: check first 5 Shopify products' variant SKUs vs cfsVariantMap ──
-      {
-        let checked = 0;
-        for (const [handle, product] of byHandle) {
-          if (checked >= 5) break;
-          const nodes = (product.variants?.edges || []).map(e => e.node);
-          const skus  = nodes.map(n => n.sku).filter(Boolean);
-          if (skus.length === 0) continue;
-          console.log(`  [calendar-debug] Shopify "${handle}" SKUs: ${JSON.stringify(skus)} | in map: ${JSON.stringify(skus.map(s => cfsVariantMap.has(s)))}`);
-          checked++;
-        }
-      }
+      send({ type: 'fetch-done', total: totalProducts, nextDayCount: froogleMode ? nextDaySkus.size : null });
 
       // ── Phase 2: Calendar sync ───────────────────────────────────────────────
       for (const [handle, product] of byHandle) {
@@ -1107,39 +1063,59 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
 
             // ── Determine Next Day status & CFS stock ──────────────────────
             let isNextDay;
-            let cfsData = null; // { isNextDay, inStock, deliveryTime, onHand }
+            let cfsDelivery = null;
+            let cfsOnHand   = null;
+            let cfsInStock  = null;
 
             if (froogleMode) {
               // CSV mode: product-level Next Day only, no per-variant stock data
               const m = varSku.match(/^(UD-\d+)/);
               isNextDay = nextDaySkus.has(m ? m[1] : varSku);
             } else {
-              // API mode: use per-variant CFS map
-              cfsData   = cfsVariantMap.get(varSku) ?? null;
-              isNextDay = cfsData?.isNextDay ?? false;
+              // API mode: dual-lookup mirrors stock sync pattern exactly.
+              // varStockBySku is keyed UD-{prodId}-{varId}; prodStockBySku is keyed UD-{prodId}.
+              // For products without sub-variants the variant SKU IS the product SKU.
+              const varRec  = cfsVarStockMap.get(varSku);
+              const prodRec = varRec ? null : cfsProdStockMap.get(varSku);
+
+              if (!varRec && !prodRec) {
+                // SKU not in CFS at all — skip silently
+                skipped++;
+                varLogs.push({
+                  sku: varSku, handle, status: 'skipped',
+                  cfsDelivery: '(not in CFS)', cfsOnHand: null, cfsInStock: null,
+                  message: 'SKU not found in CFS — skipped',
+                });
+                continue;
+              }
+
+              cfsDelivery = varRec ? (varRec.vNotificationTitle || '') : (prodRec.deliveryTime || '');
+              cfsOnHand   = Number(varRec ? (varRec.vOnHand ?? 0) : (prodRec.onHand ?? 0));
+              cfsInStock  = cfsOnHand > 0;
+              isNextDay   = cfsDelivery.toLowerCase() === 'next day';
             }
 
             if (!isNextDay) {
               skipped++;
               varLogs.push({
                 sku: varSku, handle, status: 'skipped',
-                cfsDelivery: cfsData?.deliveryTime ?? (froogleMode ? '(csv-mode)' : '(not in CFS)'),
-                cfsOnHand:   cfsData?.onHand       ?? null,
-                cfsInStock:  cfsData?.inStock       ?? null,
+                cfsDelivery: cfsDelivery ?? '(csv-mode)',
+                cfsOnHand,
+                cfsInStock,
                 message: 'Not a Next Day delivery variant — skipped',
               });
               continue;
             }
 
             // ── CFS stock check (API mode only) ───────────────────────────
-            if (!froogleMode && cfsData && !cfsData.inStock) {
+            if (!froogleMode && !cfsInStock) {
               skipped++;
               varLogs.push({
                 sku: varSku, handle, status: 'skipped',
-                cfsDelivery: cfsData.deliveryTime,
-                cfsOnHand:   cfsData.onHand,
-                cfsInStock:  false,
-                message: `Next Day but CFS out of stock (onHand: ${cfsData.onHand}) — calendar not set`,
+                cfsDelivery,
+                cfsOnHand,
+                cfsInStock: false,
+                message: `Next Day but CFS out of stock (onHand: ${cfsOnHand}) — calendar not set`,
               });
               continue;
             }
@@ -1167,9 +1143,9 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
               varLogs.push({
                 sku: varSku, handle,
                 status:       dryRun ? 'dry_run' : 'updated',
-                cfsDelivery:  cfsData?.deliveryTime ?? '(csv-mode)',
-                cfsOnHand:    cfsData?.onHand       ?? null,
-                cfsInStock:   cfsData?.inStock       ?? null,
+                cfsDelivery:  cfsDelivery ?? '(csv-mode)',
+                cfsOnHand,
+                cfsInStock,
                 calBefore:    curVShowCal ?? '(not set)',
                 calAfter:     'true',
                 notifBefore:  curVNotif   ?? '(not set)',
@@ -1181,9 +1157,9 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
               skipped++;
               varLogs.push({
                 sku: varSku, handle, status: 'skipped',
-                cfsDelivery:  cfsData?.deliveryTime ?? '(csv-mode)',
-                cfsOnHand:    cfsData?.onHand       ?? null,
-                cfsInStock:   cfsData?.inStock       ?? null,
+                cfsDelivery:  cfsDelivery ?? '(csv-mode)',
+                cfsOnHand,
+                cfsInStock,
                 message: 'Already correct — vshowcalendar=true and vnotificationtitle=Next Day',
               });
             }
