@@ -1017,6 +1017,13 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
           message: `CFS: ${cfsProducts.length} products — ${nextDayTotal} Next Day variants (${nextDayInStock} in stock)` });
       }
 
+      // ── Debug: dump first 5 Next Day entries from cfsVariantMap ─────────────
+      {
+        const ndEntries = [...cfsVariantMap.entries()].filter(([, v]) => v.isNextDay).slice(0, 5);
+        console.log(`  [calendar-debug] cfsVariantMap size: ${cfsVariantMap.size}, Next Day count: ${[...cfsVariantMap.values()].filter(v => v.isNextDay).length}`);
+        console.log(`  [calendar-debug] Sample Next Day keys:`, ndEntries.map(([k, v]) => `${k} (onHand:${v.onHand})`));
+      }
+
       // ── Phase 1b: Paginated Shopify product fetch ────────────────────────────
       send({ type: 'status', phase: 'shopify-fetch', message: 'Fetching Shopify products…' });
 
@@ -1080,6 +1087,13 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
           // ── Collect variant metafields ────────────────────────────────────
           const allMetafields = [];
           const varLogs       = [];
+
+          // ── Debug: first product's variant SKUs ──────────────────────────
+          if (processed === 0 && shopifyNodes.length > 0) {
+            const sampleSkus = shopifyNodes.slice(0, 3).map(n => n.sku);
+            console.log(`  [calendar-debug] First Shopify product (${handle}) variant SKUs:`, sampleSkus);
+            console.log(`  [calendar-debug] cfsVariantMap.has sample:`, sampleSkus.map(s => `${s}=${cfsVariantMap.has(s)}`));
+          }
 
           for (const shopNode of shopifyNodes) {
             const varSku = shopNode.sku;
