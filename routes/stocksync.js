@@ -982,37 +982,35 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
       } else {
         send({ type: 'status', phase: 'cfs', message: 'Fetching CFS product data…' });
         const cfsProducts = await fetchCfsProducts();
-        for (const item of cfsProducts) {
-          const prodId  = String(item.productId);
-          const prodDt  = (item.deliveryTime || '').trim();
-          const hasVariants = Array.isArray(item.variants) && item.variants.length > 0;
+        // Use buildStockData — same logic as stock sync, correctly resolves delivery time
+        // with variant→product fallback and maps to vNotificationTitle
+        const { prodStockBySku, varStockBySku } = buildStockData(cfsProducts);
 
-          if (hasVariants) {
-            // Products with sub-variants → use variant-level SKU: UD-{prodId}-{varId}
-            for (const v of item.variants) {
-              const varId  = String(v.variantId);
-              const varSku = `UD-${prodId}-${varId}`;
-              const dt     = (v.deliveryTime || prodDt || '').trim();
-              const onHand = Number(v.onHand ?? item.onHand ?? 0);
-              cfsVariantMap.set(varSku, {
-                isNextDay:    dt.toLowerCase() === 'next day',
-                inStock:      onHand > 0,
-                deliveryTime: dt,
-                onHand,
-              });
-            }
-          } else {
-            // No sub-variants → product-level SKU only: UD-{prodId}
-            const prodSku = `UD-${prodId}`;
-            const onHand  = Number(item.onHand ?? 0);
-            cfsVariantMap.set(prodSku, {
-              isNextDay:    prodDt.toLowerCase() === 'next day',
+        // Variant-level entries (products with sub-variants)
+        for (const [sku, rec] of varStockBySku) {
+          const dt     = (rec.vNotificationTitle || '').trim();
+          const onHand = Number(rec.vOnHand ?? 0);
+          cfsVariantMap.set(sku, {
+            isNextDay:    dt.toLowerCase() === 'next day',
+            inStock:      onHand > 0,
+            deliveryTime: dt,
+            onHand,
+          });
+        }
+        // Product-level entries (products without sub-variants, SKU = UD-{prodId})
+        for (const [sku, rec] of prodStockBySku) {
+          if (!cfsVariantMap.has(sku)) {
+            const dt     = (rec.deliveryTime || '').trim();
+            const onHand = Number(rec.onHand ?? 0);
+            cfsVariantMap.set(sku, {
+              isNextDay:    dt.toLowerCase() === 'next day',
               inStock:      onHand > 0,
-              deliveryTime: prodDt,
+              deliveryTime: dt,
               onHand,
             });
           }
         }
+
         const nextDayInStock = [...cfsVariantMap.values()].filter(v => v.isNextDay && v.inStock).length;
         const nextDayTotal   = [...cfsVariantMap.values()].filter(v => v.isNextDay).length;
         send({ type: 'status', phase: 'cfs-done',
