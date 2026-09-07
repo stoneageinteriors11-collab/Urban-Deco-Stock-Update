@@ -809,7 +809,8 @@ router.post('/sync-api', async (req, res) => {
           if (!dryRun) {
             await writeMetafieldsBatched(client, allMetafields, varLogs, handle);
             if (allInventory.length > 0) {
-              const invResult = await gql(client, makeInventoryMutation(), {
+              const invResult = await gql(client, INVENTORY_SET_MUTATION, {
+                idempotencyKey: require('crypto').randomUUID(),
                 input: { name: 'available', reason: 'correction', quantities: allInventory },
               });
               const invErrors = invResult?.inventorySetQuantities?.userErrors || [];
