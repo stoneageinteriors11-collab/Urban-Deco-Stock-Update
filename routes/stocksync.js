@@ -1021,7 +1021,7 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
       {
         const ndEntries = [...cfsVariantMap.entries()].filter(([, v]) => v.isNextDay).slice(0, 5);
         console.log(`  [calendar-debug] cfsVariantMap size: ${cfsVariantMap.size}, Next Day count: ${[...cfsVariantMap.values()].filter(v => v.isNextDay).length}`);
-        console.log(`  [calendar-debug] Sample Next Day keys:`, ndEntries.map(([k, v]) => `${k} (onHand:${v.onHand})`));
+        console.log(`  [calendar-debug] Sample Next Day keys:`, JSON.stringify(ndEntries.map(([k, v]) => `${k} (onHand:${v.onHand})`)));
       }
 
       // ── Phase 1b: Paginated Shopify product fetch ────────────────────────────
@@ -1058,6 +1058,19 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
       totalProducts = byHandle.size;
       send({ type: 'fetch-done', total: totalProducts, nextDayCount: nextDaySkus.size });
 
+      // ── Debug: check first 5 Shopify products' variant SKUs vs cfsVariantMap ──
+      {
+        let checked = 0;
+        for (const [handle, product] of byHandle) {
+          if (checked >= 5) break;
+          const nodes = (product.variants?.edges || []).map(e => e.node);
+          const skus  = nodes.map(n => n.sku).filter(Boolean);
+          if (skus.length === 0) continue;
+          console.log(`  [calendar-debug] Shopify "${handle}" SKUs: ${JSON.stringify(skus)} | in map: ${JSON.stringify(skus.map(s => cfsVariantMap.has(s)))}`);
+          checked++;
+        }
+      }
+
       // ── Phase 2: Calendar sync ───────────────────────────────────────────────
       for (const [handle, product] of byHandle) {
         if (isCancelled(runId)) {
@@ -1087,13 +1100,6 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
           // ── Collect variant metafields ────────────────────────────────────
           const allMetafields = [];
           const varLogs       = [];
-
-          // ── Debug: first product's variant SKUs ──────────────────────────
-          if (processed === 0 && shopifyNodes.length > 0) {
-            const sampleSkus = shopifyNodes.slice(0, 3).map(n => n.sku);
-            console.log(`  [calendar-debug] First Shopify product (${handle}) variant SKUs:`, sampleSkus);
-            console.log(`  [calendar-debug] cfsVariantMap.has sample:`, sampleSkus.map(s => `${s}=${cfsVariantMap.has(s)}`));
-          }
 
           for (const shopNode of shopifyNodes) {
             const varSku = shopNode.sku;
