@@ -219,17 +219,14 @@ const METAFIELDS_SET_MUTATION = `
   }
 `;
 
-function makeInventoryMutation() {
-  const key = require('crypto').randomUUID();
-  return `
-    mutation SetInventory($input: InventorySetQuantitiesInput!) @idempotent(key: "${key}") {
-      inventorySetQuantities(input: $input) {
-        inventoryAdjustmentGroup { id }
-        userErrors { field message code }
-      }
+const INVENTORY_SET_MUTATION = `
+  mutation SetInventory($input: InventorySetQuantitiesInput!, $idempotencyKey: String!) {
+    inventorySetQuantities(input: $input) @idempotent(key: $idempotencyKey) {
+      inventoryAdjustmentGroup { id }
+      userErrors { field message code }
     }
-  `;
-}
+  }
+`;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -523,7 +520,8 @@ router.post(
             if (!dryRun) {
               await writeMetafieldsBatched(client, allMetafields, varLogs, handle);
               if (allInventory.length > 0) {
-                const invResult = await gql(client, makeInventoryMutation(), {
+                const invResult = await gql(client, INVENTORY_SET_MUTATION, {
+                  idempotencyKey: require('crypto').randomUUID(),
                   input: { name: 'available', reason: 'correction', quantities: allInventory },
                 });
                 const invErrors = invResult?.inventorySetQuantities?.userErrors || [];
