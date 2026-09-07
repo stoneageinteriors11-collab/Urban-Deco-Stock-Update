@@ -906,7 +906,7 @@ router.post('/sync-api', async (req, res) => {
               if (invItemId && locationId && shouldWriteInv) {
                 const invResult = await gql(client, INVENTORY_SET_MUTATION, {
                   input: { name: 'available', reason: 'correction',
-                    quantities: [{ inventoryItemId: invItemId, locationId, quantity: targetQty }] },
+                    quantities: [{ inventoryItemId: invItemId, locationId, quantity: targetQty, changeFromQuantity: currentQty ?? 0 }] },
                 });
                 const invErrors = invResult?.inventorySetQuantities?.userErrors || [];
                 if (invErrors.length) {
