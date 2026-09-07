@@ -1145,7 +1145,7 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
                 if (calNeedsDisable) {
                   updatedCount++;
                   allMetafields.push({ ownerId: shopNode.id, namespace: 'custom',
-                    key: 'vshowcalendar', value: 'false', type: 'single_line_text_field' });
+                    key: 'vshowcalendar', value: 'false', type: 'boolean' });
                   varLogs.push({
                     sku: varSku, handle,
                     status:    dryRun ? 'dry_run' : 'updated',
@@ -1173,7 +1173,7 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
             const vShowCalChanged = curVShowCal !== 'true';
             if (vShowCalChanged) {
               allMetafields.push({ ownerId: shopNode.id, namespace: 'custom',
-                key: 'vshowcalendar', value: 'true', type: 'single_line_text_field' });
+                key: 'vshowcalendar', value: 'true', type: 'boolean' });
             }
 
             const curVNotif    = existingVar['vnotificationtitle'] ?? null;
@@ -1222,7 +1222,7 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
 
             if (showCalChanged) {
               allMetafields.push({ ownerId: product.id, namespace: 'custom',
-                key: 'showcalendar', value: 'true', type: 'single_line_text_field' });
+                key: 'showcalendar', value: 'true', type: 'boolean' });
             }
             if (prodNotifChanged) {
               allMetafields.push({ ownerId: product.id, namespace: 'custom',
@@ -1250,7 +1250,7 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
             if (curShowCal === 'true') {
               productCalendarWritten = true;
               allMetafields.push({ ownerId: product.id, namespace: 'custom',
-                key: 'showcalendar', value: 'false', type: 'single_line_text_field' });
+                key: 'showcalendar', value: 'false', type: 'boolean' });
               updatedCount++;
               varLogs.push({
                 sku: '-', handle,
