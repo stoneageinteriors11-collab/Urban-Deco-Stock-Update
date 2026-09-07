@@ -219,14 +219,17 @@ const METAFIELDS_SET_MUTATION = `
   }
 `;
 
-const INVENTORY_SET_MUTATION = `
-  mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) @idempotentRequest {
-    inventorySetQuantities(input: $input) {
-      inventoryAdjustmentGroup { id }
-      userErrors { field message code }
+function makeInventoryMutation() {
+  const key = require('crypto').randomUUID();
+  return `
+    mutation SetInventory($input: InventorySetQuantitiesInput!) @idempotent(key: "${key}") {
+      inventorySetQuantities(input: $input) {
+        inventoryAdjustmentGroup { id }
+        userErrors { field message code }
+      }
     }
-  }
-`;
+  `;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -520,7 +523,7 @@ router.post(
             if (!dryRun) {
               await writeMetafieldsBatched(client, allMetafields, varLogs, handle);
               if (allInventory.length > 0) {
-                const invResult = await gql(client, INVENTORY_SET_MUTATION, {
+                const invResult = await gql(client, makeInventoryMutation(), {
                   input: { name: 'available', reason: 'correction', quantities: allInventory },
                 });
                 const invErrors = invResult?.inventorySetQuantities?.userErrors || [];
@@ -653,6 +656,7 @@ router.post('/sync-api', async (req, res) => {
         }
 
         send({ type: 'fetch-progress', fetched: byHandle.size, hasMore: page.pageInfo.hasNextPage });
+        console.log(`  … Fetched ${byHandle.size} products so far…`);
         if (!page.pageInfo.hasNextPage) break;
         cursor = page.pageInfo.endCursor;
         await sleep(200);
@@ -807,7 +811,7 @@ router.post('/sync-api', async (req, res) => {
           if (!dryRun) {
             await writeMetafieldsBatched(client, allMetafields, varLogs, handle);
             if (allInventory.length > 0) {
-              const invResult = await gql(client, INVENTORY_SET_MUTATION, {
+              const invResult = await gql(client, makeInventoryMutation(), {
                 input: { name: 'available', reason: 'correction', quantities: allInventory },
               });
               const invErrors = invResult?.inventorySetQuantities?.userErrors || [];
@@ -1019,6 +1023,7 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
           if (edge.node?.handle) byHandle.set(edge.node.handle, edge.node);
         }
         send({ type: 'fetch-progress', fetched: byHandle.size, hasMore: page.pageInfo.hasNextPage });
+        console.log(`  … Fetched ${byHandle.size} products so far…`);
 
         if (!page.pageInfo.hasNextPage) break;
         cursor = page.pageInfo.endCursor;
