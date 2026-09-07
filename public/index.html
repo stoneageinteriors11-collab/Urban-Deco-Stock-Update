@@ -1592,6 +1592,7 @@ async function testConnection() {
 
   let lastStockSyncLog = [];
   let stockSyncReader  = null;
+  let stockSyncRunId   = null;
   let currentSyncMode  = 'api'; // 'api' | 'csv'
 
   // ── Upload mode tab switcher (Step 2) ────────────────────────────────────
@@ -1687,7 +1688,13 @@ async function testConnection() {
   }
 
   async function stopStockSync() {
-    try { await fetch('/api/stock/cancel', { method: 'POST' }); } catch(_) {}
+    try {
+      await fetch('/api/stock/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ runId: stockSyncRunId }),
+      });
+    } catch(_) {}
     if (stockSyncReader) { try { stockSyncReader.cancel(); } catch(_) {} }
   }
 
@@ -1714,6 +1721,7 @@ async function testConnection() {
     logPanel.classList.remove('log-box');
     lastStockSyncLog = [];
     stockSyncReader  = null;
+    stockSyncRunId   = null;
 
     const addStep = (emoji, msg, color) => {
       const p = document.createElement('p');
@@ -1749,6 +1757,12 @@ async function testConnection() {
           if (!line.trim()) continue;
           let evt;
           try { evt = JSON.parse(line); } catch { continue; }
+
+          // Per-request run ID (first event sent by server)
+          if (evt.type === 'run_id') {
+            stockSyncRunId = evt.runId;
+            continue;
+          }
 
           // Phase 1 status events (API mode only)
           if (evt.type === 'status') {
@@ -1824,6 +1838,7 @@ async function testConnection() {
     } finally {
       ssSetRunning(false);
       stockSyncReader = null;
+      stockSyncRunId  = null;
     }
   }
 
@@ -1934,6 +1949,7 @@ async function testConnection() {
 
   let lastCalendarSyncLog = [];
   let calendarSyncReader  = null;
+  let calendarSyncRunId   = null;
   let csFroogleFile       = null; // the uploaded Froogle CSV File object
   let csSyncMode          = 'api'; // 'api' | 'csv'
 
@@ -1988,7 +2004,13 @@ async function testConnection() {
   }
 
   async function stopCalendarSync() {
-    try { await fetch('/api/stock/cancel', { method: 'POST' }); } catch(_) {}
+    try {
+      await fetch('/api/stock/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ runId: calendarSyncRunId }),
+      });
+    } catch(_) {}
     if (calendarSyncReader) { try { calendarSyncReader.cancel(); } catch(_) {} }
   }
 
@@ -2013,6 +2035,7 @@ async function testConnection() {
     document.getElementById('cs-spinner-text').textContent = 'Starting…';
     lastCalendarSyncLog = [];
     calendarSyncReader  = null;
+    calendarSyncRunId   = null;
 
     const progressWrap = document.getElementById('cs-progress-wrap');
     const tiles        = document.getElementById('cs-tiles');
@@ -2065,6 +2088,11 @@ async function testConnection() {
           if (!line.trim()) continue;
           let evt;
           try { evt = JSON.parse(line); } catch { continue; }
+
+          if (evt.type === 'run_id') {
+            calendarSyncRunId = evt.runId;
+            continue;
+          }
 
           if (evt.type === 'status') {
             const icons = {
@@ -2132,6 +2160,7 @@ async function testConnection() {
     } finally {
       csSetRunning(false);
       calendarSyncReader = null;
+      calendarSyncRunId  = null;
     }
   }
 

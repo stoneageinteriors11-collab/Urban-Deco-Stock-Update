@@ -220,7 +220,7 @@ const METAFIELDS_SET_MUTATION = `
 `;
 
 const INVENTORY_SET_MUTATION = `
-  mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) {
+  mutation inventorySetQuantities($input: InventorySetQuantitiesInput!) @idempotentRequest {
     inventorySetQuantities(input: $input) {
       inventoryAdjustmentGroup { id }
       userErrors { field message code }
