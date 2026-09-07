@@ -963,8 +963,10 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
       // Send runId immediately so client can cancel this specific run
       send({ type: 'run_id', runId });
 
-      // ── Phase 1a: Build the Next Day SKU set ────────────────────────────────
-      const nextDaySkus = new Set();
+      // ── Phase 1a: Build per-variant CFS data map ────────────────────────────
+      // cfsVariantMap: variantSku → { isNextDay, inStock, deliveryTime, onHand }
+      const cfsVariantMap = new Map();
+      const nextDaySkus   = new Set(); // kept for Froogle CSV mode fallback
 
       if (uploadedFile) {
         froogleMode = true;
@@ -978,24 +980,30 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
         send({ type: 'status', phase: 'cfs-done',
           message: `Froogle CSV: ${rows.length} rows — ${nextDaySkus.size} Next Day product SKUs found` });
       } else {
-        froogleMode = true;
         send({ type: 'status', phase: 'cfs', message: 'Fetching CFS product data…' });
         const cfsProducts = await fetchCfsProducts();
         for (const item of cfsProducts) {
-          const prodId = String(item.productId);
-          if ((item.deliveryTime || '') === 'Next Day') {
-            nextDaySkus.add(`UD-${prodId}`); continue;
-          }
+          const prodId  = String(item.productId);
+          const prodDt  = (item.deliveryTime || '').trim();
           if (Array.isArray(item.variants)) {
             for (const v of item.variants) {
-              if ((v.deliveryTime || '') === 'Next Day') {
-                nextDaySkus.add(`UD-${prodId}`); break;
-              }
+              const varId  = String(v.variantId);
+              const varSku = `UD-${prodId}-${varId}`;
+              const dt     = (v.deliveryTime || prodDt || '').trim();
+              const onHand = Number(v.onHand ?? 0);
+              cfsVariantMap.set(varSku, {
+                isNextDay:    dt === 'Next Day',
+                inStock:      onHand > 0,
+                deliveryTime: dt,
+                onHand,
+              });
             }
           }
         }
+        const nextDayInStock = [...cfsVariantMap.values()].filter(v => v.isNextDay && v.inStock).length;
+        const nextDayTotal   = [...cfsVariantMap.values()].filter(v => v.isNextDay).length;
         send({ type: 'status', phase: 'cfs-done',
-          message: `CFS: ${cfsProducts.length} products — ${nextDaySkus.size} Next Day product SKUs found` });
+          message: `CFS: ${cfsProducts.length} products — ${nextDayTotal} Next Day variants (${nextDayInStock} in stock)` });
       }
 
       // ── Phase 1b: Paginated Shopify product fetch ────────────────────────────
@@ -1066,31 +1074,47 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
             const varSku = shopNode.sku;
             if (!varSku) continue;
 
+            // ── Determine Next Day status & CFS stock ──────────────────────
             let isNextDay;
+            let cfsData = null; // { isNextDay, inStock, deliveryTime, onHand }
+
             if (froogleMode) {
+              // CSV mode: product-level Next Day only, no per-variant stock data
               const m = varSku.match(/^(UD-\d+)/);
               isNextDay = nextDaySkus.has(m ? m[1] : varSku);
             } else {
-              isNextDay = nextDaySkus.has(varSku);
+              // API mode: use per-variant CFS map
+              cfsData   = cfsVariantMap.get(varSku) ?? null;
+              isNextDay = cfsData?.isNextDay ?? false;
             }
 
             if (!isNextDay) {
               skipped++;
-              varLogs.push({ sku: varSku, handle, status: 'skipped',
-                message: 'Not a Next Day delivery variant — skipped' });
+              varLogs.push({
+                sku: varSku, handle, status: 'skipped',
+                cfsDelivery: cfsData?.deliveryTime ?? (froogleMode ? '(csv-mode)' : '(not in CFS)'),
+                cfsOnHand:   cfsData?.onHand       ?? null,
+                cfsInStock:  cfsData?.inStock       ?? null,
+                message: 'Not a Next Day delivery variant — skipped',
+              });
+              continue;
+            }
+
+            // ── CFS stock check (API mode only) ───────────────────────────
+            if (!froogleMode && cfsData && !cfsData.inStock) {
+              skipped++;
+              varLogs.push({
+                sku: varSku, handle, status: 'skipped',
+                cfsDelivery: cfsData.deliveryTime,
+                cfsOnHand:   cfsData.onHand,
+                cfsInStock:  false,
+                message: `Next Day but CFS out of stock (onHand: ${cfsData.onHand}) — calendar not set`,
+              });
               continue;
             }
 
             productHasNextDay = true;
-            const existingVar  = metafieldMap(shopNode.metafields);
-            const curInoutstock = existingVar['inoutstock'] ?? '(not set)';
-
-            if (curInoutstock === 'OUT OF STOCK') {
-              skipped++;
-              varLogs.push({ sku: varSku, handle, status: 'skipped',
-                inoutstock: curInoutstock, message: 'OUT OF STOCK — calendar not set' });
-              continue;
-            }
+            const existingVar = metafieldMap(shopNode.metafields);
 
             const curVShowCal    = existingVar['vshowcalendar'] ?? null;
             const vShowCalChanged = curVShowCal !== 'true';
@@ -1112,7 +1136,9 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
               varLogs.push({
                 sku: varSku, handle,
                 status:       dryRun ? 'dry_run' : 'updated',
-                inoutstock:   curInoutstock,
+                cfsDelivery:  cfsData?.deliveryTime ?? '(csv-mode)',
+                cfsOnHand:    cfsData?.onHand       ?? null,
+                cfsInStock:   cfsData?.inStock       ?? null,
                 calBefore:    curVShowCal ?? '(not set)',
                 calAfter:     'true',
                 notifBefore:  curVNotif   ?? '(not set)',
@@ -1122,9 +1148,13 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
               });
             } else {
               skipped++;
-              varLogs.push({ sku: varSku, handle, status: 'skipped',
-                inoutstock: curInoutstock,
-                message: 'Already correct — vshowcalendar=true and vnotificationtitle=Next Day' });
+              varLogs.push({
+                sku: varSku, handle, status: 'skipped',
+                cfsDelivery:  cfsData?.deliveryTime ?? '(csv-mode)',
+                cfsOnHand:    cfsData?.onHand       ?? null,
+                cfsInStock:   cfsData?.inStock       ?? null,
+                message: 'Already correct — vshowcalendar=true and vnotificationtitle=Next Day',
+              });
             }
           }
 
