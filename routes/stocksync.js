@@ -1304,4 +1304,106 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
   }
 });
 
+// ── Scheduled sync endpoint (for Render Cron Job) ────────────────────────────
+// Runs Step 5 (stock sync) then Step 6 (calendar sync) sequentially.
+// No SSE — returns JSON summary when both are complete.
+// Secured with CRON_SECRET env var so only the cron job can call it.
+router.post('/scheduled-sync', async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  if (secret && req.headers['x-cron-secret'] !== secret) {
+    return res.status(401).json({ error: 'Unauthorised' });
+  }
+
+  const results = { stockSync: null, calendarSync: null, startedAt: new Date().toISOString() };
+  console.log('[scheduled-sync] Starting Step 5 (stock sync)…');
+
+  // ── Step 5: Stock sync ─────────────────────────────────────────────────────
+  try {
+    const client = graphqlClient();
+
+    // Re-use the CFS fetch + buildStockData + compareVariants logic by hitting
+    // the internal compare-api endpoint via a loopback HTTP call isn't clean,
+    // so instead we stream the /sync-api SSE internally and collect results.
+    // Simplest approach: fire-and-forget a real HTTP POST to ourselves and wait.
+    const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 3000}`;
+    const stockRes = await new Promise((resolve) => {
+      const https = require('https');
+      const http  = require('http');
+      const url   = new URL(`${baseUrl}/stocksync/sync-api`);
+      const body  = JSON.stringify({ dryRun: false });
+      const lib   = url.protocol === 'https:' ? https : http;
+      const chunks = [];
+      const req2 = lib.request({
+        hostname: url.hostname, port: url.port || (url.protocol === 'https:' ? 443 : 80),
+        path: url.pathname, method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body),
+                   'x-cron-secret': secret || '' },
+        timeout: 30 * 60 * 1000, // 30 min
+      }, (r2) => {
+        r2.on('data', c => chunks.push(c));
+        r2.on('end', () => {
+          // SSE stream — find the last 'done' event data
+          const text = Buffer.concat(chunks).toString();
+          const doneMatch = text.match(/data: (\{.*"type":"done".*\})\n/g);
+          if (doneMatch) {
+            try { resolve(JSON.parse(doneMatch[doneMatch.length - 1].replace('data: ', ''))); return; } catch(_) {}
+          }
+          resolve({ success: false, raw: text.slice(-500) });
+        });
+      });
+      req2.on('error', e => resolve({ success: false, error: e.message }));
+      req2.write(body); req2.end();
+    });
+
+    results.stockSync = stockRes;
+    console.log('[scheduled-sync] Step 5 done:', JSON.stringify({ success: stockRes.success, updated: stockRes?.updatedCount }));
+  } catch (err) {
+    results.stockSync = { success: false, error: err.message };
+    console.error('[scheduled-sync] Step 5 error:', err.message);
+  }
+
+  // ── Step 6: Calendar sync (runs immediately after Step 5 finishes) ───────────
+  console.log('[scheduled-sync] Starting Step 6 (calendar sync)…');
+  try {
+    const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 3000}`;
+    const calRes = await new Promise((resolve) => {
+      const https = require('https');
+      const http  = require('http');
+      const url   = new URL(`${baseUrl}/stocksync/calendar-sync`);
+      const body  = JSON.stringify({ dryRun: false });
+      const lib   = url.protocol === 'https:' ? https : http;
+      const chunks = [];
+      const req2 = lib.request({
+        hostname: url.hostname, port: url.port || (url.protocol === 'https:' ? 443 : 80),
+        path: url.pathname, method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body),
+                   'x-cron-secret': secret || '' },
+        timeout: 30 * 60 * 1000,
+      }, (r2) => {
+        r2.on('data', c => chunks.push(c));
+        r2.on('end', () => {
+          const text = Buffer.concat(chunks).toString();
+          const doneMatch = text.match(/data: (\{.*"type":"done".*\})\n/g);
+          if (doneMatch) {
+            try { resolve(JSON.parse(doneMatch[doneMatch.length - 1].replace('data: ', ''))); return; } catch(_) {}
+          }
+          resolve({ success: false, raw: text.slice(-500) });
+        });
+      });
+      req2.on('error', e => resolve({ success: false, error: e.message }));
+      req2.write(body); req2.end();
+    });
+
+    results.calendarSync = calRes;
+    console.log('[scheduled-sync] Step 6 done:', JSON.stringify({ success: calRes.success, updated: calRes?.updatedCount }));
+  } catch (err) {
+    results.calendarSync = { success: false, error: err.message };
+    console.error('[scheduled-sync] Step 6 error:', err.message);
+  }
+
+  results.finishedAt = new Date().toISOString();
+  console.log('[scheduled-sync] Complete.');
+  res.json(results);
+});
+
 module.exports = router;
