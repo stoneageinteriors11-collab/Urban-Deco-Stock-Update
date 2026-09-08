@@ -1329,7 +1329,7 @@ router.post('/scheduled-sync', async (req, res) => {
     const stockRes = await new Promise((resolve) => {
       const https = require('https');
       const http  = require('http');
-      const url   = new URL(`${baseUrl}/stocksync/sync-api`);
+      const url   = new URL(`${baseUrl}/api/stock/sync-api`);
       const body  = JSON.stringify({ dryRun: false });
       const lib   = url.protocol === 'https:' ? https : http;
       const chunks = [];
@@ -1369,7 +1369,7 @@ router.post('/scheduled-sync', async (req, res) => {
     const calRes = await new Promise((resolve) => {
       const https = require('https');
       const http  = require('http');
-      const url   = new URL(`${baseUrl}/stocksync/calendar-sync`);
+      const url   = new URL(`${baseUrl}/api/stock/calendar-sync`);
       const body  = JSON.stringify({ dryRun: false });
       const lib   = url.protocol === 'https:' ? https : http;
       const chunks = [];
