@@ -1,58 +1,45 @@
-# Variant Sync Tool
+# Urban Deco Stock Sync Tool
 
-Compares **Urban Deco (Shopify)** variants against the **Choice Furniture Superstore** Froogle variant feed and lets you identify and delete orphaned variants — variants that exist in Shopify but have been removed from the non-Shopify site.
+A multi-step automation tool that syncs **Urban Deco (Shopify)** products and variants against the **Choice Furniture Superstore (CFS)** stock feed — handling stock updates, calendar/delivery date visibility, and scheduled automation.
 
 ---
 
-## How it works
+## What It Does
 
-| Input | File | Key column |
-|---|---|---|
-| Non-Shopify variant feed | `215_Froogle_Variant_*.csv` | `Shopify SKU` |
-| Shopify export (1 or 2 files) | `products_export_1.csv` etc. | `Variant SKU` |
-
-Both share the same format: `UD-{ProductId}-{VariantAttrId}` — e.g. `UD-144246-16985763`
+| Step | Name | Description |
+|------|------|-------------|
+| Step 1–4 | Variant Sync | Upload CFS Froogle CSV + Shopify export → compare → delete orphaned variants |
+| Step 5 | Stock Sync | Pulls live CFS stock via API → updates Shopify inventory levels |
+| Step 6 | Calendar Sync | Identifies Next Day products in CFS → sets `showcalendar` / `vshowcalendar` metafields on Shopify |
+| Auto | Scheduled Sync | GitHub Actions runs Step 5 then Step 6 automatically every 6 hours |
 
 ---
 
 ## Shopify Connection — OAuth via Partner Dashboard
 
-Since Shopify deprecated legacy custom apps in January 2026, this tool uses OAuth with your Partner Dashboard app credentials.
-
-**Getting your credentials from Partner Dashboard:**
+**Getting your credentials:**
 
 1. Go to [partners.shopify.com](https://partners.shopify.com)
-2. Click **Apps** → your app (e.g. "Urban Deco Stock Update")
-3. Click **App settings** → copy the **Client ID** and **Client Secret**
-4. Paste them into `.env` as `SHOPIFY_API_KEY` and `SHOPIFY_API_SECRET`
+2. Click **Apps** → your app → **App settings** → copy **Client ID** and **Client Secret**
+3. Paste into `.env` as `SHOPIFY_API_KEY` and `SHOPIFY_API_SECRET`
 
-**One more step — add the callback URL to your Partner Dashboard app:**
-1. In your app settings → **App setup**
-2. Under **URLs** → **Allowed redirection URL(s)** → add:
-   - Local:  `http://localhost:3000/auth/callback`
-   - Render: `https://your-app.onrender.com/auth/callback`
-3. Save
+**Add callback URL to Partner Dashboard app:**
+- App settings → **App setup** → **Allowed redirection URL(s)**
+  - Local: `http://localhost:3000/auth/callback`
+  - Render: `https://your-app.onrender.com/auth/callback`
 
-Then when you run the tool, click **"Connect to Shopify"** in the UI — it handles the OAuth flow automatically and saves the token.
+Then click **Connect to Shopify** in the UI — it handles OAuth automatically.
 
 ---
 
 ## Local Setup
 
 ```bash
-# 1. Clone / copy the project
 cd variant-sync-tool
-
-# 2. Install dependencies
 npm install
-
-# 3. Create your .env file
-cp .env.example .env
-# Then edit .env with your values
-
-# 4. Run the app
-npm run dev       # development (auto-restart)
-npm start         # production
+cp .env.example .env   # fill in your values
+npm run dev            # development (auto-restart)
+npm start              # production
 ```
 
 Open http://localhost:3000
@@ -65,47 +52,91 @@ Open http://localhost:3000
 SHOPIFY_STORE=urbandeco.myshopify.com
 SHOPIFY_API_KEY=your_client_id_from_partner_dashboard
 SHOPIFY_API_SECRET=your_client_secret_from_partner_dashboard
+SHOPIFY_API_TOKEN=your_access_token
+SHOPIFY_API_VERSION=2024-01
 SCOPES=read_products,write_products
 APP_URL=https://your-app.onrender.com
 PORT=3000
+RENDER_EXTERNAL_URL=https://your-app.onrender.com
+CRON_SECRET=your_random_secret_here
 ```
+
+Generate `CRON_SECRET` with: `openssl rand -hex 32`
 
 ---
 
 ## Deploy to Render
 
-1. Push this repo to GitHub
-2. Go to [render.com](https://render.com) → **New → Web Service**
-3. Connect your GitHub repo
-4. Set:
+1. Push repo to GitHub
+2. Render Dashboard → **New → Web Service** → connect repo
+3. Set:
    - **Build Command:** `npm install`
    - **Start Command:** `npm start`
    - **Environment:** Node
-5. Add your environment variables under **Environment** tab:
-   - `SHOPIFY_STORE`
-   - `SHOPIFY_API_TOKEN`
-   - `SHOPIFY_API_VERSION`
-6. Click **Deploy**
+4. Add all env vars from `.env` under the **Environment** tab
+5. Click **Deploy**
+
+---
+
+## Scheduled Automation (GitHub Actions)
+
+The tool runs Step 5 then Step 6 automatically every 6 hours via GitHub Actions.
+
+**Setup:**
+1. The workflow file is already in `.github/workflows/stock-sync.yml`
+2. Go to your GitHub repo → **Settings → Secrets and variables → Actions**
+3. Add two secrets:
+   - `RENDER_APP_URL` = `https://your-app.onrender.com`
+   - `CRON_SECRET` = same value as your Render env var
+
+To trigger manually: GitHub → **Actions** tab → **Urban Deco Stock Sync** → **Run workflow**
+
+The scheduled sync endpoint is: `POST /api/stock/scheduled-sync`
+Secured with `x-cron-secret` header.
+
+---
+
+## Shopify Metafields Used
+
+| Metafield | Level | Type | Purpose |
+|-----------|-------|------|---------|
+| `custom.showcalendar` | Product | Boolean | Show/hide delivery date picker on product page |
+| `custom.vshowcalendar` | Variant | Boolean | Show/hide picker per variant |
+| `custom.vnotificationtitle` | Variant | Text | Delivery label shown (e.g. "Next Day") |
+
+---
+
+## Delivery Date Picker (Shopify Theme)
+
+A flatpickr date picker appears on the product page for Next Day variants. It:
+- Shows only when the selected variant has `vshowcalendar = true`
+- Blocks weekends and dates less than 2 days away
+- Stores the selected date as a Shopify order tag (`delivery:YYYY-MM-DD`) via Shopify Flow
+- Blocks add-to-cart if no date is selected
+
+**Shopify Flow setup:**
+- Trigger: Order created
+- Action: Add order tag → `delivery:{{ order.lineItems... }}`
 
 ---
 
 ## How to Use the App
 
-### Step 1 — Upload Files
-- Upload the **non-Shopify variant feed** CSV (`215_Froogle_Variant_*.csv`)
-- Upload **Shopify export file 1** (`products_export_1.csv`)
-- Optionally upload **Shopify export file 2** if your export was split
+### Steps 1–4 — Variant Sync (CSV mode)
+1. Upload the CFS Froogle CSV (`215_Froogle_Variant_*.csv`)
+2. Upload Shopify export file(s) (`products_export_1.csv`)
+3. Run comparison → review orphaned variants → delete selected
 
-### Step 2 — Settings
-- Enter your **Shopify store domain** and **API token**
-- Click **Test Connection** to verify
-- Leave **Dry Run ON** for the first run (safe — no changes made)
+### Step 5 — Stock Sync (API mode)
+- Fetches live stock from CFS API
+- Updates Shopify inventory levels for all matched SKUs
+- Run manually or let the scheduled sync handle it
 
-### Step 3 — Compare
-- Click **Run Comparison**
-- Review the results table: filter by Orphaned / OK, search, paginate
-- Select orphaned variants using checkboxes (or "Select all orphaned")
-- Click **Delete Selected Orphaned** — with Dry Run ON it only logs; turn it OFF to apply
+### Step 6 — Calendar Sync
+- Fetches CFS products with `deliveryTime = "Next Day"`
+- Matches to Shopify SKUs (`UD-{productId}`)
+- Sets `vshowcalendar = true` for in-stock Next Day variants
+- Sets `vshowcalendar = false` for out-of-stock ones (bidirectional)
 
 ---
 
@@ -113,16 +144,21 @@ PORT=3000
 
 ```
 variant-sync-tool/
-├── server.js              # Express app entry point
+├── server.js                        # Express app entry point
 ├── routes/
-│   ├── upload.js          # File upload + compare logic
-│   └── shopify.js         # Shopify API: delete variants, test connection
+│   ├── stocksync.js                 # Stock sync, calendar sync, scheduled sync
+│   ├── upload.js                    # File upload + compare logic
+│   └── shopify.js                   # Shopify API helpers
 ├── utils/
-│   ├── parseCSV.js        # CSV parsing + column extraction
-│   └── matchVariants.js   # Comparison logic
+│   ├── cfsApi.js                    # CFS API fetch + stock data builder
+│   ├── parseCSV.js                  # CSV parsing
+│   └── matchVariants.js             # Variant comparison logic
 ├── public/
-│   └── index.html         # Full UI (single page, no build step)
-├── uploads/               # Temp folder — files deleted after processing
-├── .env.example           # Copy to .env and fill in values
+│   └── index.html                   # Full UI (single page)
+├── .github/
+│   └── workflows/
+│       └── stock-sync.yml           # GitHub Actions scheduled sync
+├── uploads/                         # Temp folder
+├── .env.example                     # Copy to .env and fill in values
 └── package.json
 ```
