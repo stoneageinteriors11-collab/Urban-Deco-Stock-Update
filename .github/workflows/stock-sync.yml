@@ -2,20 +2,23 @@ name: Urban Deco Stock Sync
 
 on:
   schedule:
-    - cron: '0 */6 * * *'   # every 6 hours
-  workflow_dispatch:          # allows manual trigger from GitHub UI
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 120      # 2 hour max
+    timeout-minutes: 120
 
     steps:
       - name: Trigger scheduled sync
         run: |
-          curl -s -X POST "${{ secrets.RENDER_APP_URL }}/api/stock/scheduled-sync" \
+          curl -v -X POST "${{ secrets.RENDER_APP_URL }}/api/stock/scheduled-sync" \
             -H "Content-Type: application/json" \
             -H "x-cron-secret: ${{ secrets.CRON_SECRET }}" \
             -d "{}" \
             --max-time 7200 \
-            --no-buffer
+            --no-buffer \
+            --fail-with-body
+        env:
+          RENDER_APP_URL: ${{ secrets.RENDER_APP_URL }}
