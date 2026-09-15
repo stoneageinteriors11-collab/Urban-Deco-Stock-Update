@@ -1113,12 +1113,30 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
             }
 
             if (!isNextDay) {
-              skipped++;
-              varLogs.push({
-                sku: varSku, handle, status: 'skipped',
-                cfsOnHand: null, cfsInStock: null,
-                message: 'Not a Next Day product — skipped',
-              });
+              // If vshowcalendar is currently true but it's no longer a Next Day product,
+              // reset it to false (e.g. delivery time changed from "Next Day" to "6-8 Weeks")
+              const existingVarNnd = metafieldMap(shopNode.metafields);
+              const curVShowCalNnd = existingVarNnd['vshowcalendar'] ?? null;
+              if (curVShowCalNnd === 'true') {
+                updatedCount++;
+                allMetafields.push({ ownerId: shopNode.id, namespace: 'custom',
+                  key: 'vshowcalendar', value: 'false', type: 'boolean' });
+                varLogs.push({
+                  sku: varSku, handle,
+                  status:    dryRun ? 'dry_run' : 'updated',
+                  cfsOnHand: null, cfsInStock: false,
+                  calBefore: 'true',
+                  calAfter:  'false',
+                  message:   'No longer a Next Day product — vshowcalendar reset to false',
+                });
+              } else {
+                skipped++;
+                varLogs.push({
+                  sku: varSku, handle, status: 'skipped',
+                  cfsOnHand: null, cfsInStock: null,
+                  message: 'Not a Next Day product — skipped',
+                });
+              }
               continue;
             }
 
