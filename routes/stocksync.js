@@ -1265,7 +1265,8 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
           } else if (!productHasNextDay && !productCalendarWritten) {
             // ── Out-of-stock path: disable product calendar if currently enabled ──
             const curShowCal = existingProd['showcalendar'] ?? null;
-            if (curShowCal === 'true') {
+            const showCalIsTrue = curShowCal?.toLowerCase() === 'true';
+            if (showCalIsTrue) {
               productCalendarWritten = true;
               allMetafields.push({ ownerId: product.id, namespace: 'custom',
                 key: 'showcalendar', value: 'false', type: 'boolean' });
@@ -1273,9 +1274,14 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
               varLogs.push({
                 sku: '-', handle,
                 status:    dryRun ? 'dry_run' : 'updated',
-                calBefore: 'true',
+                calBefore: curShowCal,
                 calAfter:  'false',
-                message:   'All Next Day variants out of stock — product showcalendar set to false',
+                message:   'No Next Day variants in stock — product showcalendar set to false',
+              });
+            } else {
+              varLogs.push({
+                sku: '-', handle, status: 'skipped',
+                message: `Product showcalendar already false or unset (value: "${curShowCal}") — no change`,
               });
             }
           }
