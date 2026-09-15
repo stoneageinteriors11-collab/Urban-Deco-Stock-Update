@@ -101,7 +101,7 @@ const GET_PRODUCT_METAFIELDS_QUERY = `
     productByHandle(handle: $handle) {
       id
       title
-      metafields(first: 20, namespace: "custom") {
+      metafields(first: 50, namespace: "custom") {
         edges { node { key value } }
       }
       variants(first: 250) {
@@ -109,7 +109,7 @@ const GET_PRODUCT_METAFIELDS_QUERY = `
           node {
             id
             sku
-            metafields(first: 20, namespace: "custom") {
+            metafields(first: 50, namespace: "custom") {
               edges { node { key value } }
             }
             inventoryItem { id }
@@ -125,7 +125,7 @@ const GET_PRODUCT_STOCK_QUERY = `
     productByHandle(handle: $handle) {
       id
       title
-      metafields(first: 20, namespace: "custom") {
+      metafields(first: 50, namespace: "custom") {
         edges { node { key value } }
       }
       variants(first: 250) {
@@ -133,7 +133,7 @@ const GET_PRODUCT_STOCK_QUERY = `
           node {
             id
             sku
-            metafields(first: 20, namespace: "custom") {
+            metafields(first: 50, namespace: "custom") {
               edges { node { key value } }
             }
             inventoryItem {
@@ -156,14 +156,14 @@ const GET_PRODUCTS_BULK_QUERY = `
       edges {
         node {
           id handle title vendor status
-          metafields(first: 20, namespace: "custom") {
+          metafields(first: 50, namespace: "custom") {
             edges { node { key value } }
           }
           variants(first: 250) {
             edges {
               node {
                 id sku
-                metafields(first: 20, namespace: "custom") {
+                metafields(first: 50, namespace: "custom") {
                   edges { node { key value } }
                 }
                 inventoryItem { id }
@@ -183,14 +183,14 @@ const GET_PRODUCTS_BULK_QUERY_WITH_INV = `
       edges {
         node {
           id handle title vendor status
-          metafields(first: 20, namespace: "custom") {
+          metafields(first: 50, namespace: "custom") {
             edges { node { key value } }
           }
           variants(first: 250) {
             edges {
               node {
                 id sku
-                metafields(first: 20, namespace: "custom") {
+                metafields(first: 50, namespace: "custom") {
                   edges { node { key value } }
                 }
                 inventoryItem {
