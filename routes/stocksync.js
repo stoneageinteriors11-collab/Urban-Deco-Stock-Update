@@ -995,21 +995,25 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
           const prodDt  = (item.deliveryTime || '').trim().toLowerCase();
           let   isNextDay = prodDt === 'next day';
 
-          // Build variant stock map (variantId → onHand)
+          // Build variant stock map (variantId → { onHand, deliveryTime })
           const varStock = new Map();
           if (Array.isArray(item.variants) && item.variants.length > 0) {
             for (const v of item.variants) {
               const varDt = (v.deliveryTime || item.deliveryTime || '').trim().toLowerCase();
               if (varDt === 'next day') isNextDay = true;
-              varStock.set(String(v.variantId), Number(v.onHand ?? item.onHand ?? 0));
+              varStock.set(String(v.variantId), {
+                onHand:       Number(v.onHand ?? item.onHand ?? 0),
+                deliveryTime: v.deliveryTime || item.deliveryTime || '',
+              });
             }
           }
 
           if (isNextDay) nextDayProductIds.add(prodId);
 
           cfsStockByProdId.set(prodId, {
-            onHand:   Number(item.onHand ?? 0),
-            variants: varStock,
+            onHand:       Number(item.onHand ?? 0),
+            deliveryTime: item.deliveryTime || '',
+            variants:     varStock,
           });
         }
 
@@ -1113,21 +1117,41 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
             }
 
             if (!isNextDay) {
-              // If vshowcalendar is currently true but it's no longer a Next Day product,
-              // reset it to false (e.g. delivery time changed from "Next Day" to "6-8 Weeks")
-              const existingVarNnd = metafieldMap(shopNode.metafields);
-              const curVShowCalNnd = existingVarNnd['vshowcalendar'] ?? null;
-              if (curVShowCalNnd === 'true') {
+              // Not a Next Day product — reset vshowcalendar to false and
+              // update vnotificationtitle to the actual CFS delivery time.
+              const existingVarNnd   = metafieldMap(shopNode.metafields);
+              const curVShowCalNnd   = existingVarNnd['vshowcalendar']      ?? null;
+              const curVNotifNnd     = existingVarNnd['vnotificationtitle'] ?? null;
+
+              // Look up CFS delivery time for this variant
+              const stockEntryNnd    = cfsStockByProdId.get(prodId);
+              const varEntryNnd      = varId && stockEntryNnd?.variants.has(varId)
+                ? stockEntryNnd.variants.get(varId)
+                : null;
+              const cfsDeliveryTime  = varEntryNnd
+                ? varEntryNnd.deliveryTime
+                : (stockEntryNnd?.deliveryTime || '');
+
+              const needsCalReset   = curVShowCalNnd === 'true';
+              const needsNotifUpdate = cfsDeliveryTime && curVNotifNnd !== cfsDeliveryTime;
+
+              if (needsCalReset || needsNotifUpdate) {
                 updatedCount++;
-                allMetafields.push({ ownerId: shopNode.id, namespace: 'custom',
-                  key: 'vshowcalendar', value: 'false', type: 'boolean' });
+                if (needsCalReset) {
+                  allMetafields.push({ ownerId: shopNode.id, namespace: 'custom',
+                    key: 'vshowcalendar', value: 'false', type: 'boolean' });
+                }
+                if (needsNotifUpdate) {
+                  allMetafields.push({ ownerId: shopNode.id, namespace: 'custom',
+                    key: 'vnotificationtitle', value: cfsDeliveryTime, type: 'single_line_text_field' });
+                }
                 varLogs.push({
                   sku: varSku, handle,
                   status:    dryRun ? 'dry_run' : 'updated',
                   cfsOnHand: null, cfsInStock: false,
-                  calBefore: 'true',
-                  calAfter:  'false',
-                  message:   'No longer a Next Day product — vshowcalendar reset to false',
+                  calBefore: curVShowCalNnd ?? '(not set)',
+                  calAfter:  needsCalReset ? 'false' : curVShowCalNnd,
+                  message:   `No longer a Next Day product — vshowcalendar=${needsCalReset ? 'false' : 'unchanged'}, vnotificationtitle="${cfsDeliveryTime}"`,
                 });
               } else {
                 skipped++;
@@ -1146,9 +1170,10 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
               if (stockEntry) {
                 // If this Shopify variant has a sub-variantId, look up that specific
                 // variant's stock; otherwise fall back to the product-level onHand.
-                cfsOnHand = varId && stockEntry.variants.has(varId)
+                const varEntry = varId && stockEntry.variants.has(varId)
                   ? stockEntry.variants.get(varId)
-                  : stockEntry.onHand;
+                  : null;
+                cfsOnHand = varEntry ? varEntry.onHand : stockEntry.onHand;
                 cfsInStock = cfsOnHand > 0;
               } else {
                 cfsOnHand  = 0;
@@ -1264,19 +1289,42 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
             }
           } else if (!productHasNextDay && !productCalendarWritten) {
             // ── Out-of-stock path: disable product calendar if currently enabled ──
-            const curShowCal = existingProd['showcalendar'] ?? null;
+            // Also update vnotificationtitle to the actual CFS delivery time.
+            const curShowCal    = existingProd['showcalendar']       ?? null;
+            const curProdNotif  = existingProd['vnotificationtitle'] ?? null;
             const showCalIsTrue = curShowCal?.toLowerCase() === 'true';
-            if (showCalIsTrue) {
+
+            // Get CFS delivery time at the product level (use first variant's delivery time as fallback)
+            const stockEntryProd  = cfsStockByProdId.get(
+              // Extract prodId from the first variant SKU that matches
+              (() => {
+                for (const edge of (product.variants?.edges || [])) {
+                  const m = (edge.node?.sku || '').match(/^UD-(\d+)/);
+                  if (m) return m[1];
+                }
+                return null;
+              })()
+            );
+            const cfsProdDeliveryTime = stockEntryProd?.deliveryTime || '';
+            const needsProdNotifUpdate = cfsProdDeliveryTime && curProdNotif !== cfsProdDeliveryTime;
+
+            if (showCalIsTrue || needsProdNotifUpdate) {
               productCalendarWritten = true;
-              allMetafields.push({ ownerId: product.id, namespace: 'custom',
-                key: 'showcalendar', value: 'false', type: 'boolean' });
+              if (showCalIsTrue) {
+                allMetafields.push({ ownerId: product.id, namespace: 'custom',
+                  key: 'showcalendar', value: 'false', type: 'boolean' });
+              }
+              if (needsProdNotifUpdate) {
+                allMetafields.push({ ownerId: product.id, namespace: 'custom',
+                  key: 'vnotificationtitle', value: cfsProdDeliveryTime, type: 'single_line_text_field' });
+              }
               updatedCount++;
               varLogs.push({
                 sku: '-', handle,
                 status:    dryRun ? 'dry_run' : 'updated',
                 calBefore: curShowCal,
-                calAfter:  'false',
-                message:   'No Next Day variants in stock — product showcalendar set to false',
+                calAfter:  showCalIsTrue ? 'false' : curShowCal,
+                message:   `No Next Day variants in stock — showcalendar=${showCalIsTrue ? 'false' : 'unchanged'}, vnotificationtitle="${cfsProdDeliveryTime}"`,
               });
             } else {
               varLogs.push({
