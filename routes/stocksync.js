@@ -631,7 +631,7 @@ router.post('/sync-api', async (req, res) => {
 
       const byHandle = new Map();
       let   cursor   = null;
-      const PAGE     = 50;
+      const PAGE     = 20;
       const QUERY    = locationId ? GET_PRODUCTS_BULK_QUERY_WITH_INV : GET_PRODUCTS_BULK_QUERY;
 
       while (true) {
@@ -870,7 +870,7 @@ router.post('/compare-api', async (req, res) => {
     const byHandle = new Map();
     let cursor = null;
     while (true) {
-      const vars = { first: 50, query: 'vendor:"Urban Deco"' };
+      const vars = { first: 20, query: 'vendor:"Urban Deco"' };
       if (cursor) vars.after = cursor;
       const data = await gql(client, GET_PRODUCTS_BULK_QUERY, vars);
       const page = data?.products;
@@ -1030,7 +1030,7 @@ router.post('/calendar-sync', upload.single('froogleCsv'), async (req, res) => {
           cleanup(); res.end(); return;
         }
 
-        const vars = { first: 50, query: 'vendor:"Urban Deco"' };
+        const vars = { first: 20, query: 'vendor:"Urban Deco"' };
         if (cursor) vars.after = cursor;
 
         const data = await gql(client, GET_PRODUCTS_BULK_QUERY, vars);
