@@ -19,6 +19,9 @@ const cancelMap = new Map();
 function isCancelled(runId) { return cancelMap.get(runId) === true; }
 function makeRunId()        { return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`; }
 
+// ── Latest log store (in-memory, overwritten on each scheduled sync) ──────────
+let latestSyncLog = null;
+
 // ── POST /api/stock/cancel ────────────────────────────────────────────────────
 router.post('/cancel', (req, res) => {
   const { runId } = req.body || {};
@@ -1473,9 +1476,54 @@ router.post('/scheduled-sync', async (req, res) => {
     console.error('[scheduled-sync] Step 6 error:', err.message);
   }
 
+  // ── Save log in memory for /download-log endpoint ─────────────────────────
   results.finishedAt = new Date().toISOString();
+  latestSyncLog = { runAt: results.finishedAt, results };
+
   console.log('[scheduled-sync] Complete.');
   res.json(results);
+});
+
+// ── GET /api/stock/download-log ───────────────────────────────────────────────
+// Returns the latest scheduled sync log as a CSV download (no file stored).
+router.get('/download-log', (req, res) => {
+  if (!latestSyncLog) {
+    return res.status(404).json({ error: 'No log available yet. Run the scheduled sync first.' });
+  }
+
+  const rows = [];
+
+  // Step 5 (stock sync) log
+  for (const entry of (latestSyncLog.results?.stockSync?.log || [])) {
+    rows.push({ step: 'stock', ...entry });
+  }
+
+  // Step 6 (calendar sync) log
+  for (const entry of (latestSyncLog.results?.calendarSync?.log || [])) {
+    rows.push({ step: 'calendar', ...entry });
+  }
+
+  if (rows.length === 0) {
+    return res.status(404).json({ error: 'Log is empty.' });
+  }
+
+  // Build CSV
+  const headers = [...new Set(rows.flatMap(r => Object.keys(r)))];
+  const csvLines = [
+    headers.join(','),
+    ...rows.map(r =>
+      headers.map(h => {
+        const val = r[h] ?? '';
+        const str = String(val).replace(/"/g, '""');
+        return str.includes(',') || str.includes('"') || str.includes('\n') ? `"${str}"` : str;
+      }).join(',')
+    ),
+  ];
+
+  const filename = `sync-log-${(latestSyncLog.runAt || 'latest').replace(/[:.]/g, '-')}.csv`;
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(csvLines.join('\n'));
 });
 
 module.exports = router;
