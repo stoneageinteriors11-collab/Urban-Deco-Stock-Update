@@ -1476,9 +1476,18 @@ router.post('/scheduled-sync', async (req, res) => {
     console.error('[scheduled-sync] Step 6 error:', err.message);
   }
 
-  // ── Save log in memory for /download-log endpoint ─────────────────────────
+  // ── Save log in memory + to disk (survives Render spin-down) ────────────────
   results.finishedAt = new Date().toISOString();
   latestSyncLog = { runAt: results.finishedAt, results };
+  try {
+    fs.writeFileSync(
+      path.join(__dirname, '../uploads/latest-sync-log.json'),
+      JSON.stringify(latestSyncLog),
+      'utf8'
+    );
+  } catch (writeErr) {
+    console.warn('[scheduled-sync] Could not write log to disk:', writeErr.message);
+  }
 
   console.log('[scheduled-sync] Complete.');
   res.json(results);
@@ -1487,6 +1496,13 @@ router.post('/scheduled-sync', async (req, res) => {
 // ── GET /api/stock/download-log ───────────────────────────────────────────────
 // Returns the latest scheduled sync log as a CSV download (no file stored).
 router.get('/download-log', (req, res) => {
+  // If in-memory log is gone (process restarted after Render spin-down), read from disk
+  if (!latestSyncLog) {
+    try {
+      const raw = fs.readFileSync(path.join(__dirname, '../uploads/latest-sync-log.json'), 'utf8');
+      latestSyncLog = JSON.parse(raw);
+    } catch (_) {}
+  }
   if (!latestSyncLog) {
     return res.status(404).json({ error: 'No log available yet. Run the scheduled sync first.' });
   }
