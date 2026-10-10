@@ -16,6 +16,7 @@ const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 
 const stockSyncRoutes  = require('./routes/stocksync'); 
+const imageSyncRoutes  = require('./routes/imagesync');   // Step 7 — Image Sync (manual)
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(cors());
@@ -31,6 +32,7 @@ app.use('/auth', authRoutes);
 app.use('/api', uploadRoutes);
 app.use('/api/shopify', shopifyRoutes);
 app.use('/api/stock', stockSyncRoutes);
+app.use('/api/images', imageSyncRoutes);
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));

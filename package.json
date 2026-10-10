@@ -5,9 +5,11 @@
   "main": "server.js",
   "scripts": {
     "start": "node --max-old-space-size=4096 server.js",
-    "dev": "nodemon --max-old-space-size=4096 server.js"
+    "dev": "nodemon --max-old-space-size=4096 server.js",
+    "test:images": "node test/imageSyncCore.test.js && node test/visual.test.js && node test/e2e.test.js"
   },
   "dependencies": {
+    "archiver": "^7.0.1",
     "axios": "^1.7.2",
     "cors": "^2.8.5",
     "csv-parse": "^5.5.6",
@@ -15,7 +17,9 @@
     "express": "^4.19.2",
     "multer": "^1.4.5-lts.1",
     "papaparse": "^5.4.1",
-    "xlsx": "^0.18.5"
+    "sharp": "^0.33.5",
+    "xlsx": "^0.18.5",
+    "yauzl": "^3.2.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.4"

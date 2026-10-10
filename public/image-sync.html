@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Image Sync — Urban Deco</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --surface2: #222636; --border: #2e3248;
+    --accent: #6366f1; --accent-hover: #818cf8; --danger: #ef4444; --success: #22c55e;
+    --warning: #f59e0b; --info: #38bdf8; --text: #e2e8f0; --text-muted: #94a3b8; --radius: 10px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; padding: 24px 16px 80px; }
+  .container { max-width: 1200px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 24px; }
+  header .logo { width: 42px; height: 42px; background: var(--accent); border-radius: 10px; display: grid; place-items: center; font-size: 22px; }
+  header h1 { font-size: 20px; }
+  header p { font-size: 13px; color: var(--text-muted); }
+  header a { margin-left: auto; color: var(--accent-hover); text-decoration: none; font-size: 13px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 18px; }
+  .card-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); margin-bottom: 14px; display: flex; gap: 10px; align-items: center; }
+  .card-title .num { background: var(--accent); color: #fff; border-radius: 6px; padding: 1px 8px; }
+  .help { color: var(--text-muted); font-size: 13px; margin-bottom: 12px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .btn { border: none; border-radius: 8px; padding: 9px 16px; font-size: 13px; font-weight: 600; cursor: pointer; color: #fff; background: var(--accent); }
+  .btn:hover:not(:disabled) { background: var(--accent-hover); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.secondary { background: var(--surface2); border: 1px solid var(--border); color: var(--text); }
+  .btn.danger { background: var(--danger); }
+  .btn.success { background: var(--success); color: #062; }
+  textarea, input[type=text], select { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 8px 10px; font: inherit; }
+  textarea { width: 100%; min-height: 70px; resize: vertical; font-family: ui-monospace, monospace; font-size: 12px; }
+  label.chk { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; font-size: 13px; }
+  .status { font-size: 13px; color: var(--text-muted); margin-top: 10px; min-height: 20px; }
+  .status.err { color: var(--danger); } .status.ok { color: var(--success); }
+  .banner { border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 12px; }
+  .banner.warn { background: rgba(245,158,11,.12); border: 1px solid rgba(245,158,11,.35); color: var(--warning); }
+  .banner.ok { background: rgba(34,197,94,.1); border: 1px solid rgba(34,197,94,.3); color: var(--success); }
+  .banner.err { background: rgba(239,68,68,.1); border: 1px solid rgba(239,68,68,.35); color: var(--danger); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 10px; margin: 14px 0; }
+  .stat { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+  .stat b { font-size: 20px; display: block; } .stat span { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; }
+  .prod { border: 1px solid var(--border); border-radius: 8px; margin-top: 10px; background: var(--surface2); }
+  .prod.bad { border-color: rgba(239,68,68,.5); }
+  .prod-head { display: flex; gap: 10px; align-items: center; padding: 10px 12px; cursor: pointer; flex-wrap: wrap; }
+  .prod-head .t { font-weight: 600; } .prod-head .h { color: var(--text-muted); font-size: 12px; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+  .chip { font-size: 11px; padding: 2px 8px; border-radius: 99px; background: var(--surface); border: 1px solid var(--border); white-space: nowrap; }
+  .chip.up { color: var(--info); border-color: rgba(56,189,248,.4); } .chip.ex { color: var(--warning); border-color: rgba(245,158,11,.4); }
+  .chip.det { color: var(--danger); border-color: rgba(239,68,68,.4); } .chip.ok { color: var(--success); border-color: rgba(34,197,94,.4); }
+  .chip.bad { background: var(--danger); color: #fff; border: none; }
+  .prod-body { padding: 4px 12px 14px; border-top: 1px solid var(--border); display: none; }
+  .prod.open .prod-body { display: block; }
+  .sub { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); margin: 14px 0 6px; }
+  .strip { display: flex; gap: 8px; flex-wrap: wrap; }
+  .th { width: 112px; font-size: 10px; color: var(--text-muted); position: relative; }
+  .th img { width: 112px; height: 84px; object-fit: cover; border-radius: 6px; border: 2px solid var(--border); background: #111; display: block; }
+  .th.feat img { border-color: var(--warning); }
+  .th .badge { position: absolute; top: 4px; left: 4px; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 4px; background: rgba(0,0,0,.75); }
+  .badge.reuse { color: var(--success); } .badge.upload { color: var(--info); } .badge.keep { color: var(--text); }
+  .th .pos { position: absolute; top: 4px; right: 4px; font-size: 10px; background: rgba(0,0,0,.75); padding: 1px 5px; border-radius: 4px; }
+  .th .lbl { margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .th button { margin-top: 3px; font-size: 10px; padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border); background: var(--surface); color: var(--text-muted); cursor: pointer; width: 100%; }
+  .th.feat button { color: var(--warning); border-color: var(--warning); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--text-muted); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+  td.url { font-family: ui-monospace, monospace; font-size: 11px; word-break: break-all; }
+  ul.msgs { margin-left: 18px; font-size: 12px; } ul.msgs li.e { color: var(--danger); } ul.msgs li.w { color: var(--warning); }
+  .log { background: #0b0d13; border: 1px solid var(--border); border-radius: 8px; padding: 10px; font-family: ui-monospace, monospace; font-size: 12px; max-height: 320px; overflow: auto; margin-top: 12px; white-space: pre-wrap; }
+  .log .e { color: var(--danger); } .log .ok { color: var(--success); } .log .w { color: var(--warning); }
+  .bar { height: 6px; background: var(--surface2); border-radius: 99px; overflow: hidden; margin-top: 10px; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .hidden { display: none !important; }
+  @media (max-width: 640px) { .th, .th img { width: 88px; } .th img { height: 66px; } }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="logo">🖼️</div>
+    <div>
+      <h1>Image Sync</h1>
+      <p>CFS gallery images → Urban Deco products. Manual only — run when needed.</p>
+    </div>
+    <a href="/">← Back to Variant Sync Tool</a>
+  </header>
+
+  <div id="scopeBanner" class="banner warn hidden"></div>
+
+  <!-- 1. Dry run -->
+  <div class="card">
+    <div class="card-title"><span class="num">1</span> Dry run (read-only)</div>
+    <p class="help">Nothing in the store changes here. Paste product handles, CFS product IDs (e.g. <code>144250</code>) or SKUs (<code>UD-144250-16985745</code>), one per line — or leave empty to take the next batch of Urban Deco products.</p>
+    <textarea id="tokens" placeholder="milan-dining-table-white-marble-sizes-available"></textarea>
+    <div class="row" style="margin-top:10px">
+      <label class="chk">Batch size
+        <select id="limit"><option>5</option><option selected>25</option><option>50</option><option>100</option></select>
+      </label>
+      <label class="chk"><input type="checkbox" id="includeDrafts"> Include draft products (test copies)</label>
+      <button class="btn" id="btnDry">Run dry run</button>
+      <button class="btn secondary hidden" id="btnNext">Next batch →</button>
+      <a class="btn secondary hidden" id="btnCsv" href="#">Download preview CSV</a>
+    </div>
+    <div class="bar hidden" id="dryBar"><div></div></div>
+    <div class="status" id="dryStatus"></div>
+    <div id="summary"></div>
+    <div id="products"></div>
+  </div>
+
+  <!-- 2. Backup -->
+  <div class="card">
+    <div class="card-title"><span class="num">2</span> Backup zip</div>
+    <p class="help">Downloads a zip of the selected products' current photos plus a list of their order, alt text, featured photo and variant photos. Apply stays locked until the zip has downloaded and its checksum matches. Keep the zip for at least 30 days.</p>
+    <div class="row">
+      <button class="btn" id="btnBackup" disabled>Create &amp; download backup</button>
+      <span id="selCount" class="help" style="margin:0"></span>
+    </div>
+    <div class="bar hidden" id="bkBar"><div></div></div>
+    <div class="status" id="bkStatus"></div>
+  </div>
+
+  <!-- 3. Apply -->
+  <div class="card">
+    <div class="card-title"><span class="num">3</span> Apply</div>
+    <p class="help">Per product: upload new photos → wait until Shopify has processed them → attach → fix alt text → reorder → set variant photos → detach removed photos (kept in Shopify Files for 7 days) → check the result. Products whose photos changed since the backup are skipped.</p>
+    <div class="sub">Final review — exactly what will be applied</div>
+    <p class="help" id="apReviewHelp">Run the dry run and select products first.</p>
+    <div class="row" style="margin-bottom:8px">
+      <a class="btn secondary hidden" id="btnApplyCsv" href="#">Download what will be applied (CSV)</a>
+    </div>
+    <div id="applyList"></div>
+    <div class="row" style="margin-top:14px">
+      <button class="btn success" id="btnApply" disabled>Apply to selected</button>
+      <button class="btn secondary hidden" id="btnPause">Pause after current product</button>
+      <button class="btn secondary hidden" id="btnResume">Resume job</button>
+      <a class="btn secondary hidden" id="btnResults" href="#">Download results (CSV)</a>
+    </div>
+    <div class="bar hidden" id="apBar"><div></div></div>
+    <div class="status" id="apStatus"></div>
+    <div class="log hidden" id="apLog"></div>
+  </div>
+
+  <!-- 4. Restore -->
+  <div class="card">
+    <div class="card-title"><span class="num">4</span> Restore from backup</div>
+    <p class="help">Upload a backup zip and pick products. Photos still in Shopify Files are re-attached; anything older is re-uploaded from the zip. Photos added after the backup are detached, never deleted. Image sync is blocked while a restore runs.</p>
+    <div class="row">
+      <input type="file" id="zipFile" accept=".zip">
+      <button class="btn secondary" id="btnUpload">Upload zip</button>
+    </div>
+    <div class="status" id="rsStatus"></div>
+    <div id="rsList"></div>
+    <div class="row hidden" id="rsActions" style="margin-top:10px">
+      <label class="chk"><input type="checkbox" id="rsForce"> Overwrite edits made after the sync</label>
+      <button class="btn danger" id="btnRestore">Restore selected</button>
+    </div>
+    <div class="log hidden" id="rsLog"></div>
+  </div>
+
+  <!-- 5. Clean-up -->
+  <div class="card">
+    <div class="card-title"><span class="num">5</span> Clean-up (after results are accepted)</div>
+    <p class="help">Lists photos the app detached. Only photos detached 7+ days ago, still in Shopify Files and not used by any product can be permanently deleted.</p>
+    <button class="btn secondary" id="btnScan">Scan detached photos</button>
+    <div class="status" id="clStatus"></div>
+    <div id="clList"></div>
+  </div>
+</div>
+
+<script>
+const API = '/api/images';
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fname = u => { try { return decodeURIComponent(new URL(u).pathname.split('/').pop()); } catch (_) { return u || ''; } };
+const thumb = u => !u ? '' : u.includes('cdn.shopify.com') ? u + (u.includes('?') ? '&' : '?') + 'width=240' : u;
+const fmtBytes = b => b > 1e9 ? (b / 1e9).toFixed(2) + ' GB' : b > 1e6 ? (b / 1e6).toFixed(1) + ' MB' : Math.round(b / 1e3) + ' KB';
+
+const state = { planId: null, nextCursor: null, plans: [], backup: null, jobId: null, restoreId: null };
+
+// ── SSE over POST ────────────────────────────────────────────────────────────
+// While a long job runs: ping /health every 4 min from the browser too, and warn before closing the tab.
+let running = 0, pingTimer = null;
+const beforeUnload = e => { e.preventDefault(); e.returnValue = ''; };
+function jobStart() { if (running++ === 0) { pingTimer = setInterval(() => fetch('/health').catch(() => {}), 240000); window.addEventListener('beforeunload', beforeUnload); } }
+function jobEnd() { if (--running === 0) { clearInterval(pingTimer); window.removeEventListener('beforeunload', beforeUnload); } }
+
+async function stream(url, body, onEvent) {
+  jobStart();
+  try { return await streamInner(url, body, onEvent); } finally { jobEnd(); }
+}
+async function streamInner(url, body, onEvent) {
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  if (!(res.headers.get('content-type') || '').includes('event-stream')) {
+    const j = await res.json().catch(() => ({})); throw new Error(j.error || `HTTP ${res.status}`);
+  }
+  const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = ''; let lastEv = null;
+  for (;;) {
+    const { value, done } = await reader.read(); if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i; while ((i = buf.indexOf('\n\n')) >= 0) {
+      const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+      if (!chunk.startsWith('data: ')) continue;
+      const ev = JSON.parse(chunk.slice(6)); lastEv = ev; onEvent(ev);
+    }
+  }
+  return lastEv;
+}
+function setStatus(el, msg, cls) { el.textContent = msg; el.className = 'status' + (cls ? ' ' + cls : ''); }
+function setBar(id, done, total) { const b = $(id); b.classList.remove('hidden'); b.firstElementChild.style.width = total ? Math.round(100 * done / total) + '%' : '0'; }
+function logLine(el, msg, cls) { el.classList.remove('hidden'); const d = document.createElement('div'); if (cls) d.className = cls; d.textContent = msg; el.appendChild(d); el.scrollTop = el.scrollHeight; }
+
+// ── Status / scopes ─────────────────────────────────────────────────────────
+(async () => {
+  try {
+    const s = await (await fetch(API + '/status')).json();
+    const b = $('scopeBanner');
+    if (!s.connected) { b.textContent = 'Not connected to Shopify: ' + s.error; b.classList.remove('hidden'); }
+    else if (s.missing.length) { b.innerHTML = `The app is missing access: <b>${esc(s.missing.join(', '))}</b>. Add them to <code>shopify.app.toml</code> scopes and the <code>SCOPES</code> env var, then reconnect Shopify on the main page. Dry run works without them; apply/restore need them.`; b.classList.remove('hidden'); }
+    if (s.activeRun) setStatus($('apStatus'), `A ${s.activeRun.kind} is running (${s.activeRun.jobId})`);
+    if (s.connected && !s.keepAwake) { b.innerHTML += (b.innerHTML ? '<br>' : '') + 'Keep-awake is off: set <code>RENDER_EXTERNAL_URL</code> on Render so long jobs don\'t stop when the server sleeps.'; b.classList.remove('hidden'); }
+  } catch (_) {}
+})();
+
+// ── 1. Dry run ──────────────────────────────────────────────────────────────
+async function runDry(after) {
+  const tokens = $('tokens').value.split(/\n|,/).map(s => s.trim()).filter(Boolean);
+  $('btnDry').disabled = true; $('btnNext').classList.add('hidden');
+  $('products').innerHTML = ''; $('summary').innerHTML = '';
+  invalidateBackup();
+  try {
+    const last = await stream(API + '/dry-run', { tokens, limit: $('limit').value, includeDrafts: $('includeDrafts').checked, after },
+      ev => {
+        if (ev.type === 'status') setStatus($('dryStatus'), ev.message);
+        if (ev.type === 'progress') { setBar('dryBar', ev.done, ev.total); setStatus($('dryStatus'), `Checking CFS images ${ev.done}/${ev.total}…`); }
+        if (ev.type === 'warn') logWarn(ev.message);
+      });
+    if (!last || last.type === 'error') throw new Error(last?.message || 'Dry run failed');
+    state.planId = last.planId; state.nextCursor = last.nextCursor; state.plans = last.plans;
+    $('dryBar').classList.add('hidden');
+    setStatus($('dryStatus'), `Dry run ${last.planId} — nothing was changed.`, 'ok');
+    $('btnCsv').href = `${API}/plan/${last.planId}/csv`; $('btnCsv').classList.remove('hidden');
+    if (last.nextCursor && !tokens.length) $('btnNext').classList.remove('hidden');
+    renderAll();
+  } catch (e) { setStatus($('dryStatus'), e.message, 'err'); }
+  $('btnDry').disabled = false;
+}
+function logWarn(m) { const el = $('dryStatus'); el.innerHTML += `<div style="color:var(--warning)">${esc(m)}</div>`; }
+$('btnDry').onclick = () => runDry(null);
+$('btnNext').onclick = () => runDry(state.nextCursor);
+
+function renderAll() {
+  const s = { products: state.plans.length, ready: 0, noChange: 0, skipped: 0, notInCfs: 0, uploads: 0, reuse: 0, excluded: 0, detach: 0, manual: 0, unsure: 0, replacedSameName: 0 };
+  for (const p of state.plans) {
+    if (!p.ok) s.skipped++; else if (p.noChange) s.noChange++; else s.ready++;
+    if (p.notInCfs) s.notInCfs++;
+    s.uploads += p.counts.upload; s.reuse += p.counts.reuse; s.excluded += p.counts.excluded; s.detach += p.counts.detach; s.manual += p.counts.manual;
+    s.unsure += p.counts.unsure || 0; s.replacedSameName += p.counts.replacedSameName || 0;
+  }
+  $('summary').innerHTML = `<div class="stats">${[
+    ['Products', s.products], ['Ready', s.ready], ['No change', s.noChange], ['Skipped', s.skipped], ["Couldn't find in CFS", s.notInCfs],
+    ['New uploads', s.uploads], ['Reused', s.reuse], ['Excluded (CFSUD)', s.excluded], ['To detach', s.detach], ['Manual photos kept', s.manual],
+    ['Same name, different picture', s.replacedSameName], ['Please check', s.unsure],
+  ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('')}</div>
+  <div class="row"><button class="btn secondary" id="selAll">Select all ready</button><button class="btn secondary" id="selNone">Select none</button>
+    ${s.notInCfs ? `<label class="chk"><input type="checkbox" id="onlyMissing"> Show only products not found in CFS (${s.notInCfs})</label>` : ''}</div>`;
+  $('selAll').onclick = () => bulkInclude(true); $('selNone').onclick = () => bulkInclude(false);
+  if ($('onlyMissing')) $('onlyMissing').onchange = e => document.querySelectorAll('.prod').forEach(el => {
+    const p = state.plans.find(x => x.productId === el.dataset.pid); el.classList.toggle('hidden', e.target.checked && !p.notInCfs); });
+  $('products').innerHTML = state.plans.map(renderProduct).join('');
+  renderApplyList();
+  bindProducts(); updateSelection();
+}
+
+// Step 3 review: the same cards (same controls) for the selected products only
+function renderApplyList() {
+  const sel = state.plans.filter(p => p.include && p.ok && !p.noChange);
+  $('applyList').innerHTML = sel.map(renderProduct).join('');
+  const t = sel.reduce((a, p) => { a.u += p.counts.upload; a.d += p.counts.detach; a.r += p.counts.reuse; a.q += p.counts.unsure || 0; return a; }, { u: 0, d: 0, r: 0, q: 0 });
+  $('apReviewHelp').textContent = sel.length
+    ? `${sel.length} product(s) will be changed: ${t.u} new upload(s), ${t.r} reused, ${t.d} detached${t.q ? `, ${t.q} still marked "please check"` : ''}. Open a product to change its featured photo, removals or "please check" choices — or untick it to leave it out. These changes don't need a new backup.`
+    : 'No products selected yet — tick products in the dry run (or here) first.';
+  $('btnApplyCsv').classList.toggle('hidden', !sel.length);
+  if (state.planId) $('btnApplyCsv').href = `${API}/plan/${state.planId}/csv?only=selected`;
+}
+
+const MATCH_LABEL = { 'record': '✓ app record', 'name+picture': '✓ name + picture', 'picture': '✓ same picture',
+  'name-only': '⚠ name only' };
+function matchLabel(o) {
+  if (o.action === 'upload') return o.replaces ? 'replaces old photo' : 'new from CFS';
+  if (o.action === 'keep') return o.kind === 'manual' ? 'manual photo' : o.kind === 'unsure' ? 'kept (please check)' : 'kept';
+  return MATCH_LABEL[o.matchedBy] || (o.matchedBy ? '✓ ' + o.matchedBy : '');
+}
+
+function renderProduct(p) {
+  const c = p.counts;
+  const chips = p.notInCfs === 'all' ? `<span class="chip bad">Couldn't find in CFS</span>`
+    : p.notInCfs === 'some' ? `<span class="chip bad">${p.notInCfsVariants.length} of ${p.variantAssign.length + p.notInCfsVariants.length} variants not found in CFS</span><span class="chip bad">Skipped</span>`
+    : !p.ok ? `<span class="chip bad">Skipped</span>` : p.noChange ? `<span class="chip ok">No change</span>` : [
+    `<span class="chip">${c.current} → ${c.proposed} photos</span>`,
+    c.upload ? `<span class="chip up">${c.upload} upload</span>` : '',
+    c.excluded ? `<span class="chip ex">${c.excluded} excluded</span>` : '',
+    c.detach ? `<span class="chip det">${c.detach} detach</span>` : '',
+    c.altFix ? `<span class="chip">${c.altFix} alt fix</span>` : '',
+    c.variantChanges ? `<span class="chip">${c.variantChanges} variant photos</span>` : '',
+    c.manual ? `<span class="chip">${c.manual} manual kept</span>` : '',
+    c.replacedSameName ? `<span class="chip det">${c.replacedSameName} same name, new picture</span>` : '',
+    c.unsure ? `<span class="chip ex">${c.unsure} please check</span>` : '',
+  ].join('');
+  const msgs = [...p.errors.map(e => `<li class="e">${esc(e)}</li>`), ...p.warnings.map(w => `<li class="w">${esc(w)}</li>`)].join('');
+  const cur = p.current.map(m => `<div class="th ${m.featured ? 'feat' : ''}"><img loading="lazy" src="${esc(thumb(m.url))}"><span class="pos">${m.position}</span>
+    <div class="lbl" title="${esc(fname(m.url))}">${m.featured ? '★ ' : ''}${esc(m.alt || '—')}</div></div>`).join('');
+  const featKey = p.proposed[0] ? (p.proposed[0].mediaId || p.proposed[0].key) : null;
+  const prop = p.proposed.map(o => {
+    const id = o.mediaId || o.key; const isF = id === featKey;
+    return `<div class="th ${isF ? 'feat' : ''}"><img loading="lazy" src="${esc(thumb(o.src || o.url))}"><span class="badge ${o.action}">${o.action.toUpperCase()}</span><span class="pos">${o.position}</span>
+      <div class="lbl" title="${esc(fname(o.src || o.url))}">${esc(o.group || o.alt || '—')}${o.altFix ? ' (alt fixed)' : ''}</div>
+      <div class="lbl" title="${esc((o.matchedBy ? 'How it was matched: ' + o.matchedBy : '') + (o.visual ? ' — ' + o.visual : ''))}" style="color:${o.matchedBy === 'name-only' ? 'var(--warning)' : 'var(--text-muted)'}">${esc(matchLabel(o))}</div>
+      ${p.ok ? `<button data-feat="${esc(id)}" data-pid="${esc(p.productId)}">${isF ? '★ Featured' : 'Make featured'}</button>` : ''}
+      ${p.ok && /unsure/.test(o.matchedBy || '') ? `<button data-reuse="${esc(o.mediaId)}" data-val="0" data-pid="${esc(p.productId)}">Use CFS photo instead</button>` : ''}</div>`;
+  }).join('');
+  const excl = p.groups.flatMap(g => g.excluded.map(x => `<tr><td>${esc(g.label)}</td><td>${esc(g.vSKU)}</td><td class="url">${esc(x.url)}</td><td>${esc(x.reason)}</td></tr>`)).join('');
+  const img = (u, cap) => `<div style="display:inline-block;text-align:center;font-size:10px;color:var(--text-muted);margin-right:6px"><img src="${esc(thumb(u))}" style="width:110px;height:82px;object-fit:cover;border-radius:4px;display:block">${cap}</div>`;
+  const others = p.others.filter(o => o.kind !== 'other-media').map(o => `<tr${o.kind === 'unsure' ? ' style="background:rgba(245,158,11,.06)"' : ''}>
+    <td><label class="chk"><input type="checkbox" data-detach="${esc(o.mediaId)}" data-pid="${esc(p.productId)}" ${o.detach ? 'checked' : ''} ${p.ok ? '' : 'disabled'}> detach</label>
+      ${o.kind === 'unsure' && p.ok ? `<br><button class="btn secondary" style="padding:3px 8px;font-size:11px;margin-top:6px" data-reuse="${esc(o.mediaId)}" data-val="1" data-pid="${esc(p.productId)}">Reuse this one instead</button>` : ''}</td>
+    <td style="white-space:nowrap">${o.compareWith ? img(o.url, 'On Shopify now') + img(o.compareWith, 'CFS today') : img(o.url, '')}</td><td>${esc(o.alt)}</td><td>${esc(o.reason)}</td></tr>`).join('');
+  const vars = p.variantAssign.map(v => `<tr><td>${esc(v.sku)}</td><td>${esc(v.title)}</td><td>${v.change ? '<span style="color:var(--info)">will change</span>' : 'unchanged'}</td></tr>`).join('');
+  return `<div class="prod ${p.ok ? '' : 'bad'}" data-pid="${esc(p.productId)}">
+    <div class="prod-head">
+      <input type="checkbox" class="inc" data-pid="${esc(p.productId)}" ${p.include ? 'checked' : ''} ${p.ok && !p.noChange ? '' : 'disabled'} onclick="event.stopPropagation()">
+      <span class="t">${esc(p.title)}</span><span class="h">${esc(p.handle)} · ${esc(p.status)}</span>
+      <div class="chips">${chips}</div>
+    </div>
+    <div class="prod-body">
+      ${msgs ? `<ul class="msgs">${msgs}</ul>` : ''}
+      <div class="sub">Now on Shopify (${c.current})</div><div class="strip">${cur || '<span class="help">No photos</span>'}</div>
+      <div class="sub">Proposed (${c.proposed})</div><div class="strip">${prop || '<span class="help">—</span>'}</div>
+      ${excl ? `<div class="sub">Excluded by CFSUD rule</div><table><tr><th>Colour</th><th>vSKU</th><th>URL</th><th>Reason</th></tr>${excl}</table>` : ''}
+      ${others ? `<div class="sub">Photos not matched to CFS</div><table><tr><th></th><th></th><th>Alt</th><th>Why</th></tr>${others}</table>` : ''}
+      <div class="sub">Variant photos</div><table><tr><th>SKU</th><th>Variant</th><th>Main photo</th></tr>${vars}</table>
+    </div></div>`;
+}
+
+function bindProducts() {
+  document.querySelectorAll('.prod-head').forEach(h => h.onclick = () => h.parentElement.classList.toggle('open'));
+  document.querySelectorAll('input.inc').forEach(cb => cb.onchange = () => choose(cb.dataset.pid, { include: cb.checked }));
+  document.querySelectorAll('button[data-feat]').forEach(b => b.onclick = () => choose(b.dataset.pid, { featured: b.dataset.feat }));
+  document.querySelectorAll('input[data-detach]').forEach(cb => cb.onchange = () => choose(cb.dataset.pid, { detach: { [cb.dataset.detach]: cb.checked } }));
+  document.querySelectorAll('button[data-reuse]').forEach(b => b.onclick = e => { e.stopPropagation(); choose(b.dataset.pid, { reuseUnsure: { [b.dataset.reuse]: b.dataset.val === '1' } }); });
+}
+
+async function choose(pid, body) {
+  try {
+    const r = await fetch(`${API}/plan/${state.planId}/choices`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ productId: pid, ...body }) });
+    const j = await r.json(); if (j.error) throw new Error(j.error);
+    const i = state.plans.findIndex(p => p.productId === pid);
+    state.plans[i] = j.plan;
+    // Re-draw this product in Step 1 (keep it open if it was) …
+    const el = $('products').querySelector(`.prod[data-pid="${CSS.escape(pid)}"]`);
+    if (el) { const wasOpen = el.classList.contains('open'); el.outerHTML = renderProduct(j.plan);
+      if (wasOpen) $('products').querySelector(`.prod[data-pid="${CSS.escape(pid)}"]`).classList.add('open'); }
+    // … and in the Step 3 review list
+    const openInApply = [...$('applyList').querySelectorAll('.prod.open')].map(x => x.dataset.pid);
+    renderApplyList();
+    for (const id of openInApply) $('applyList').querySelector(`.prod[data-pid="${CSS.escape(id)}"]`)?.classList.add('open');
+    bindProducts(); updateSelection();
+    // Featured / removal / "please check" choices don't need a new backup (it stores today's photos).
+    // Only adding a product that isn't in the backup does — updateSelection() handles that.
+  } catch (e) { alert(e.message); }
+}
+async function bulkInclude(v) {
+  for (const p of state.plans) if (p.ok && !p.noChange && p.include !== v) await choose(p.productId, { include: v });
+}
+function selectedIds() { return state.plans.filter(p => p.include && p.ok && !p.noChange).map(p => p.productId); }
+function updateSelection() {
+  const ids = selectedIds();
+  $('selCount').textContent = `${ids.length} product(s) selected`;
+  $('btnBackup').disabled = !ids.length || ids.length > 100;
+  const covered = state.backup?.confirmed && ids.length && ids.every(id => state.backup.productIds.includes(id));
+  $('btnApply').disabled = !covered;
+  if (state.backup && !covered && ids.length) setStatus($('bkStatus'), 'Selection is not fully covered by the backup — create a new one', 'err');
+}
+function invalidateBackup(msg) {
+  if (!state.backup) return; state.backup = null; $('btnApply').disabled = true;
+  if (msg) setStatus($('bkStatus'), msg, 'err');
+}
+
+// ── 2. Backup ───────────────────────────────────────────────────────────────
+$('btnBackup').onclick = async () => {
+  const ids = selectedIds(); $('btnBackup').disabled = true; state.backup = null;
+  try {
+    const last = await stream(API + '/backup', { planId: state.planId, productIds: ids }, ev => {
+      if (ev.type === 'progress') { setBar('bkBar', ev.done, ev.total); setStatus($('bkStatus'), ev.message); }
+      if (ev.type === 'status') setStatus($('bkStatus'), ev.message);
+      if (ev.type === 'warn') setStatus($('bkStatus'), ev.message, 'err');
+    });
+    if (!last || last.type !== 'done') throw new Error(last?.message || 'Backup failed');
+    setStatus($('bkStatus'), `Downloading zip (${fmtBytes(last.bytes)})…`);
+    const res = await fetch(`${API}/backup/${last.backupId}/download`);
+    if (!res.ok) throw new Error('Download failed');
+    const blob = await res.blob();
+    const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()))).map(b => b.toString(16).padStart(2, '0')).join('');
+    const c = await (await fetch(`${API}/backup/${last.backupId}/confirm`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sha256: hash }) })).json();
+    if (c.error) throw new Error(c.error);
+    const name = (res.headers.get('content-disposition') || '').match(/filename="?([^"]+)"?/)?.[1] || `${last.backupId}.zip`;
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    state.backup = { id: last.backupId, confirmed: true, productIds: ids };
+    $('bkBar').classList.add('hidden');
+    setStatus($('bkStatus'), `✓ Backup verified and saved as ${name} — ${last.products} products, ${last.photos} photos, ${fmtBytes(last.bytes)}. Keep it 30+ days.`, 'ok');
+  } catch (e) { setStatus($('bkStatus'), e.message, 'err'); }
+  $('btnBackup').disabled = false; updateSelection();
+};
+
+// ── 3. Apply ────────────────────────────────────────────────────────────────
+async function runApply(resumeJobId) {
+  const ids = resumeJobId ? state.backup?.productIds || selectedIds() : selectedIds();
+  if (!resumeJobId && !confirm(`Apply image changes to ${ids.length} product(s) on the LIVE store?`)) return;
+  $('btnApply').disabled = true; $('btnResume').classList.add('hidden'); $('btnPause').classList.remove('hidden');
+  const log = $('apLog');
+  try {
+    const last = await stream(API + '/apply', { planId: state.planId, backupId: state.backup?.id, productIds: ids, jobId: resumeJobId }, ev => {
+      if (ev.type === 'job') { state.jobId = ev.jobId; logLine(log, `Job ${ev.jobId}`);
+        $('btnResults').href = `${API}/jobs/${ev.jobId}/csv`; $('btnResults').classList.remove('hidden'); }
+      if (ev.type === 'status') setStatus($('apStatus'), ev.message);
+      if (ev.type === 'progress') { setBar('apBar', ev.done, ev.total); setStatus($('apStatus'), ev.message); }
+      if (ev.type === 'log') logLine(log, '  ' + ev.message);
+      if (ev.type === 'product') logLine(log, `${ev.handle}: ${ev.state.toUpperCase()}${ev.reason ? ' — ' + ev.reason : ''}${ev.error ? ' — ' + ev.error : ''}`,
+        ev.state === 'done' ? 'ok' : ev.state === 'failed' ? 'e' : 'w');
+    });
+    if (!last || last.type === 'error') throw new Error(last?.message || 'Apply failed');
+    setBar('apBar', 1, 1);
+    const st = Object.entries(last.states || {}).map(([k, v]) => `${v} ${k}`).join(', ');
+    setStatus($('apStatus'), `Job ${last.status}: ${st}`, last.status === 'finished' ? 'ok' : '');
+    if (last.status === 'paused' || (last.states && last.states.failed)) $('btnResume').classList.remove('hidden');
+  } catch (e) { setStatus($('apStatus'), e.message, 'err'); if (state.jobId) $('btnResume').classList.remove('hidden'); }
+  $('btnPause').classList.add('hidden'); updateSelection();
+}
+$('btnApply').onclick = () => runApply(null);
+$('btnResume').onclick = () => runApply(state.jobId);
+$('btnPause').onclick = async () => { await fetch(API + '/pause', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jobId: state.jobId }) }); setStatus($('apStatus'), 'Pausing after the current product…'); };
+
+// ── 4. Restore ──────────────────────────────────────────────────────────────
+$('btnUpload').onclick = () => {
+  const f = $('zipFile').files[0]; if (!f) return setStatus($('rsStatus'), 'Choose the backup zip first', 'err');
+  const fd = new FormData(); fd.append('zip', f);
+  const xhr = new XMLHttpRequest(); xhr.open('POST', API + '/restore/upload');
+  xhr.upload.onprogress = e => e.lengthComputable && setStatus($('rsStatus'), `Uploading ${Math.round(100 * e.loaded / e.total)}%…`);
+  xhr.onload = () => {
+    let j = {}; try { j = JSON.parse(xhr.responseText); } catch (_) { j = { error: xhr.responseText.slice(0, 200) }; }
+    if (j.error) return setStatus($('rsStatus'), j.error, 'err');
+    state.restoreId = j.restoreId;
+    setStatus($('rsStatus'), `Zip OK — backup ${j.backupId} from ${new Date(j.createdAt).toLocaleString()}, ${j.photos} photos checked.`, 'ok');
+    $('rsList').innerHTML = `<table><tr><th><input type="checkbox" id="rsAll"></th><th>Product</th><th>Handle</th><th>Photos</th></tr>${j.products.map(p =>
+      `<tr><td><input type="checkbox" class="rsp" value="${esc(p.productId)}"></td><td>${esc(p.title)}</td><td>${esc(p.handle)}</td><td>${p.photos}</td></tr>`).join('')}</table>`;
+    $('rsAll').onchange = e => document.querySelectorAll('.rsp').forEach(c => c.checked = e.target.checked);
+    $('rsActions').classList.remove('hidden');
+  };
+  xhr.onerror = () => setStatus($('rsStatus'), 'Upload failed', 'err');
+  xhr.send(fd);
+};
+$('btnRestore').onclick = async () => {
+  const ids = [...document.querySelectorAll('.rsp:checked')].map(c => c.value);
+  if (!ids.length) return setStatus($('rsStatus'), 'Pick at least one product', 'err');
+  if (!confirm(`Restore ${ids.length} product(s) on the LIVE store to the backup?`)) return;
+  $('btnRestore').disabled = true; const log = $('rsLog');
+  try {
+    const last = await stream(API + '/restore', { restoreId: state.restoreId, productIds: ids, force: $('rsForce').checked }, ev => {
+      if (ev.type === 'progress') setStatus($('rsStatus'), ev.message);
+      if (ev.type === 'log') logLine(log, '  ' + ev.message);
+      if (ev.type === 'product') logLine(log, `${ev.handle}: ${ev.state.toUpperCase()}${ev.reason ? ' — ' + ev.reason : ''}${ev.error ? ' — ' + ev.error : ''}`,
+        ev.state === 'done' ? 'ok' : ev.state === 'failed' ? 'e' : 'w');
+    });
+    if (!last || last.type === 'error') throw new Error(last?.message || 'Restore failed');
+    setStatus($('rsStatus'), `Restore ${last.status}`, 'ok');
+  } catch (e) { setStatus($('rsStatus'), e.message, 'err'); }
+  $('btnRestore').disabled = false;
+};
+
+// ── 5. Clean-up ─────────────────────────────────────────────────────────────
+$('btnScan').onclick = async () => {
+  $('btnScan').disabled = true; $('clList').innerHTML = '';
+  try {
+    const last = await stream(API + '/cleanup/scan', {}, ev => { if (ev.type === 'progress') setStatus($('clStatus'), ev.message); });
+    if (!last || last.type === 'error') throw new Error(last?.message || 'Scan failed');
+    const items = last.items;
+    const n = items.filter(i => i.deletable).length;
+    setStatus($('clStatus'), `${items.length} detached photo(s) found, ${n} can be deleted now.`, 'ok');
+    if (!items.length) return;
+    $('clList').innerHTML = `<table><tr><th></th><th></th><th>Product</th><th>Detached</th><th>Why detached</th><th>Status</th></tr>${items.map(i => `<tr>
+      <td><input type="checkbox" class="clc" data-pid="${esc(i.productId)}" data-mid="${esc(i.mediaId)}" ${i.deletable ? '' : 'disabled'}></td>
+      <td>${i.preview ? `<img src="${esc(thumb(i.preview))}" style="width:60px;height:45px;object-fit:cover;border-radius:4px">` : ''}</td>
+      <td>${esc(i.handle)}</td><td>${esc(new Date(i.at).toLocaleDateString())}</td><td>${esc(i.reason)}</td>
+      <td>${i.deletable ? 'can delete' : !i.exists ? 'already gone' : i.shared ? 'in use — protected' : 'less than 7 days'}</td></tr>`).join('')}</table>
+      <div class="row" style="margin-top:10px"><button class="btn danger" id="btnDel">Permanently delete selected</button></div>`;
+    $('btnDel').onclick = async () => {
+      const items2 = [...document.querySelectorAll('.clc:checked')].map(c => ({ productId: c.dataset.pid, mediaId: c.dataset.mid }));
+      if (!items2.length) return;
+      if (!confirm(`Permanently delete ${items2.length} photo(s) from Shopify Files? This cannot be undone (the backup zip still has them).`)) return;
+      const r = await (await fetch(API + '/cleanup/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items: items2 }) })).json();
+      if (r.error) return setStatus($('clStatus'), r.error, 'err');
+      setStatus($('clStatus'), `Deleted ${r.deleted.length}, refused ${r.refused.length}${r.refused.length ? ' (' + r.refused.map(x => x.reason).join('; ') + ')' : ''}`, 'ok');
+    };
+  } catch (e) { setStatus($('clStatus'), e.message, 'err'); }
+  $('btnScan').disabled = false;
+};
+</script>
+</body>
+</html>
