@@ -301,17 +301,18 @@ async function edgeWhiteness(buf) {
 // Shopify CDN can resize on the fly — a 600px copy is plenty for the visual check.
 function shopifyThumb(url) { return url ? url + (url.includes('?') ? '&' : '?') + 'width=600' : url; }
 
-async function hashUrls(urls, cache, onProgress) {
+async function hashUrls(urls, cache, onProgress, check) {
   const todo = [...new Set(urls)].filter(u => u && !cache.has(u));
   let done = 0;
   await mapLimit(todo, DOWNLOAD_CONCURRENCY, async u => {
+    if (check) check();
     try { const r = await downloadImage(u); cache.set(u, { sha: r.sha, bytes: r.bytes, thumb: r.thumb, edgeWhite: r.edgeWhite, w: r.w, h: r.h }); }
     catch (e) { cache.set(u, { error: e.message }); }
     done++; if (onProgress && done % 10 === 0) onProgress(done, todo.length);
   });
 }
 
-async function fingerprintShopify(products, session, send) {
+async function fingerprintShopify(products, session, send, check) {
   const need = [];
   for (const p of products) for (const m of p.media?.nodes || []) {
     if (m.mediaContentType !== 'IMAGE' || session.shopHash[m.id]) continue;
@@ -320,7 +321,7 @@ async function fingerprintShopify(products, session, send) {
   if (!need.length) return;
   if (send) send({ type: 'status', message: `Checking ${need.length} current Shopify photos by picture…` });
   const tmp = new Map();
-  await hashUrls(need.map(x => x[1]), tmp, send ? (d, t) => send({ type: 'progress', phase: 'shopify-images', done: d, total: t }) : null);
+  await hashUrls(need.map(x => x[1]), tmp, send ? (d, t) => send({ type: 'progress', phase: 'shopify-images', done: d, total: t }) : null, check);
   for (const [mid, url] of need) {
     const h = tmp.get(url);
     if (h && !h.error) session.shopHash[mid] = { sha: h.sha, thumb: h.thumb, w: h.w, h: h.h };
@@ -377,6 +378,16 @@ async function resolveProducts(client, tokens, send) {
   }
   return out;
 }
+
+// ── Stop / pause ─────────────────────────────────────────────────────────────
+// Every long step sends { type: 'run', runId } first; the page's Stop button posts
+// that id to /stop. Read-only steps (dry run, backup, clean-up scan) stop at once;
+// apply/restore finish the product they are on, then stop (never half a product).
+const stopRequests = new Set();
+class StoppedError extends Error { constructor() { super('Stopped'); this.stopped = true; } }
+function startRun(send, id = newId('run')) { send({ type: 'run', runId: id }); return id; }
+const stopCheck = runId => () => { if (stopRequests.has(runId)) throw new StoppedError(); };
+function endRun(runId) { setTimeout(() => stopRequests.delete(runId), 60000); }
 
 // ── Jobs (apply / restore) ───────────────────────────────────────────────────
 const pauseRequests = new Set();
@@ -439,6 +450,8 @@ router.post('/dry-run', async (req, res) => {
   try { client = graphqlClient(); } catch (e) { return res.status(400).json({ error: e.message }); }
   const sse = openSse(res);
   const { send } = sse;
+  const runId = startRun(send);
+  const check = stopCheck(runId);
   try {
     const tokens = (req.body?.tokens || []).map(s => String(s).trim()).filter(Boolean);
     const limit = Math.max(1, Math.min(MAX_BATCH, parseInt(req.body?.limit, 10) || 25));
@@ -458,6 +471,7 @@ router.post('/dry-run', async (req, res) => {
       const q = `vendor:"Urban Deco"${includeDrafts ? '' : ' status:active'}`;
       let after = req.body?.after || null;
       while (products.length < limit) {
+        check();
         const d = await gql(client, Q_PRODUCTS, { first: Math.min(PAGE_SIZE, limit - products.length), after, query: q });
         const page = d.products;
         // exact vendor match (search can be loose)
@@ -481,7 +495,7 @@ router.post('/dry-run', async (req, res) => {
     }
     const cfsHash = new Map();
     send({ type: 'status', message: `Checking ${new Set(cfsUrls).size} CFS images…` });
-    await hashUrls(cfsUrls, cfsHash, (d, t) => send({ type: 'progress', phase: 'cfs-images', done: d, total: t }));
+    await hashUrls(cfsUrls, cfsHash, (d, t) => send({ type: 'progress', phase: 'cfs-images', done: d, total: t }), check);
 
     // 3. Session + Shopify photo fingerprints
     const session = {
@@ -493,7 +507,7 @@ router.post('/dry-run', async (req, res) => {
     for (const p of products) session.raw[p.id] = p;
 
     // Fingerprint every current Shopify photo so name matches can be checked by picture
-    await fingerprintShopify(products, session, send);
+    await fingerprintShopify(products, session, send, check);
 
     // 4. Final plans
     const out = products.map(p => planFor(session, p.id, feed));
@@ -502,8 +516,10 @@ router.post('/dry-run', async (req, res) => {
     send({ type: 'done', planId: session.id, nextCursor, replaceMode: session.replaceMode,
       skipWhiteBg: session.skipWhiteBg, skipNonSquare: session.skipNonSquare, summary, plans: out });
   } catch (e) {
-    send({ type: 'error', message: e.message });
+    if (e.stopped) send({ type: 'stopped', message: 'Dry run stopped — nothing was changed' });
+    else send({ type: 'error', message: e.message });
   }
+  endRun(runId);
   sse.end();
 });
 
@@ -592,6 +608,9 @@ router.post('/backup', async (req, res) => {
   const { send } = sse;
   const backupId = newId('backup');
   const zipPath = path.join(DIRS.backups, `${backupId}.zip`);
+  const runId = startRun(send);
+  const check = stopCheck(runId);
+  let archive = null;
   try {
     const s = loadPlan(req.body?.planId);
     if (!s) throw new Error('Dry run not found — run it again');
@@ -600,7 +619,7 @@ router.post('/backup', async (req, res) => {
     if (productIds.length > MAX_BATCH) throw new Error(`Max ${MAX_BATCH} products per batch`);
 
     const output = fs.createWriteStream(zipPath);
-    const archive = archiver('zip', { zlib: { level: 0 } }); // photos are already compressed
+    archive = archiver('zip', { zlib: { level: 0 } }); // photos are already compressed
     const closed = new Promise((resolve, reject) => { output.on('close', resolve); archive.on('error', reject); output.on('error', reject); });
     archive.pipe(output);
 
@@ -617,6 +636,7 @@ router.post('/backup', async (req, res) => {
       const media = [];
       const nodes = p.media?.nodes || [];
       for (let i = 0; i < nodes.length; i++) {
+        check();
         const m = nodes[i];
         const entry = { id: m.id, position: i + 1, alt: m.alt || '', type: m.mediaContentType,
           url: m.image?.url || m.originalSource?.url || null };
@@ -662,9 +682,12 @@ router.post('/backup', async (req, res) => {
     writeJson(path.join(DIRS.backups, `${backupId}.json`), meta);
     send({ type: 'done', backupId, bytes, zipSha, products: meta.products.length, photos: verify.photos });
   } catch (e) {
+    if (archive) { try { archive.abort(); } catch (_) {} }
     try { fs.unlinkSync(zipPath); } catch (_) {}
-    send({ type: 'error', message: e.message });
+    if (e.stopped) send({ type: 'stopped', message: 'Backup stopped — no zip was made and nothing was changed' });
+    else send({ type: 'error', message: e.message });
   }
+  endRun(runId);
   sse.end();
 });
 
@@ -747,6 +770,15 @@ router.post('/pause', (req, res) => {
   res.json({ ok: true, jobId: id || null });
 });
 
+// POST /stop  body: { runId } — works for every step
+router.post('/stop', (req, res) => {
+  const id = String(req.body?.runId || '');
+  if (!id) return res.status(400).json({ error: 'runId missing' });
+  stopRequests.add(id);
+  pauseRequests.add(id);            // apply/restore: runId is the job id
+  res.json({ ok: true, runId: id });
+});
+
 router.get('/jobs/:id/csv', (req, res) => {
   if (!safeId(req.params.id)) return res.status(400).send('Bad id');
   const j = readJson(jobFile(req.params.id));
@@ -801,9 +833,11 @@ router.post('/apply', async (req, res) => {
       job = { id: newId('job'), kind: 'apply', planId: s.id, backupId: meta.id, createdAt: new Date().toISOString(),
         status: 'running', products: Object.fromEntries(productIds.map(id => [id, { handle: s.raw[id].handle, state: 'waiting' }])) };
     }
+    stopRequests.delete(job.id); pauseRequests.delete(job.id);
     activeRun = { kind: 'apply', jobId: job.id };
     saveJob(job);
     send({ type: 'job', jobId: job.id });
+    startRun(send, job.id);
 
     send({ type: 'status', message: 'Loading CFS image feed…' });
     const feed = await getFeed(); // throws on empty/failed feed → nothing touched
@@ -1065,6 +1099,7 @@ router.post('/restore', async (req, res) => {
     activeRun = { kind: 'restore', jobId: job.id };   // also blocks image sync while restoring
     saveJob(job);
     send({ type: 'job', jobId: job.id });
+    startRun(send, job.id);
 
     let i = 0;
     for (const item of items) {
@@ -1197,12 +1232,15 @@ router.post('/cleanup/scan', async (req, res) => {
   try { client = graphqlClient(); } catch (e) { return res.status(400).json({ error: e.message }); }
   const sse = openSse(res);
   const { send } = sse;
+  const runId = startRun(send);
+  const check = stopCheck(runId);
   try {
     const cutoff = Date.now() - DETACH_KEEP_DAYS * 86400000;
     const candidates = [];
     const inUse = new Set(); // media ids any product's record still uses
     let after = null, scanned = 0;
     do {
+      check();
       const d = await gql(client, Q_RECORDS_PAGE, { first: 100, after });
       for (const p of d.products.nodes) {
         scanned++;
@@ -1233,7 +1271,11 @@ router.post('/cleanup/scan', async (req, res) => {
       deletable: c.old && exists.has(c.mediaId) && !inUse.has(c.mediaId),
     }));
     send({ type: 'done', scanned, items });
-  } catch (e) { send({ type: 'error', message: e.message }); }
+  } catch (e) {
+    if (e.stopped) send({ type: 'stopped', message: 'Scan stopped — nothing was deleted' });
+    else send({ type: 'error', message: e.message });
+  }
+  endRun(runId);
   sse.end();
 });
 

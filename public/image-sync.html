@@ -103,6 +103,7 @@
       <label class="chk" title="Skip CFS gallery photos on a plain white background (cut-out product shots). The main image is never skipped."><input type="checkbox" id="skipWhiteBg" checked> Skip white-background photos</label>
       <label class="chk" title="Skip CFS gallery photos that are not square. The main image is never skipped."><input type="checkbox" id="skipNonSquare" checked> Skip non-square photos</label>
       <button class="btn" id="btnDry">Run dry run</button>
+      <button class="btn danger hidden" id="btnDryStop">■ Stop</button>
       <button class="btn secondary hidden" id="btnNext">Next batch →</button>
       <a class="btn secondary hidden" id="btnCsv" href="#">Download preview CSV</a>
     </div>
@@ -118,6 +119,7 @@
     <p class="help">Downloads a zip of the selected products' current photos plus a list of their order, alt text, featured photo and variant photos. Apply stays locked until the zip has downloaded and its checksum matches. Keep the zip for at least 30 days.</p>
     <div class="row">
       <button class="btn" id="btnBackup" disabled>Create &amp; download backup</button>
+      <button class="btn danger hidden" id="btnBkStop">■ Stop</button>
       <span id="selCount" class="help" style="margin:0"></span>
     </div>
     <div class="bar hidden" id="bkBar"><div></div></div>
@@ -136,7 +138,7 @@
     <div id="applyList"></div>
     <div class="row" style="margin-top:14px">
       <button class="btn success" id="btnApply" disabled>Apply to selected</button>
-      <button class="btn secondary hidden" id="btnPause">Pause after current product</button>
+      <button class="btn danger hidden" id="btnPause" title="Finishes the product it is working on (never leaves a product half-done), then stops. Use Resume to carry on.">■ Stop after current product</button>
       <button class="btn secondary hidden" id="btnResume">Resume job</button>
       <a class="btn secondary hidden" id="btnResults" href="#">Download results (CSV)</a>
     </div>
@@ -158,6 +160,7 @@
     <div class="row hidden" id="rsActions" style="margin-top:10px">
       <label class="chk"><input type="checkbox" id="rsForce"> Overwrite edits made after the sync</label>
       <button class="btn danger" id="btnRestore">Restore selected</button>
+      <button class="btn secondary hidden" id="btnRsStop" title="Finishes the product it is restoring, then stops.">■ Stop after current product</button>
     </div>
     <div class="log hidden" id="rsLog"></div>
   </div>
@@ -166,7 +169,8 @@
   <div class="card">
     <div class="card-title"><span class="num">5</span> Clean-up (after results are accepted)</div>
     <p class="help">Lists photos the app detached. Only photos detached 7+ days ago, still in Shopify Files and not used by any product can be permanently deleted.</p>
-    <button class="btn secondary" id="btnScan">Scan detached photos</button>
+    <div class="row"><button class="btn secondary" id="btnScan">Scan detached photos</button>
+    <button class="btn danger hidden" id="btnClStop">■ Stop</button></div>
     <div class="status" id="clStatus"></div>
     <div id="clList"></div>
   </div>
@@ -192,9 +196,24 @@ const beforeUnload = e => { e.preventDefault(); e.returnValue = ''; };
 function jobStart() { if (running++ === 0) { pingTimer = setInterval(() => fetch('/health').catch(() => {}), 240000); window.addEventListener('beforeunload', beforeUnload); } }
 function jobEnd() { if (--running === 0) { clearInterval(pingTimer); window.removeEventListener('beforeunload', beforeUnload); } }
 
-async function stream(url, body, onEvent) {
+// stopBtn: the step's Stop button — shown while the step runs, sends /stop with the run id
+async function stream(url, body, onEvent, stopBtn) {
   jobStart();
-  try { return await streamInner(url, body, onEvent); } finally { jobEnd(); }
+  const btn = stopBtn ? $(stopBtn) : null;
+  const wrapped = ev => {
+    if (ev.type === 'run' && btn) {
+      btn.classList.remove('hidden'); btn.disabled = false;
+      btn.dataset.label = btn.dataset.label || btn.textContent;
+      btn.textContent = btn.dataset.label;
+      btn.onclick = async () => {
+        btn.disabled = true; btn.textContent = 'Stopping…';
+        await fetch(API + '/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId: ev.runId }) }).catch(() => {});
+      };
+    }
+    onEvent(ev);
+  };
+  try { return await streamInner(url, body, wrapped); }
+  finally { jobEnd(); if (btn) { btn.classList.add('hidden'); if (btn.dataset.label) btn.textContent = btn.dataset.label; } }
 }
 async function streamInner(url, body, onEvent) {
   const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
@@ -242,7 +261,8 @@ async function runDry(after) {
         if (ev.type === 'status') setStatus($('dryStatus'), ev.message);
         if (ev.type === 'progress') { setBar('dryBar', ev.done, ev.total); setStatus($('dryStatus'), `Checking CFS images ${ev.done}/${ev.total}…`); }
         if (ev.type === 'warn') logWarn(ev.message);
-      });
+      }, 'btnDryStop');
+    if (last?.type === 'stopped') { $('dryBar').classList.add('hidden'); setStatus($('dryStatus'), last.message); $('btnDry').disabled = false; return; }
     if (!last || last.type === 'error') throw new Error(last?.message || 'Dry run failed');
     state.planId = last.planId; state.nextCursor = last.nextCursor; state.plans = last.plans; state.replaceMode = !!last.replaceMode;
     state.skipWhiteBg = last.skipWhiteBg !== false; state.skipNonSquare = last.skipNonSquare !== false;
@@ -435,7 +455,8 @@ $('btnBackup').onclick = async () => {
       if (ev.type === 'progress') { setBar('bkBar', ev.done, ev.total); setStatus($('bkStatus'), ev.message); }
       if (ev.type === 'status') setStatus($('bkStatus'), ev.message);
       if (ev.type === 'warn') setStatus($('bkStatus'), ev.message, 'err');
-    });
+    }, 'btnBkStop');
+    if (last?.type === 'stopped') { $('bkBar').classList.add('hidden'); setStatus($('bkStatus'), last.message); $('btnBackup').disabled = false; updateSelection(); return; }
     if (!last || last.type !== 'done') throw new Error(last?.message || 'Backup failed');
     setStatus($('bkStatus'), `Downloading zip (${fmtBytes(last.bytes)})…`);
     const res = await fetch(`${API}/backup/${last.backupId}/download`);
@@ -457,7 +478,7 @@ $('btnBackup').onclick = async () => {
 async function runApply(resumeJobId) {
   const ids = resumeJobId ? state.backup?.productIds || selectedIds() : selectedIds();
   if (!resumeJobId && !confirm(`Apply image changes to ${ids.length} product(s) on the LIVE store?`)) return;
-  $('btnApply').disabled = true; $('btnResume').classList.add('hidden'); $('btnPause').classList.remove('hidden');
+  $('btnApply').disabled = true; $('btnResume').classList.add('hidden');
   const log = $('apLog');
   try {
     const last = await stream(API + '/apply', { planId: state.planId, backupId: state.backup?.id, productIds: ids, jobId: resumeJobId }, ev => {
@@ -468,18 +489,20 @@ async function runApply(resumeJobId) {
       if (ev.type === 'log') logLine(log, '  ' + ev.message);
       if (ev.type === 'product') logLine(log, `${ev.handle}: ${ev.state.toUpperCase()}${ev.reason ? ' — ' + ev.reason : ''}${ev.error ? ' — ' + ev.error : ''}`,
         ev.state === 'done' ? 'ok' : ev.state === 'failed' ? 'e' : 'w');
-    });
+      if (ev.type === 'run') setStatus($('apStatus'), 'Running — "Stop after current product" is safe to use at any time');
+    }, 'btnPause');
     if (!last || last.type === 'error') throw new Error(last?.message || 'Apply failed');
     setBar('apBar', 1, 1);
     const st = Object.entries(last.states || {}).map(([k, v]) => `${v} ${k}`).join(', ');
-    setStatus($('apStatus'), `Job ${last.status}: ${st}`, last.status === 'finished' ? 'ok' : '');
+    setStatus($('apStatus'), last.status === 'paused' ? `Stopped after the current product (${st}). Click "Resume job" to carry on — nothing is done twice.`
+      : `Job ${last.status}: ${st}`, last.status === 'finished' ? 'ok' : '');
     if (last.status === 'paused' || (last.states && last.states.failed)) $('btnResume').classList.remove('hidden');
   } catch (e) { setStatus($('apStatus'), e.message, 'err'); if (state.jobId) $('btnResume').classList.remove('hidden'); }
-  $('btnPause').classList.add('hidden'); updateSelection();
+  updateSelection();
 }
 $('btnApply').onclick = () => runApply(null);
 $('btnResume').onclick = () => runApply(state.jobId);
-$('btnPause').onclick = async () => { await fetch(API + '/pause', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jobId: state.jobId }) }); setStatus($('apStatus'), 'Pausing after the current product…'); };
+// (the Apply Stop button is wired up by stream() when the job starts)
 
 // ── 4. Restore ──────────────────────────────────────────────────────────────
 $('btnUpload').onclick = () => {
@@ -511,9 +534,9 @@ $('btnRestore').onclick = async () => {
       if (ev.type === 'log') logLine(log, '  ' + ev.message);
       if (ev.type === 'product') logLine(log, `${ev.handle}: ${ev.state.toUpperCase()}${ev.reason ? ' — ' + ev.reason : ''}${ev.error ? ' — ' + ev.error : ''}`,
         ev.state === 'done' ? 'ok' : ev.state === 'failed' ? 'e' : 'w');
-    });
+    }, 'btnRsStop');
     if (!last || last.type === 'error') throw new Error(last?.message || 'Restore failed');
-    setStatus($('rsStatus'), `Restore ${last.status}`, 'ok');
+    setStatus($('rsStatus'), last.status === 'paused' ? 'Restore stopped after the current product. Run Restore again for the rest.' : `Restore ${last.status}`, 'ok');
   } catch (e) { setStatus($('rsStatus'), e.message, 'err'); }
   $('btnRestore').disabled = false;
 };
@@ -522,7 +545,8 @@ $('btnRestore').onclick = async () => {
 $('btnScan').onclick = async () => {
   $('btnScan').disabled = true; $('clList').innerHTML = '';
   try {
-    const last = await stream(API + '/cleanup/scan', {}, ev => { if (ev.type === 'progress') setStatus($('clStatus'), ev.message); });
+    const last = await stream(API + '/cleanup/scan', {}, ev => { if (ev.type === 'progress') setStatus($('clStatus'), ev.message); }, 'btnClStop');
+    if (last?.type === 'stopped') { setStatus($('clStatus'), last.message); $('btnScan').disabled = false; return; }
     if (!last || last.type === 'error') throw new Error(last?.message || 'Scan failed');
     const items = last.items;
     const n = items.filter(i => i.deletable).length;
