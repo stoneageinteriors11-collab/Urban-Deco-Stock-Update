@@ -386,6 +386,35 @@ function jobFile(id) { return path.join(DIRS.jobs, `${id}.json`); }
 function saveJob(job) { job.updatedAt = new Date().toISOString(); writeJson(jobFile(job.id), job); }
 
 // ════════════════════════════════════════════════════════════════════════════
+// GET /thumb?u=<image url> — small preview images for the page.
+// CFS blocks its photos from being shown on other websites, so the browser can't
+// load them directly; the server fetches them and sends a 300px copy.
+// Only CFS and Shopify image hosts are allowed (not an open proxy).
+// ════════════════════════════════════════════════════════════════════════════
+const THUMB_HOSTS = ['images.choicefurnituresuperstore.co.uk', 'www.choicefurnituresuperstore.co.uk', 'cdn.shopify.com'];
+const thumbCache = new Map(); // url → Buffer (most recent 600)
+router.get('/thumb', async (req, res) => {
+  const u = String(req.query.u || '');
+  let host;
+  try { host = new URL(u).hostname; } catch (_) { return res.status(400).end(); }
+  if (!THUMB_HOSTS.includes(host)) return res.status(403).end();
+  try {
+    let out = thumbCache.get(u);
+    if (!out) {
+      const r = await axios.get(u, { responseType: 'arraybuffer', timeout: 30000, maxContentLength: 50 * 1024 * 1024 });
+      out = await sharp(Buffer.from(r.data), { failOn: 'none' }).rotate().resize(300, 300, { fit: 'inside' }).jpeg({ quality: 75 }).toBuffer();
+      thumbCache.set(u, out);
+      if (thumbCache.size > 600) thumbCache.delete(thumbCache.keys().next().value);
+    }
+    res.setHeader('Content-Type', 'image/jpeg');
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+    res.send(out);
+  } catch (e) {
+    res.status(502).end();
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // GET /status
 // ════════════════════════════════════════════════════════════════════════════
 router.get('/status', async (req, res) => {

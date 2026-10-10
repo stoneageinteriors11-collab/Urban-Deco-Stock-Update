@@ -177,7 +177,10 @@ const API = '/api/images';
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fname = u => { try { return decodeURIComponent(new URL(u).pathname.split('/').pop()); } catch (_) { return u || ''; } };
-const thumb = u => !u ? '' : u.includes('cdn.shopify.com') ? u + (u.includes('?') ? '&' : '?') + 'width=240' : u;
+// Shopify photos load straight from Shopify's CDN; CFS photos go through our server
+// (CFS doesn't allow its photos to be shown on other websites).
+const thumb = u => !u ? '' : u.includes('cdn.shopify.com') ? u + (u.includes('?') ? '&' : '?') + 'width=240'
+  : `${API}/thumb?u=${encodeURIComponent(u)}`;
 const fmtBytes = b => b > 1e9 ? (b / 1e9).toFixed(2) + ' GB' : b > 1e6 ? (b / 1e6).toFixed(1) + ' MB' : Math.round(b / 1e3) + ' KB';
 
 const state = { planId: null, nextCursor: null, plans: [], backup: null, jobId: null, restoreId: null };
@@ -343,16 +346,19 @@ function renderProduct(p) {
   const cur = p.current.map(m => `<div class="th ${m.featured ? 'feat' : ''}"><img loading="lazy" src="${esc(thumb(m.url))}"><span class="pos">${m.position}</span>
     <div class="lbl" title="${esc(fname(m.url))}">${m.featured ? '★ ' : ''}${esc(m.alt || '—')}</div></div>`).join('');
   const featKey = p.proposed[0] ? (p.proposed[0].mediaId || p.proposed[0].key) : null;
+  const curUrl = new Map(p.current.map(m => [m.mediaId, m.url]));
   const prop = p.proposed.map(o => {
     const id = o.mediaId || o.key; const isF = id === featKey;
-    return `<div class="th ${isF ? 'feat' : ''}"><img loading="lazy" src="${esc(thumb(o.src || o.url))}"><span class="badge ${o.action}">${o.action.toUpperCase()}</span><span class="pos">${o.position}</span>
+    // REUSE/KEEP = the Shopify photo that stays; UPLOAD = the CFS photo that will be added
+    const shown = (o.mediaId && curUrl.get(o.mediaId)) || o.src || o.url;
+    return `<div class="th ${isF ? 'feat' : ''}"><img loading="lazy" src="${esc(thumb(shown))}"><span class="badge ${o.action}">${o.action.toUpperCase()}</span><span class="pos">${o.position}</span>
       <div class="lbl" title="${esc(fname(o.src || o.url))}">${esc(o.group || o.alt || '—')}${o.altFix ? ' (alt fixed)' : ''}</div>
       <div class="lbl" title="${esc((o.matchedBy ? 'How it was matched: ' + o.matchedBy : '') + (o.visual ? ' — ' + o.visual : ''))}" style="color:${o.matchedBy === 'name-only' ? 'var(--warning)' : 'var(--text-muted)'}">${esc(matchLabel(o))}</div>
       ${p.ok ? `<button data-feat="${esc(id)}" data-pid="${esc(p.productId)}">${isF ? '★ Featured' : 'Make featured'}</button>` : ''}
       ${p.ok && /unsure/.test(o.matchedBy || '') ? `<button data-reuse="${esc(o.mediaId)}" data-val="0" data-pid="${esc(p.productId)}">Use CFS photo instead</button>` : ''}</div>`;
   }).join('');
   const excl = p.groups.flatMap(g => g.excluded.map(x => `<tr><td>${esc(g.label)}</td><td>${esc(g.vSKU)}</td>
-    <td><img loading="lazy" src="${esc(x.url)}" style="width:60px;height:45px;object-fit:contain;background:#fff;border-radius:4px"></td><td class="url">${esc(fname(x.url))}</td><td>${esc(x.reason)}</td></tr>`)).join('');
+    <td><img loading="lazy" src="${esc(thumb(x.url))}" style="width:60px;height:45px;object-fit:contain;background:#fff;border-radius:4px"></td><td class="url">${esc(fname(x.url))}</td><td>${esc(x.reason)}</td></tr>`)).join('');
   const img = (u, cap) => `<div style="display:inline-block;text-align:center;font-size:10px;color:var(--text-muted);margin-right:6px"><img src="${esc(thumb(u))}" style="width:110px;height:82px;object-fit:cover;border-radius:4px;display:block">${cap}</div>`;
   const others = p.others.filter(o => o.kind !== 'other-media').map(o => `<tr${o.kind === 'unsure' ? ' style="background:rgba(245,158,11,.06)"' : ''}>
     <td><label class="chk"><input type="checkbox" data-detach="${esc(o.mediaId)}" data-pid="${esc(p.productId)}" ${o.detach ? 'checked' : ''} ${p.ok ? '' : 'disabled'}> detach</label>
