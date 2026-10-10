@@ -611,7 +611,9 @@ router.post('/backup', async (req, res) => {
       n++;
       const p = await fetchProduct(client, pid);
       if (!p) { send({ type: 'warn', message: `Product ${pid} no longer exists — skipped` }); continue; }
-      const folder = `products/${p.handle}`;
+      // Short paths inside the zip (Windows can't extract paths over ~260 characters).
+      // The real handle and original file names are kept in manifest.json.
+      const folder = `p${String(manifest.products.length + 1).padStart(3, '0')}-${numId(p.id)}`;
       const media = [];
       const nodes = p.media?.nodes || [];
       for (let i = 0; i < nodes.length; i++) {
@@ -621,8 +623,10 @@ router.post('/backup', async (req, res) => {
         if (m.mediaContentType === 'IMAGE' && entry.url) {
           const dl = await downloadImage(m.originalSource?.url || entry.url).catch(() => null)
                   || await downloadImage(entry.url); // throws if both fail → whole backup fails
-          const fname = `${String(i + 1).padStart(2, '0')}-${core.fileNameFromUrl(entry.url).replace(/[^\w.\-]+/g, '_')}`;
-          entry.file = `${folder}/${fname}`;
+          const original = core.fileNameFromUrl(entry.url);
+          const ext = (path.extname(original).toLowerCase().match(/^\.(jpe?g|png|webp|gif)$/) || ['.jpg'])[0];
+          entry.file = `${folder}/${String(i + 1).padStart(2, '0')}${ext}`;
+          entry.originalName = original;
           entry.sha256 = dl.sha; entry.bytes = dl.bytes; entry.mimeType = dl.type || 'image/jpeg';
           archive.append(dl.buf, { name: entry.file });
         }
@@ -641,7 +645,9 @@ router.post('/backup', async (req, res) => {
     archive.append(JSON.stringify(manifest, null, 2), { name: 'manifest.json' });
     archive.append(
       `Urban Deco image backup ${backupId}\nCreated ${manifest.createdAt}\nProducts: ${manifest.products.length}\n\n` +
-      `Keep this zip for at least 30 days.\nTo restore: Image Sync page → Restore → upload this zip.\n`, { name: 'README.txt' });
+      `Keep this zip for at least 30 days.\nTo restore: Image Sync page → Restore → upload this zip (no need to extract it).\n\n` +
+      `Folders:\n` + manifest.products.map((p, i) => `  p${String(i + 1).padStart(3, '0')}-${numId(p.productId)}  =  ${p.handle}`).join('\n') + '\n',
+      { name: 'README.txt' });
     await archive.finalize();
     await closed;
 
@@ -716,7 +722,7 @@ router.get('/backup/:id/download', (req, res) => {
   const f = path.join(DIRS.backups, `${req.params.id}.zip`);
   if (!fs.existsSync(f)) return res.status(404).send('Backup zip not found on server (it may have restarted) — create it again');
   const date = new Date().toISOString().slice(0, 10);
-  res.download(f, `urban-deco-image-backup_${date}_${req.params.id}.zip`);
+  res.download(f, `ud-images_${date}_${req.params.id.slice(-6)}.zip`);
 });
 
 router.post('/backup/:id/confirm', (req, res) => {
@@ -1087,7 +1093,8 @@ router.post('/restore', async (req, res) => {
 
 async function reuploadFromZip(client, z, m) {
   const buf = await z.read(m.file);
-  const filename = path.basename(m.file).replace(/^\d+-/, '');
+  // original Shopify file name (new zips) — older zips stored it in the path itself
+  const filename = (m.originalName || path.basename(m.file).replace(/^\d+-/, '')).replace(/_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?=\.)/i, '');
   const st = await gql(client, M_STAGED, { input: [{ resource: 'IMAGE', filename, mimeType: m.mimeType || 'image/jpeg',
     httpMethod: 'POST', fileSize: String(buf.length) }] });
   assertNoUserErrors(st.stagedUploadsCreate, 'Preparing upload');
