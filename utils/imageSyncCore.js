@@ -293,6 +293,9 @@ function buildProductPlan(input) {
 
   // ── 5. Classify everything else that is on Shopify now ────────────────────
   const detachChoices = choices.detach || {};
+  // "Replace with CFS photos": photos that don't match any CFS photo are detached by default
+  // (still kept in Shopify Files + the backup zip; any single photo can be unticked to keep it).
+  const replaceMode = !!choices.replaceMode;
   const others = [];   // existing media not matched to a CFS slot
   for (const m of media) {
     const clashSlot = slots.find(s => s.nameClash?.oldMediaId === m.mediaId);
@@ -315,9 +318,13 @@ function buildProductPlan(input) {
     } else if (exclMatch) {
       kind = 'excluded-live'; reason = `Currently shown, but excluded by the CFSUD rule (${fileNameFromUrl(exclMatch.url)})`; defaultDetach = true;
     } else if (rec) {
-      kind = 'removed-at-cfs'; reason = 'Added by the app before, no longer in the CFS feed — review'; defaultDetach = false;
+      kind = 'removed-at-cfs'; defaultDetach = replaceMode;
+      reason = replaceMode ? 'Added by the app before, no longer in the CFS feed — detached (Replace with CFS photos)'
+                           : 'Added by the app before, no longer in the CFS feed — review';
     } else {
-      kind = 'manual'; reason = 'Not from CFS (manual?) — kept'; defaultDetach = false;
+      kind = 'manual'; defaultDetach = replaceMode;
+      reason = replaceMode ? 'Not matched to any CFS photo — detached (Replace with CFS photos). Untick to keep it'
+                           : 'Not from CFS (manual?) — kept';
     }
     let detach = Object.prototype.hasOwnProperty.call(detachChoices, m.mediaId) ? !!detachChoices[m.mediaId] : defaultDetach;
     if (m.type !== 'IMAGE') detach = false;
@@ -329,7 +336,12 @@ function buildProductPlan(input) {
   // choices.featured may be an existing media id OR a proposed slot key (e.g. a new upload)
   let featured = choices.featured || choices.featuredMediaId || featuredMediaId;
   const featuredOther = others.find(o => o.mediaId === featured);
-  if (featuredOther && featuredOther.detach) {
+  const firstCfsKey = groups[0] && groups[0].mainKey;
+  if (featuredOther && featuredOther.detach && replaceMode && !choices.featured && firstCfsKey) {
+    // Replace mode and nobody picked a featured photo: the first colour's CFS main photo becomes featured.
+    featured = firstCfsKey;
+    warnings.push('Featured photo changes to the CFS main photo (the old featured photo is not a CFS photo and is being replaced)');
+  } else if (featuredOther && featuredOther.detach) {
     warnings.push('The current featured image was marked for removal — it is kept because it is the featured image');
     featuredOther.detach = false;
   }
@@ -399,7 +411,7 @@ function buildProductPlan(input) {
     detach: detach.length,
     altFix: order.filter(o => o.altFix).length,
     variantChanges: variantAssign.filter(v => v.change).length,
-    manual: others.filter(o => o.kind === 'manual').length,
+    manual: others.filter(o => o.kind === 'manual' && !o.detach).length,   // manual photos that STAY
     review: others.filter(o => o.kind === 'removed-at-cfs').length,
     unsure: others.filter(o => o.kind === 'unsure').length,
     replacedSameName: others.filter(o => o.kind === 'replaced').length,
@@ -424,6 +436,7 @@ function buildProductPlan(input) {
       compareWith: o.compareWith || null, reuse: !!reuseUnsure[o.mediaId] })),
     variantAssign,
     featured: { current: featuredMediaId, proposed: featured },
+    replaceMode,
     counts, noChange,
   };
 }

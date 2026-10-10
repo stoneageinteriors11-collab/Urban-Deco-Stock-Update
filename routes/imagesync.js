@@ -326,7 +326,9 @@ function planFor(session, productId, feed) {
   const shopHash = new Map(Object.entries(session.shopHash || {}));
   const plan = core.buildProductPlan({
     product: raw, feedById: feed.byId, cfsHash, shopHash,
-    record: parseRecord(raw), choices: session.choices[productId] || {},
+    record: parseRecord(raw),
+    // per-product choices; "Replace with CFS photos" falls back to the dry-run-wide setting
+    choices: { replaceMode: !!session.replaceMode, ...(session.choices[productId] || {}) },
   });
   plan.include = session.include[productId] !== undefined ? session.include[productId] : (plan.ok && !plan.noChange);
   if (!plan.ok) plan.include = false;
@@ -436,7 +438,7 @@ router.post('/dry-run', async (req, res) => {
     // 3. Session + Shopify photo fingerprints
     const session = {
       id: newId('plan'), createdAt: new Date().toISOString(), feedGenerated: feed.generated,
-      nextCursor, raw: {}, choices: {}, include: {},
+      nextCursor, raw: {}, choices: {}, include: {}, replaceMode: !!req.body?.replaceMode,
       cfsHash: Object.fromEntries(cfsHash), shopHash: {},
     };
     for (const p of products) session.raw[p.id] = p;
@@ -448,7 +450,7 @@ router.post('/dry-run', async (req, res) => {
     const out = products.map(p => planFor(session, p.id, feed));
     savePlan(session);
     const summary = summarise(out);
-    send({ type: 'done', planId: session.id, nextCursor, summary, plans: out });
+    send({ type: 'done', planId: session.id, nextCursor, replaceMode: session.replaceMode, summary, plans: out });
   } catch (e) {
     send({ type: 'error', message: e.message });
   }
@@ -483,17 +485,32 @@ router.get('/plan/:id', async (req, res) => {
 router.post('/plan/:id/choices', async (req, res) => {
   const s = loadPlan(req.params.id);
   if (!s) return res.status(404).json({ error: 'Dry run not found — run it again' });
-  const { productId, include, featured, detach, reuseUnsure } = req.body || {};
+  const { productId, include, featured, detach, reuseUnsure, replaceMode } = req.body || {};
   if (!s.raw[productId]) return res.status(400).json({ error: 'Product is not in this dry run' });
   const c = s.choices[productId] || {};
   if (featured !== undefined) c.featured = featured || undefined;
   if (detach) c.detach = { ...(c.detach || {}), ...detach };
   if (reuseUnsure) c.reuseUnsure = { ...(c.reuseUnsure || {}), ...reuseUnsure };
+  if (replaceMode !== undefined) { c.replaceMode = !!replaceMode; delete c.detach; }   // switching mode resets single-photo ticks
   s.choices[productId] = c;
   if (include !== undefined) s.include[productId] = !!include;
   savePlan(s);
   try { res.json({ plan: planFor(s, productId, await getFeed()) }); }
   catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Switch "Replace with CFS photos" for the whole dry run (clears per-product overrides)
+router.post('/plan/:id/replace-mode', async (req, res) => {
+  const s = loadPlan(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Dry run not found — run it again' });
+  s.replaceMode = !!req.body?.on;
+  for (const c of Object.values(s.choices)) { delete c.replaceMode; delete c.detach; }
+  savePlan(s);
+  try {
+    const feed = await getFeed();
+    const out = Object.keys(s.raw).map(pid => planFor(s, pid, feed));
+    res.json({ planId: s.id, replaceMode: s.replaceMode, summary: summarise(out), plans: out });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.get('/plan/:id/csv', async (req, res) => {

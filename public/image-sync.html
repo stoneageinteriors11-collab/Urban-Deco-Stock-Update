@@ -99,6 +99,7 @@
         <select id="limit"><option>5</option><option selected>25</option><option>50</option><option>100</option></select>
       </label>
       <label class="chk"><input type="checkbox" id="includeDrafts"> Include draft products (test copies)</label>
+      <label class="chk" title="Photos that don't match any CFS photo (e.g. old re-cropped copies) are detached by default. They stay in Shopify Files for 7 days and in the backup zip. You can still untick any single photo to keep it."><input type="checkbox" id="replaceMode" checked> Replace with CFS photos</label>
       <button class="btn" id="btnDry">Run dry run</button>
       <button class="btn secondary hidden" id="btnNext">Next batch →</button>
       <a class="btn secondary hidden" id="btnCsv" href="#">Download preview CSV</a>
@@ -230,14 +231,14 @@ async function runDry(after) {
   $('products').innerHTML = ''; $('summary').innerHTML = '';
   invalidateBackup();
   try {
-    const last = await stream(API + '/dry-run', { tokens, limit: $('limit').value, includeDrafts: $('includeDrafts').checked, after },
+    const last = await stream(API + '/dry-run', { tokens, limit: $('limit').value, includeDrafts: $('includeDrafts').checked, replaceMode: $('replaceMode').checked, after },
       ev => {
         if (ev.type === 'status') setStatus($('dryStatus'), ev.message);
         if (ev.type === 'progress') { setBar('dryBar', ev.done, ev.total); setStatus($('dryStatus'), `Checking CFS images ${ev.done}/${ev.total}…`); }
         if (ev.type === 'warn') logWarn(ev.message);
       });
     if (!last || last.type === 'error') throw new Error(last?.message || 'Dry run failed');
-    state.planId = last.planId; state.nextCursor = last.nextCursor; state.plans = last.plans;
+    state.planId = last.planId; state.nextCursor = last.nextCursor; state.plans = last.plans; state.replaceMode = !!last.replaceMode;
     $('dryBar').classList.add('hidden');
     setStatus($('dryStatus'), `Dry run ${last.planId} — nothing was changed.`, 'ok');
     $('btnCsv').href = `${API}/plan/${last.planId}/csv`; $('btnCsv').classList.remove('hidden');
@@ -263,9 +264,22 @@ function renderAll() {
     ['New uploads', s.uploads], ['Reused', s.reuse], ['Excluded (CFSUD)', s.excluded], ['To detach', s.detach], ['Manual photos kept', s.manual],
     ['Same name, different picture', s.replacedSameName], ['Please check', s.unsure],
   ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('')}</div>
+  <div class="banner ${state.replaceMode ? 'warn' : 'ok'}" style="margin-top:4px">
+    <label class="chk"><input type="checkbox" id="replaceAll" ${state.replaceMode ? 'checked' : ''}>
+    <b>Replace with CFS photos</b> — ${state.replaceMode
+      ? 'ON: photos not matched to CFS are detached (kept 7 days + in the zip). Untick single photos in a product to keep them.'
+      : 'OFF: photos not matched to CFS are kept and the CFS photos are added alongside them.'}</label></div>
   <div class="row"><button class="btn secondary" id="selAll">Select all ready</button><button class="btn secondary" id="selNone">Select none</button>
     ${s.notInCfs ? `<label class="chk"><input type="checkbox" id="onlyMissing"> Show only products not found in CFS (${s.notInCfs})</label>` : ''}</div>`;
   $('selAll').onclick = () => bulkInclude(true); $('selNone').onclick = () => bulkInclude(false);
+  $('replaceAll').onchange = async e => {
+    e.target.disabled = true;
+    try {
+      const r = await fetch(`${API}/plan/${state.planId}/replace-mode`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on: e.target.checked }) });
+      const j = await r.json(); if (j.error) throw new Error(j.error);
+      state.plans = j.plans; state.replaceMode = j.replaceMode; $('replaceMode').checked = j.replaceMode; renderAll();
+    } catch (err) { alert(err.message); e.target.checked = !e.target.checked; e.target.disabled = false; }
+  };
   if ($('onlyMissing')) $('onlyMissing').onchange = e => document.querySelectorAll('.prod').forEach(el => {
     const p = state.plans.find(x => x.productId === el.dataset.pid); el.classList.toggle('hidden', e.target.checked && !p.notInCfs); });
   $('products').innerHTML = state.plans.map(renderProduct).join('');
@@ -299,6 +313,7 @@ function renderProduct(p) {
     : p.notInCfs === 'some' ? `<span class="chip bad">${p.notInCfsVariants.length} of ${p.variantAssign.length + p.notInCfsVariants.length} variants not found in CFS</span><span class="chip bad">Skipped</span>`
     : !p.ok ? `<span class="chip bad">Skipped</span>` : p.noChange ? `<span class="chip ok">No change</span>` : [
     `<span class="chip">${c.current} → ${c.proposed} photos</span>`,
+    p.replaceMode && c.detach ? `<span class="chip det">replace mode</span>` : '',
     c.upload ? `<span class="chip up">${c.upload} upload</span>` : '',
     c.excluded ? `<span class="chip ex">${c.excluded} excluded</span>` : '',
     c.detach ? `<span class="chip det">${c.detach} detach</span>` : '',
@@ -309,6 +324,8 @@ function renderProduct(p) {
     c.unsure ? `<span class="chip ex">${c.unsure} please check</span>` : '',
   ].join('');
   const msgs = [...p.errors.map(e => `<li class="e">${esc(e)}</li>`), ...p.warnings.map(w => `<li class="w">${esc(w)}</li>`)].join('');
+  const modeRow = p.ok ? `<div class="row" style="margin:10px 0 4px"><label class="chk"><input type="checkbox" data-replace="${esc(p.productId)}" ${p.replaceMode ? 'checked' : ''}>
+    Replace with CFS photos for this product</label><span class="help" style="margin:0">${p.replaceMode ? '(photos not matched to CFS are detached)' : '(photos not matched to CFS are kept)'}</span></div>` : '';
   const cur = p.current.map(m => `<div class="th ${m.featured ? 'feat' : ''}"><img loading="lazy" src="${esc(thumb(m.url))}"><span class="pos">${m.position}</span>
     <div class="lbl" title="${esc(fname(m.url))}">${m.featured ? '★ ' : ''}${esc(m.alt || '—')}</div></div>`).join('');
   const featKey = p.proposed[0] ? (p.proposed[0].mediaId || p.proposed[0].key) : null;
@@ -335,6 +352,7 @@ function renderProduct(p) {
     </div>
     <div class="prod-body">
       ${msgs ? `<ul class="msgs">${msgs}</ul>` : ''}
+      ${modeRow}
       <div class="sub">Now on Shopify (${c.current})</div><div class="strip">${cur || '<span class="help">No photos</span>'}</div>
       <div class="sub">Proposed (${c.proposed})</div><div class="strip">${prop || '<span class="help">—</span>'}</div>
       ${excl ? `<div class="sub">Excluded by CFSUD rule</div><table><tr><th>Colour</th><th>vSKU</th><th>URL</th><th>Reason</th></tr>${excl}</table>` : ''}
@@ -348,6 +366,7 @@ function bindProducts() {
   document.querySelectorAll('input.inc').forEach(cb => cb.onchange = () => choose(cb.dataset.pid, { include: cb.checked }));
   document.querySelectorAll('button[data-feat]').forEach(b => b.onclick = () => choose(b.dataset.pid, { featured: b.dataset.feat }));
   document.querySelectorAll('input[data-detach]').forEach(cb => cb.onchange = () => choose(cb.dataset.pid, { detach: { [cb.dataset.detach]: cb.checked } }));
+  document.querySelectorAll('input[data-replace]').forEach(cb => cb.onchange = () => choose(cb.dataset.replace, { replaceMode: cb.checked }));
   document.querySelectorAll('button[data-reuse]').forEach(b => b.onclick = e => { e.stopPropagation(); choose(b.dataset.pid, { reuseUnsure: { [b.dataset.reuse]: b.dataset.val === '1' } }); });
 }
 
