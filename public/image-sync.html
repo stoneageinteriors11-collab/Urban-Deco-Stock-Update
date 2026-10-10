@@ -100,6 +100,8 @@
       </label>
       <label class="chk"><input type="checkbox" id="includeDrafts"> Include draft products (test copies)</label>
       <label class="chk" title="Photos that don't match any CFS photo (e.g. old re-cropped copies) are detached by default. They stay in Shopify Files for 7 days and in the backup zip. You can still untick any single photo to keep it."><input type="checkbox" id="replaceMode" checked> Replace with CFS photos</label>
+      <label class="chk" title="Skip CFS gallery photos on a plain white background (cut-out product shots). The main image is never skipped."><input type="checkbox" id="skipWhiteBg" checked> Skip white-background photos</label>
+      <label class="chk" title="Skip CFS gallery photos that are not square. The main image is never skipped."><input type="checkbox" id="skipNonSquare" checked> Skip non-square photos</label>
       <button class="btn" id="btnDry">Run dry run</button>
       <button class="btn secondary hidden" id="btnNext">Next batch →</button>
       <a class="btn secondary hidden" id="btnCsv" href="#">Download preview CSV</a>
@@ -231,7 +233,8 @@ async function runDry(after) {
   $('products').innerHTML = ''; $('summary').innerHTML = '';
   invalidateBackup();
   try {
-    const last = await stream(API + '/dry-run', { tokens, limit: $('limit').value, includeDrafts: $('includeDrafts').checked, replaceMode: $('replaceMode').checked, after },
+    const last = await stream(API + '/dry-run', { tokens, limit: $('limit').value, includeDrafts: $('includeDrafts').checked, replaceMode: $('replaceMode').checked,
+      skipWhiteBg: $('skipWhiteBg').checked, skipNonSquare: $('skipNonSquare').checked, after },
       ev => {
         if (ev.type === 'status') setStatus($('dryStatus'), ev.message);
         if (ev.type === 'progress') { setBar('dryBar', ev.done, ev.total); setStatus($('dryStatus'), `Checking CFS images ${ev.done}/${ev.total}…`); }
@@ -239,6 +242,7 @@ async function runDry(after) {
       });
     if (!last || last.type === 'error') throw new Error(last?.message || 'Dry run failed');
     state.planId = last.planId; state.nextCursor = last.nextCursor; state.plans = last.plans; state.replaceMode = !!last.replaceMode;
+    state.skipWhiteBg = last.skipWhiteBg !== false; state.skipNonSquare = last.skipNonSquare !== false;
     $('dryBar').classList.add('hidden');
     setStatus($('dryStatus'), `Dry run ${last.planId} — nothing was changed.`, 'ok');
     $('btnCsv').href = `${API}/plan/${last.planId}/csv`; $('btnCsv').classList.remove('hidden');
@@ -258,28 +262,38 @@ function renderAll() {
     if (p.notInCfs) s.notInCfs++;
     s.uploads += p.counts.upload; s.reuse += p.counts.reuse; s.excluded += p.counts.excluded; s.detach += p.counts.detach; s.manual += p.counts.manual;
     s.unsure += p.counts.unsure || 0; s.replacedSameName += p.counts.replacedSameName || 0;
+    s.exCfsud = (s.exCfsud || 0) + (p.counts.excludedCfsud || 0); s.exWhite = (s.exWhite || 0) + (p.counts.excludedWhiteBg || 0);
+    s.exSquare = (s.exSquare || 0) + (p.counts.excludedNotSquare || 0);
   }
   $('summary').innerHTML = `<div class="stats">${[
     ['Products', s.products], ['Ready', s.ready], ['No change', s.noChange], ['Skipped', s.skipped], ["Couldn't find in CFS", s.notInCfs],
-    ['New uploads', s.uploads], ['Reused', s.reuse], ['Excluded (CFSUD)', s.excluded], ['To detach', s.detach], ['Manual photos kept', s.manual],
+    ['New uploads', s.uploads], ['Reused', s.reuse], ['Skipped: last photo (CFSUD)', s.exCfsud], ['Skipped: white background', s.exWhite], ['Skipped: not square', s.exSquare], ['To detach', s.detach], ['Manual photos kept', s.manual],
     ['Same name, different picture', s.replacedSameName], ['Please check', s.unsure],
   ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('')}</div>
   <div class="banner ${state.replaceMode ? 'warn' : 'ok'}" style="margin-top:4px">
     <label class="chk"><input type="checkbox" id="replaceAll" ${state.replaceMode ? 'checked' : ''}>
     <b>Replace with CFS photos</b> — ${state.replaceMode
       ? 'ON: photos not matched to CFS are detached (kept 7 days + in the zip). Untick single photos in a product to keep them.'
-      : 'OFF: photos not matched to CFS are kept and the CFS photos are added alongside them.'}</label></div>
+      : 'OFF: photos not matched to CFS are kept and the CFS photos are added alongside them.'}</label>
+    <div style="margin-top:6px"><label class="chk"><input type="checkbox" id="optWhite" ${state.skipWhiteBg ? 'checked' : ''}> Skip white-background CFS photos</label>
+    &nbsp; <label class="chk"><input type="checkbox" id="optSquare" ${state.skipNonSquare ? 'checked' : ''}> Skip non-square CFS photos</label>
+    <span class="help" style="margin:0">(last-photo CFSUD rule always applies; main image is never skipped)</span></div></div>
   <div class="row"><button class="btn secondary" id="selAll">Select all ready</button><button class="btn secondary" id="selNone">Select none</button>
     ${s.notInCfs ? `<label class="chk"><input type="checkbox" id="onlyMissing"> Show only products not found in CFS (${s.notInCfs})</label>` : ''}</div>`;
   $('selAll').onclick = () => bulkInclude(true); $('selNone').onclick = () => bulkInclude(false);
-  $('replaceAll').onchange = async e => {
-    e.target.disabled = true;
+  const setOption = async (el, key) => {
+    el.disabled = true;
     try {
-      const r = await fetch(`${API}/plan/${state.planId}/replace-mode`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on: e.target.checked }) });
+      const r = await fetch(`${API}/plan/${state.planId}/options`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [key]: el.checked }) });
       const j = await r.json(); if (j.error) throw new Error(j.error);
-      state.plans = j.plans; state.replaceMode = j.replaceMode; $('replaceMode').checked = j.replaceMode; renderAll();
-    } catch (err) { alert(err.message); e.target.checked = !e.target.checked; e.target.disabled = false; }
+      state.plans = j.plans; state.replaceMode = j.replaceMode; state.skipWhiteBg = j.skipWhiteBg; state.skipNonSquare = j.skipNonSquare;
+      $('replaceMode').checked = j.replaceMode; $('skipWhiteBg').checked = j.skipWhiteBg; $('skipNonSquare').checked = j.skipNonSquare;
+      renderAll();
+    } catch (err) { alert(err.message); el.checked = !el.checked; el.disabled = false; }
   };
+  $('replaceAll').onchange = e => setOption(e.target, 'replaceMode');
+  $('optWhite').onchange = e => setOption(e.target, 'skipWhiteBg');
+  $('optSquare').onchange = e => setOption(e.target, 'skipNonSquare');
   if ($('onlyMissing')) $('onlyMissing').onchange = e => document.querySelectorAll('.prod').forEach(el => {
     const p = state.plans.find(x => x.productId === el.dataset.pid); el.classList.toggle('hidden', e.target.checked && !p.notInCfs); });
   $('products').innerHTML = state.plans.map(renderProduct).join('');
@@ -315,7 +329,7 @@ function renderProduct(p) {
     `<span class="chip">${c.current} → ${c.proposed} photos</span>`,
     p.replaceMode && c.detach ? `<span class="chip det">replace mode</span>` : '',
     c.upload ? `<span class="chip up">${c.upload} upload</span>` : '',
-    c.excluded ? `<span class="chip ex">${c.excluded} excluded</span>` : '',
+    c.excluded ? `<span class="chip ex">${c.excluded} skipped</span>` : '',
     c.detach ? `<span class="chip det">${c.detach} detach</span>` : '',
     c.altFix ? `<span class="chip">${c.altFix} alt fix</span>` : '',
     c.variantChanges ? `<span class="chip">${c.variantChanges} variant photos</span>` : '',
@@ -337,7 +351,8 @@ function renderProduct(p) {
       ${p.ok ? `<button data-feat="${esc(id)}" data-pid="${esc(p.productId)}">${isF ? '★ Featured' : 'Make featured'}</button>` : ''}
       ${p.ok && /unsure/.test(o.matchedBy || '') ? `<button data-reuse="${esc(o.mediaId)}" data-val="0" data-pid="${esc(p.productId)}">Use CFS photo instead</button>` : ''}</div>`;
   }).join('');
-  const excl = p.groups.flatMap(g => g.excluded.map(x => `<tr><td>${esc(g.label)}</td><td>${esc(g.vSKU)}</td><td class="url">${esc(x.url)}</td><td>${esc(x.reason)}</td></tr>`)).join('');
+  const excl = p.groups.flatMap(g => g.excluded.map(x => `<tr><td>${esc(g.label)}</td><td>${esc(g.vSKU)}</td>
+    <td><img loading="lazy" src="${esc(x.url)}" style="width:60px;height:45px;object-fit:contain;background:#fff;border-radius:4px"></td><td class="url">${esc(fname(x.url))}</td><td>${esc(x.reason)}</td></tr>`)).join('');
   const img = (u, cap) => `<div style="display:inline-block;text-align:center;font-size:10px;color:var(--text-muted);margin-right:6px"><img src="${esc(thumb(u))}" style="width:110px;height:82px;object-fit:cover;border-radius:4px;display:block">${cap}</div>`;
   const others = p.others.filter(o => o.kind !== 'other-media').map(o => `<tr${o.kind === 'unsure' ? ' style="background:rgba(245,158,11,.06)"' : ''}>
     <td><label class="chk"><input type="checkbox" data-detach="${esc(o.mediaId)}" data-pid="${esc(p.productId)}" ${o.detach ? 'checked' : ''} ${p.ok ? '' : 'disabled'}> detach</label>
@@ -355,7 +370,7 @@ function renderProduct(p) {
       ${modeRow}
       <div class="sub">Now on Shopify (${c.current})</div><div class="strip">${cur || '<span class="help">No photos</span>'}</div>
       <div class="sub">Proposed (${c.proposed})</div><div class="strip">${prop || '<span class="help">—</span>'}</div>
-      ${excl ? `<div class="sub">Excluded by CFSUD rule</div><table><tr><th>Colour</th><th>vSKU</th><th>URL</th><th>Reason</th></tr>${excl}</table>` : ''}
+      ${excl ? `<div class="sub">Skipped CFS photos</div><table><tr><th>Colour</th><th>vSKU</th><th></th><th>File</th><th>Why skipped</th></tr>${excl}</table>` : ''}
       ${others ? `<div class="sub">Photos not matched to CFS</div><table><tr><th></th><th></th><th>Alt</th><th>Why</th></tr>${others}</table>` : ''}
       <div class="sub">Variant photos</div><table><tr><th>SKU</th><th>Variant</th><th>Main photo</th></tr>${vars}</table>
     </div></div>`;

@@ -276,8 +276,26 @@ async function visualFingerprint(buf) {
     const raw = await sharp(buf, { failOn: 'none' }).rotate().flatten({ background: '#ffffff' })
       .resize(32, 32, { fit: 'fill', kernel: 'cubic' }).removeAlpha().raw().toBuffer();
     const rotated = (meta.orientation || 1) >= 5;
-    return { thumb: raw.toString('base64'), w: rotated ? meta.height : meta.width, h: rotated ? meta.width : meta.height };
+    return { thumb: raw.toString('base64'), edgeWhite: await edgeWhiteness(buf),
+      w: rotated ? meta.height : meta.width, h: rotated ? meta.width : meta.height };
   } catch (_) { return {}; }
+}
+
+// Share of the photo's border (2px ring of a 64x64 copy, averaged over the 4 sides) that is
+// plain white: near-white (all channels >= 235) and not coloured (channel spread <= 18).
+// Cut-outs on white measure ~0.95–1.0; room photos and close-ups ~0–0.15 (checked on real CFS photos).
+async function edgeWhiteness(buf) {
+  try {
+    const N = 64;
+    const px = await sharp(buf, { failOn: 'none' }).rotate().flatten({ background: '#ffffff' })
+      .resize(N, N, { fit: 'fill' }).removeAlpha().raw().toBuffer();
+    const white = (x, y) => { const i = (y * N + x) * 3; const mn = Math.min(px[i], px[i + 1], px[i + 2]), mx = Math.max(px[i], px[i + 1], px[i + 2]); return mn >= 235 && mx - mn <= 18; };
+    const sides = [0, 0, 0, 0];
+    for (let k = 0; k < N; k++) for (const t of [0, 1]) {
+      sides[0] += white(k, t); sides[1] += white(k, N - 1 - t); sides[2] += white(t, k); sides[3] += white(N - 1 - t, k);
+    }
+    return +(sides.reduce((a, b) => a + b, 0) / (4 * 2 * N)).toFixed(3);
+  } catch (_) { return null; }
 }
 
 // Shopify CDN can resize on the fly — a 600px copy is plenty for the visual check.
@@ -287,7 +305,7 @@ async function hashUrls(urls, cache, onProgress) {
   const todo = [...new Set(urls)].filter(u => u && !cache.has(u));
   let done = 0;
   await mapLimit(todo, DOWNLOAD_CONCURRENCY, async u => {
-    try { const r = await downloadImage(u); cache.set(u, { sha: r.sha, bytes: r.bytes, thumb: r.thumb, w: r.w, h: r.h }); }
+    try { const r = await downloadImage(u); cache.set(u, { sha: r.sha, bytes: r.bytes, thumb: r.thumb, edgeWhite: r.edgeWhite, w: r.w, h: r.h }); }
     catch (e) { cache.set(u, { error: e.message }); }
     done++; if (onProgress && done % 10 === 0) onProgress(done, todo.length);
   });
@@ -328,7 +346,8 @@ function planFor(session, productId, feed) {
     product: raw, feedById: feed.byId, cfsHash, shopHash,
     record: parseRecord(raw),
     // per-product choices; "Replace with CFS photos" falls back to the dry-run-wide setting
-    choices: { replaceMode: !!session.replaceMode, ...(session.choices[productId] || {}) },
+    choices: { replaceMode: !!session.replaceMode, skipWhiteBg: session.skipWhiteBg !== false,
+      skipNonSquare: session.skipNonSquare !== false, ...(session.choices[productId] || {}) },
   });
   plan.include = session.include[productId] !== undefined ? session.include[productId] : (plan.ok && !plan.noChange);
   if (!plan.ok) plan.include = false;
@@ -439,6 +458,7 @@ router.post('/dry-run', async (req, res) => {
     const session = {
       id: newId('plan'), createdAt: new Date().toISOString(), feedGenerated: feed.generated,
       nextCursor, raw: {}, choices: {}, include: {}, replaceMode: !!req.body?.replaceMode,
+      skipWhiteBg: req.body?.skipWhiteBg !== false, skipNonSquare: req.body?.skipNonSquare !== false,
       cfsHash: Object.fromEntries(cfsHash), shopHash: {},
     };
     for (const p of products) session.raw[p.id] = p;
@@ -450,7 +470,8 @@ router.post('/dry-run', async (req, res) => {
     const out = products.map(p => planFor(session, p.id, feed));
     savePlan(session);
     const summary = summarise(out);
-    send({ type: 'done', planId: session.id, nextCursor, replaceMode: session.replaceMode, summary, plans: out });
+    send({ type: 'done', planId: session.id, nextCursor, replaceMode: session.replaceMode,
+      skipWhiteBg: session.skipWhiteBg, skipNonSquare: session.skipNonSquare, summary, plans: out });
   } catch (e) {
     send({ type: 'error', message: e.message });
   }
@@ -499,17 +520,24 @@ router.post('/plan/:id/choices', async (req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Switch "Replace with CFS photos" for the whole dry run (clears per-product overrides)
-router.post('/plan/:id/replace-mode', async (req, res) => {
+// Change dry-run-wide options without re-running: { replaceMode?, skipWhiteBg?, skipNonSquare? }
+// (old route /replace-mode {on} kept working). Per-product overrides for changed options are cleared.
+router.post(['/plan/:id/options', '/plan/:id/replace-mode'], async (req, res) => {
   const s = loadPlan(req.params.id);
   if (!s) return res.status(404).json({ error: 'Dry run not found — run it again' });
-  s.replaceMode = !!req.body?.on;
-  for (const c of Object.values(s.choices)) { delete c.replaceMode; delete c.detach; }
+  const b = req.body || {};
+  if (b.on !== undefined) b.replaceMode = b.on;
+  for (const k of ['replaceMode', 'skipWhiteBg', 'skipNonSquare']) {
+    if (b[k] === undefined) continue;
+    s[k] = !!b[k];
+    for (const c of Object.values(s.choices)) { delete c[k]; delete c.detach; }
+  }
   savePlan(s);
   try {
     const feed = await getFeed();
     const out = Object.keys(s.raw).map(pid => planFor(s, pid, feed));
-    res.json({ planId: s.id, replaceMode: s.replaceMode, summary: summarise(out), plans: out });
+    res.json({ planId: s.id, replaceMode: !!s.replaceMode, skipWhiteBg: s.skipWhiteBg !== false, skipNonSquare: s.skipNonSquare !== false,
+      summary: summarise(out), plans: out });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

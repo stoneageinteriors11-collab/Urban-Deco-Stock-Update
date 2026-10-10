@@ -49,7 +49,7 @@ function applyCfsudRule(rec) {
     const lastIndex = gallery.length - 1;
     excluded.push({
       url: gallery[lastIndex],
-      galleryPosition: lastIndex + 1,
+      galleryPosition: lastIndex + 1, rule: 'cfsud',
       reason: `CFSUD rule – last gallery position (${lastIndex + 1} of ${gallery.length}) excluded`,
     });
     kept = gallery.slice(0, lastIndex);
@@ -87,6 +87,44 @@ function variantColour(variant, colourOpt) {
   return so ? String(so.value).trim() : null;
 }
 
+
+// ── Photo-type filters (after the CFSUD rule) ───────────────────────────────
+// CFS galleries mix room photos with white-background cut-outs and odd-shaped
+// photos. Urban Deco only uses square room/close-up photos, so by default:
+//   • white-background photos are skipped (edgeWhite = share of the photo's border
+//     that is plain white; cut-outs measure 0.95+, room photos 0–0.15 on real CFS data)
+//   • non-square photos are skipped (more than 2% off square)
+// The main image is never skipped — if it looks like a cut-out/non-square we only warn.
+// Light-grey studio backgrounds (edgeWhite 0.35–0.75) are kept but flagged to check.
+const FILTER = { WHITE_BG_MIN: 0.75, WHITE_BG_CHECK: 0.35, SQUARE_TOLERANCE: 0.02 };
+function applyPhotoFilters(r, cfsHash, filters) {
+  const gallery = [], excluded = [], warnings = [];
+  const info = u => cfsHash.get(u) || {};
+  const shape = i => (i.w && i.h ? Math.abs(i.w / i.h - 1) : 0);
+  const sizeTxt = i => (i.w && i.h ? `${i.w}×${i.h}` : '');
+  r.gallery.forEach((u, idx) => {
+    const i = info(u);
+    const pos = idx + 1;
+    if (filters.skipWhiteBg && typeof i.edgeWhite === 'number' && i.edgeWhite >= FILTER.WHITE_BG_MIN) {
+      excluded.push({ url: u, galleryPosition: pos, rule: 'white-background',
+        reason: `White background (cut-out photo) — skipped` });
+      return;
+    }
+    if (filters.skipNonSquare && shape(i) > FILTER.SQUARE_TOLERANCE) {
+      excluded.push({ url: u, galleryPosition: pos, rule: 'not-square',
+        reason: `Not square (${sizeTxt(i)}) — skipped` });
+      return;
+    }
+    if (filters.skipWhiteBg && typeof i.edgeWhite === 'number' && i.edgeWhite >= FILTER.WHITE_BG_CHECK) {
+      warnings.push(`gallery photo ${pos} has a light background — check it is not a cut-out (${fileNameFromUrl(u)})`);
+    }
+    gallery.push(u);
+  });
+  const m = info(r.main);
+  if (typeof m.edgeWhite === 'number' && m.edgeWhite >= FILTER.WHITE_BG_MIN) warnings.push('main image looks like a white-background cut-out (kept — main image is never skipped)');
+  if (shape(m) > FILTER.SQUARE_TOLERANCE) warnings.push(`main image is not square (${sizeTxt(m)}) (kept — main image is never skipped)`);
+  return { gallery, excluded, warnings };
+}
 
 // ── Visual comparison ────────────────────────────────────────────────────────
 // Each image gets a 32x32 colour thumbnail (made in routes/imagesync.js with sharp)
@@ -134,6 +172,7 @@ function compareVisual(a, b, opts = {}) {
 // Returns a plan object. plan.ok === false means the product is skipped.
 function buildProductPlan(input) {
   const { product, feedById, cfsHash = new Map(), shopHash = new Map(), record = null, choices = {} } = input;
+  const filters = { skipWhiteBg: choices.skipWhiteBg !== false, skipNonSquare: choices.skipNonSquare !== false };
   const errors = [];
   const warnings = [];
 
@@ -194,6 +233,10 @@ function buildProductPlan(input) {
     const g = groupsById.get(cfsId);
     const r = applyCfsudRule(g.rec);
     if (!r.ok) { errors.push(`CFS product ${cfsId} (${g.vSKU}): ${r.error}`); continue; }
+    // Photo-type filters run AFTER the CFSUD rule (which works on original positions).
+    const f = applyPhotoFilters(r, cfsHash, filters);
+    r.gallery = f.gallery; r.excluded = [...r.excluded, ...f.excluded];
+    for (const w of f.warnings) warnings.push(`${g.vSKU}: ${w}`);
     const label = colourOpt ? ([...g.colours][0] || '') : (product.title || '');
     groups.push({
       cfsId, vSKU: g.vSKU, label,
@@ -304,7 +347,8 @@ function buildProductPlan(input) {
     const rec = recImages.get(m.mediaId);
     const updatedSlot = slots.find(s => s.updated?.oldMediaId === m.mediaId);
     const exclMatch = [...excludedUrls.values()].find(x =>
-      (rec && rec.src === x.url) || (m.type === 'IMAGE' && nameKey(m.url) === nameKey(x.url)));
+      (rec && rec.src === x.url) || (m.type === 'IMAGE' && nameKey(m.url) === nameKey(x.url)) ||
+      (m.type === 'IMAGE' && compareVisual(cfsHash.get(x.url), shopHash.get(m.mediaId), { strict: true }).verdict === 'same'));
     if (m.type !== 'IMAGE') {
       kind = 'other-media'; reason = `${m.type} — not touched`;
     } else if (clashSlot && clashSlot.nameClash.verdict === 'unsure') {
@@ -316,7 +360,8 @@ function buildProductPlan(input) {
     } else if (updatedSlot) {
       kind = 'replaced'; reason = `CFS picture changed at the same URL — replaced by new upload`; defaultDetach = true;
     } else if (exclMatch) {
-      kind = 'excluded-live'; reason = `Currently shown, but excluded by the CFSUD rule (${fileNameFromUrl(exclMatch.url)})`; defaultDetach = true;
+      kind = 'excluded-live'; defaultDetach = true;
+      reason = `Currently shown, but excluded — ${exclMatch.rule === 'white-background' ? 'white-background cut-out' : exclMatch.rule === 'not-square' ? 'not square' : 'CFSUD rule'} (${fileNameFromUrl(exclMatch.url)})`;
     } else if (rec) {
       kind = 'removed-at-cfs'; defaultDetach = replaceMode;
       reason = replaceMode ? 'Added by the app before, no longer in the CFS feed — detached (Replace with CFS photos)'
@@ -408,6 +453,9 @@ function buildProductPlan(input) {
     upload: uploads.length,
     keep: order.filter(o => o.action === 'keep').length,
     excluded: groups.reduce((a, g) => a + g.excluded.length, 0),
+    excludedCfsud: groups.reduce((a, g) => a + g.excluded.filter(x => x.rule === 'cfsud').length, 0),
+    excludedWhiteBg: groups.reduce((a, g) => a + g.excluded.filter(x => x.rule === 'white-background').length, 0),
+    excludedNotSquare: groups.reduce((a, g) => a + g.excluded.filter(x => x.rule === 'not-square').length, 0),
     detach: detach.length,
     altFix: order.filter(o => o.altFix).length,
     variantChanges: variantAssign.filter(v => v.change).length,
@@ -436,7 +484,7 @@ function buildProductPlan(input) {
       compareWith: o.compareWith || null, reuse: !!reuseUnsure[o.mediaId] })),
     variantAssign,
     featured: { current: featuredMediaId, proposed: featured },
-    replaceMode,
+    replaceMode, filters,
     counts, noChange,
   };
 }
@@ -472,5 +520,5 @@ function plansToCsv(plans) {
 
 module.exports = {
   parseUdSku, applyCfsudRule, nameKey, fileNameFromUrl, colourOptionName,
-  buildProductPlan, plansToCsv, toCsv, compareVisual, VIS,
+  buildProductPlan, plansToCsv, toCsv, compareVisual, VIS, applyPhotoFilters, FILTER,
 };
