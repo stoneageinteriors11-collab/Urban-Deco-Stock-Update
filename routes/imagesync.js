@@ -612,11 +612,20 @@ router.post('/backup', async (req, res) => {
   const check = stopCheck(runId);
   let archive = null;
   try {
-    const s = loadPlan(req.body?.planId);
-    if (!s) throw new Error('Dry run not found — run it again');
-    const productIds = (req.body?.productIds || []).filter(id => s.raw[id]);
+    // Either products from an Image Sync dry run (planId + productIds) or, for Step 3,
+    // any products by id / handle (no dry run needed).
+    const s = req.body?.planId ? loadPlan(req.body.planId) : null;
+    if (req.body?.planId && !s) throw new Error('Dry run not found — run it again');
+    let productIds = s ? (req.body?.productIds || []).filter(id => s.raw[id]) : [...(req.body?.productIds || [])];
+    for (const h of (s ? [] : req.body?.handles || [])) {
+      const d = await gql(client, Q_PRODUCT_BY_HANDLE, { h });
+      if (d.productByHandle) productIds.push(d.productByHandle.id);
+      else send({ type: 'warn', message: `Product "${h}" not found — not in the backup` });
+    }
+    productIds = [...new Set(productIds)];
     if (!productIds.length) throw new Error('No products selected');
-    if (productIds.length > MAX_BATCH) throw new Error(`Max ${MAX_BATCH} products per batch`);
+    const maxProducts = s ? MAX_BATCH : 300;   // Step 3 can touch more products in one go
+    if (productIds.length > maxProducts) throw new Error(`Max ${maxProducts} products per backup`);
 
     const output = fs.createWriteStream(zipPath);
     archive = archiver('zip', { zlib: { level: 0 } }); // photos are already compressed
@@ -624,7 +633,7 @@ router.post('/backup', async (req, res) => {
     archive.pipe(output);
 
     const manifest = { type: 'urban-deco-image-backup', version: 1, backupId, createdAt: new Date().toISOString(),
-      store: process.env.SHOPIFY_STORE, planId: s.id, products: [] };
+      store: process.env.SHOPIFY_STORE, planId: s ? s.id : null, source: s ? 'image-sync' : (req.body?.source || 'step-3'), products: [] };
     let n = 0;
     for (const pid of productIds) {
       n++;
@@ -677,7 +686,7 @@ router.post('/backup', async (req, res) => {
     if (!verify.ok) throw new Error(`Backup verification failed: ${verify.error}`);
     const zipSha = await fileSha(zipPath);
     const bytes = fs.statSync(zipPath).size;
-    const meta = { id: backupId, createdAt: manifest.createdAt, planId: s.id, zipSha, bytes, confirmed: false,
+    const meta = { id: backupId, createdAt: manifest.createdAt, planId: s ? s.id : null, zipSha, bytes, confirmed: false,
       products: manifest.products.map(p => ({ productId: p.productId, handle: p.handle, snapshot: p.snapshot })) };
     writeJson(path.join(DIRS.backups, `${backupId}.json`), meta);
     send({ type: 'done', backupId, bytes, zipSha, products: meta.products.length, photos: verify.photos });
@@ -1314,5 +1323,87 @@ router.post('/cleanup/delete', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+
+// ════════════════════════════════════════════════════════════════════════════
+// Helpers used by Step 3 (routes/shopify.js): photos of deleted variants
+// ════════════════════════════════════════════════════════════════════════════
+const removalPlans = new Map(); // id → { id, createdAt, byHandle: { handle: plan } }
+function saveRemovalPlan(p) { removalPlans.set(p.id, p); writeJson(path.join(DIRS.plans, `${p.id}.json`), p); }
+function loadRemovalPlan(id) {
+  if (!safeId(id)) return null;
+  if (removalPlans.has(id)) return removalPlans.get(id);
+  const p = readJson(path.join(DIRS.plans, `${id}.json`));
+  if (p) removalPlans.set(id, p);
+  return p;
+}
+const fpCache = new Map(); // url → fingerprint, shared across Step 3 runs (most recent 4000)
+async function cachedHash(urls, check) {
+  const want = [...new Set(urls.filter(Boolean))];
+  const todo = want.filter(u => !fpCache.has(u));
+  const tmp = new Map();
+  await hashUrls(todo, tmp, null, check);
+  for (const [u, h] of tmp) { fpCache.set(u, h); if (fpCache.size > 4000) fpCache.delete(fpCache.keys().next().value); }
+  return new Map(want.map(u => [u, fpCache.get(u)]));
+}
+
+// items: [{ handle, removedSkus: [...] }]  → stores and returns a removal plan
+async function buildRemovalPlan({ client, items, send = () => {}, check = () => {} }) {
+  let feed = null;
+  try { feed = await getFeed(); }
+  catch (e) { send({ type: 'warn', message: `CFS image feed unavailable (${e.message}) — photos will be matched by alt text / variant photo only` }); }
+  const plan = { id: newId('rmplan'), createdAt: new Date().toISOString(), byHandle: {} };
+  let n = 0;
+  for (const it of items) {
+    check();
+    n++;
+    send({ type: 'progress', done: n - 1, total: items.length, message: `Checking photos of ${it.handle}…` });
+    const d = await gql(client, Q_PRODUCT_BY_HANDLE, { h: it.handle });
+    const product = d.productByHandle;
+    if (!product) { plan.byHandle[it.handle] = { error: 'Product not found' }; continue; }
+    const skuSet = new Set(it.removedSkus || []);
+    const removedVariantIds = (product.variants?.nodes || []).filter(v => skuSet.has(v.sku)).map(v => v.id);
+    // fingerprints: CFS photos of every variant's CFS product + current Shopify photos
+    const byId = feed ? feed.byId : new Map();
+    const cfsUrls = [];
+    for (const v of product.variants?.nodes || []) {
+      const p = core.parseUdSku(v.sku); const rec = p && byId.get(p.cfsId);
+      if (rec) cfsUrls.push(rec.mainImage, ...(rec.galleryImages || []));
+    }
+    const shopPairs = (product.media?.nodes || []).filter(m => m.mediaContentType === 'IMAGE')
+      .map(m => [m.id, shopifyThumb(m.image?.url || m.originalSource?.url)]).filter(x => x[1]);
+    const hashes = await cachedHash([...cfsUrls, ...shopPairs.map(x => x[1])], check);
+    const shopHash = new Map(shopPairs.map(([id, u]) => [id, hashes.get(u)]).filter(x => x[1] && !x[1].error));
+    const r = core.planVariantRemoval({ product, removedVariantIds, feedById: byId, cfsHash: hashes, shopHash });
+    plan.byHandle[it.handle] = { ...r, removedSkus: [...skuSet] };
+  }
+  send({ type: 'progress', done: items.length, total: items.length, message: 'Photo check done' });
+  saveRemovalPlan(plan);
+  return plan;
+}
+
+function backupCovers(backupId, productId) {
+  if (!safeId(backupId)) return false;
+  const meta = readJson(path.join(DIRS.backups, `${backupId}.json`));
+  return !!(meta && meta.confirmed && meta.products.some(p => p.productId === productId));
+}
+
+// Detach (never delete) photos from a product and remember them for the 7-day clean-up.
+async function detachPhotos(client, productId, photos, reasonTag) {
+  if (!photos.length) return [];
+  const product = await fetchProduct(client, productId);
+  const attached = new Set((product?.media?.nodes || []).map(m => m.id));
+  const todo = photos.filter(p => attached.has(p.mediaId));
+  if (!todo.length) return [];
+  await fileUpdateBatched(client, todo.map(p => ({ id: p.mediaId, referencesToRemove: [productId] })), 'Detaching photos');
+  const record = parseRecord(product) || {};
+  const now = new Date().toISOString();
+  record.detached = [...(record.detached || []), ...todo.map(p => ({ mediaId: p.mediaId, at: now, reason: reasonTag, url: p.url || null }))];
+  record.images = (record.images || []).filter(im => !todo.some(t => t.mediaId === im.mediaId));
+  await saveRecord(client, productId, record);
+  return todo;
+}
+
+router.helpers = { graphqlClient, gql, openSse, startRun, stopCheck, endRun, buildRemovalPlan, loadRemovalPlan, backupCovers, detachPhotos,
+  isBusy: () => activeRun };
 router._visualFingerprint = visualFingerprint; // exposed for tests
 module.exports = router;

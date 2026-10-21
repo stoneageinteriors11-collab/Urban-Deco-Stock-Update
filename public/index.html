@@ -253,6 +253,15 @@
     .log-dry       { color: var(--warning); }
     .log-error     { color: #f97316; }
     .log-ok        { color: var(--success); }
+    .log-photo     { display: flex; gap: 8px; align-items: center; margin: 3px 0; }
+    .log-photo img { width: 54px; height: 40px; object-fit: cover; border-radius: 4px; background: #fff; flex: none; border: 2px solid var(--border); }
+    .log-photo.rm img { border-color: var(--danger); }
+    .log-photo.ck img { border-color: var(--warning); }
+    .log-photo.kp      { color: var(--text-muted); }
+    #photo-check { margin-top: 10px; font-size: 13px; color: var(--text-muted); }
+    #photo-check .bar { height: 6px; background: var(--surface2); border-radius: 99px; overflow: hidden; margin-top: 6px; }
+    #photo-check .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+    #imagesync-handoff { margin-top: 12px; padding: 12px 14px; border-radius: 8px; background: rgba(99,102,241,.1); border: 1px solid rgba(99,102,241,.35); font-size: 13px; }
     .log-match     { color: var(--text-muted); }
     .log-overwrite { color: #f59e0b; }
 
@@ -466,6 +475,14 @@
       <span id="delete-spinner"  class="hidden"><span class="spinner"></span> Deleting…</span>
       <span id="draft-spinner"   class="hidden"><span class="spinner"></span> Setting to draft…</span>
     </div>
+    <!-- Photo check for deleted variants (Image Sync engine) -->
+    <div id="photo-check" class="hidden">
+      <span id="photo-check-msg"></span>
+      <button class="btn btn-danger hidden" id="btn-photo-stop" style="padding:3px 10px;font-size:12px;margin-left:8px">■ Stop</button>
+      <div class="bar"><div id="photo-check-bar"></div></div>
+    </div>
+    <!-- Hand-over to Image Sync after promoting CFS products -->
+    <div id="imagesync-handoff" class="hidden"></div>
 
     <!-- Summary Tiles -->
     <div class="summary-tiles hidden" id="summary-tiles">
@@ -1206,6 +1223,72 @@ async function testConnection() {
     renderPage();
   }
 
+  // ── Photo helpers (Image Sync engine) ─────────────────────────────────────
+  // Reads a streamed (SSE) response; shows the Stop button while it runs.
+  async function readStream(url, body, onEvent, stopBtnId) {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!(res.headers.get('content-type') || '').includes('event-stream')) {
+      const j = await res.json().catch(() => ({})); throw new Error(j.error || `HTTP ${res.status}`);
+    }
+    const btn = stopBtnId ? document.getElementById(stopBtnId) : null;
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '', last = null;
+    try {
+      for (;;) {
+        const { value, done } = await reader.read(); if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let i; while ((i = buf.indexOf('\n\n')) >= 0) {
+          const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+          if (!chunk.startsWith('data: ')) continue;
+          const ev = JSON.parse(chunk.slice(6)); last = ev;
+          if (ev.type === 'run' && btn) {
+            btn.classList.remove('hidden'); btn.disabled = false; btn.textContent = '■ Stop';
+            btn.onclick = () => { btn.disabled = true; btn.textContent = 'Stopping…';
+              fetch('/api/images/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId: ev.runId }) }); };
+          }
+          onEvent(ev);
+        }
+      }
+    } finally { if (btn) btn.classList.add('hidden'); }
+    return last;
+  }
+  function photoStatus(msg, done, total) {
+    document.getElementById('photo-check').classList.remove('hidden');
+    document.getElementById('photo-check-msg').textContent = msg;
+    document.getElementById('photo-check-bar').style.width = total ? Math.round(100 * done / total) + '%' : '0';
+  }
+  // Works out, photo by photo, which photos belong only to the variants that will be deleted.
+  async function runPhotoCheck(variantsToDelete) {
+    photoStatus('Checking photos of the products (CFS image feed + picture check)… this can take a minute', 0, 0);
+    const last = await readStream('/api/shopify/delete-variants-image-plan',
+      { variants: variantsToDelete, cfsProductIds, cfsVariantAttrIds },
+      ev => { if (ev.type === 'progress') photoStatus(ev.message, ev.done, ev.total); if (ev.type === 'warn') photoStatus(ev.message); },
+      'btn-photo-stop');
+    if (last?.type === 'stopped') throw new Error(last.message);
+    if (!last || last.type !== 'done') throw new Error(last?.message || 'Photo check failed');
+    const s = last.summary;
+    photoStatus(`Photo check: ${s.remove} photo(s) to remove, ${s.check} to check, ${s.keep} stay — across ${s.products} product(s)`, 1, 1);
+    return last;
+  }
+  // Backup zip (same as Image Sync): create → download → check it arrived complete → save.
+  async function photoBackup(handles) {
+    photoStatus(`Creating backup zip of ${handles.length} product(s)…`, 0, handles.length);
+    const last = await readStream('/api/images/backup', { handles, source: 'step-3' },
+      ev => { if (ev.type === 'progress') photoStatus(ev.message, ev.done, ev.total); }, 'btn-photo-stop');
+    if (last?.type === 'stopped') throw new Error(last.message);
+    if (!last || last.type !== 'done') throw new Error(last?.message || 'Backup failed');
+    photoStatus('Downloading backup zip…', 1, 1);
+    const res = await fetch(`/api/images/backup/${last.backupId}/download`);
+    if (!res.ok) throw new Error('Backup download failed');
+    const blob = await res.blob();
+    const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()))).map(b => b.toString(16).padStart(2, '0')).join('');
+    const c = await (await fetch(`/api/images/backup/${last.backupId}/confirm`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sha256: hash }) })).json();
+    if (c.error) throw new Error(c.error);
+    const name = (res.headers.get('content-disposition') || '').match(/filename="?([^"]+)"?/)?.[1] || `${last.backupId}.zip`;
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    photoStatus(`✓ Backup saved as ${name} (${last.photos} photos) — keep it 30+ days`, 1, 1);
+    return last.backupId;
+  }
+
   // ── Delete selected ───────────────────────────────────────────────────────
   async function deleteSelected() {
     const skus = [...selectedSKUs];
@@ -1214,7 +1297,9 @@ async function testConnection() {
     const dryRun = document.getElementById('dry-run-toggle').checked;
     const msg = dryRun
       ? `DRY RUN: Will log what would happen to ${skus.length} variants (no actual changes).`
-      : `⚠️ This will PERMANENTLY DELETE ${skus.length} variants from Shopify. Continue?`;
+      : `⚠️ This will PERMANENTLY DELETE ${skus.length} variants from Shopify.\n\n` +
+        `Photos that belong only to removed colours will be DETACHED (kept in Shopify Files for 7 days).\n` +
+        `A backup zip of those products' photos is downloaded first. Continue?`;
 
     if (!confirm(msg)) return;
 
@@ -1224,12 +1309,20 @@ async function testConnection() {
     const variantsToDelete = allResults.filter(r => skus.includes(r.variantSku));
 
     try {
+      // 1. Photo check (read-only) — which photos belong only to the deleted variants
+      const photoPlan = await runPhotoCheck(variantsToDelete);
+      // 2. Live run: backup zip of the products that will lose photos
+      let backupId = null;
+      if (!dryRun && photoPlan.handlesWithRemovals.length) backupId = await photoBackup(photoPlan.handlesWithRemovals);
+      // 3. Variants (+ photos on the live run)
       const res  = await fetch('/api/shopify/delete-variants-bulk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ variants: variantsToDelete, dryRun, cfsProductIds, cfsVariantAttrIds }),
+        body: JSON.stringify({ variants: variantsToDelete, dryRun, cfsProductIds, cfsVariantAttrIds,
+          imagePlanId: photoPlan.imagePlanId, backupId }),
       });
       const data = await res.json();
+      if (data.error) throw new Error(data.error);
       showLog(data.log, dryRun);
 
       if (!dryRun && data.deleted > 0) {
@@ -1344,6 +1437,7 @@ async function testConnection() {
       });
       const data = await res.json();
       showLog(data.log, dryRun);
+      showImageSyncHandoff(data.imageSyncHandles || [], dryRun);
 
       if (!dryRun && (data.published > 0 || data.drafted > 0)) {
         // Remove promoted rows from local state (variant was deleted from Shopify)
@@ -1373,6 +1467,20 @@ async function testConnection() {
     }
   }
 
+  // ── Hand-over to Image Sync (correct CFS photos for promoted products) ─────
+  function showImageSyncHandoff(handles, dryRun) {
+    const box = document.getElementById('imagesync-handoff');
+    if (!handles.length) { box.classList.add('hidden'); return; }
+    const url = `/image-sync.html?handles=${encodeURIComponent(handles.join(','))}&drafts=1`;
+    box.innerHTML = dryRun
+      ? `🖼️ <b>Photos:</b> after the live run, ${handles.length} product(s) need their photos updated to the correct CFS photos. ` +
+        `You'll get a button here that opens Image Sync with these products filled in.`
+      : `🖼️ <b>Next: update photos for ${handles.length} promoted product(s).</b> ` +
+        `<a class="btn btn-purple" style="margin-left:8px;padding:5px 12px;font-size:12px" href="${url}" target="_blank">Open in Image Sync →</a>` +
+        `<div style="margin-top:6px;color:var(--text-muted)">Image Sync will show the dry run (current vs correct CFS photos) → backup → apply, as usual.</div>`;
+    box.classList.remove('hidden');
+  }
+
   // ── Log panel ─────────────────────────────────────────────────────────────
   function showLog(log, dryRun) {
     // Save for CSV download
@@ -1389,12 +1497,19 @@ async function testConnection() {
     panel.innerHTML =
       `<p style="color:var(--text-muted);margin-bottom:8px">${dryRun ? 'DRY RUN LOG' : 'ACTION LOG'} — ${new Date().toLocaleTimeString()}</p>` +
       log.map(l => {
+        if (l.imageUrl) {
+          const u = l.imageUrl.includes('cdn.shopify.com') ? l.imageUrl + (l.imageUrl.includes('?') ? '&' : '?') + 'width=120' : `/api/images/thumb?u=${encodeURIComponent(l.imageUrl)}`;
+          const c = l.imageVerdict === 'remove' ? 'rm log-deleted' : l.imageVerdict === 'check' ? 'ck log-dry' : 'kp';
+          const esc = t => String(t || '').replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+          return `<div class="log-photo ${c}"><img loading="lazy" src="${esc(u)}"><span>[${esc(l.status.toUpperCase())}] ${esc(l.handle)} — ${esc(l.message)}</span></div>`;
+        }
         const cls = l.status==='deleted'   ? 'log-deleted'
                   : l.status==='drafted'   ? 'log-dry'
                   : l.status==='dry_run'   ? 'log-dry'
                   : l.status==='error'     ? 'log-error'
                   : l.status==='kept'      ? 'log-dry'
                   : l.status==='published' ? 'log-ok'
+                  : l.status==='warning'   ? 'log-dry'
                   : 'log-ok';
         return `<p class="${cls}">[${l.status.toUpperCase()}] ${l.sku} — ${l.message}</p>`;
       }).join('');
@@ -1569,16 +1684,18 @@ async function testConnection() {
   // ── Download Dry Run Log as CSV ───────────────────────────────────────────
   function downloadDryRunLog() {
     if (!lastLog.length) return;
-    const headers = ['Type', 'SKU', 'Handle', 'Status', 'Message', 'Product Code'];
+    const headers = ['Type', 'SKU', 'Handle', 'Status', 'Message', 'Product Code', 'Photo verdict', 'Photo URL', 'Matched CFS photo'];
+    const q = v => `"${String(v || '').replace(/"/g, '""')}"`;
     const rows = lastLog.map(l => {
       const type = l.sku === '-' ? 'Image' : 'Variant';
       return [
         type,
         l.sku === '-' ? '' : l.sku,
-        `"${(l.handle || '').replace(/"/g, '""')}"`,
+        q(l.handle),
         l.status,
-        `"${(l.message || '').replace(/"/g, '""')}"`,
+        q(l.message),
         l.productCode || '',
+        l.imageVerdict || '', q(l.imageUrl), q(l.cfsUrl),
       ];
     });
     const csv  = [headers, ...rows].map(r => r.join(',')).join('\n');

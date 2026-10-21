@@ -276,6 +276,16 @@ async function runDry(after) {
 }
 function logWarn(m) { const el = $('dryStatus'); el.innerHTML += `<div style="color:var(--warning)">${esc(m)}</div>`; }
 $('btnDry').onclick = () => runDry(null);
+// Opened from Step 3 ("Open in Image Sync"): fill in the products and tick drafts
+(() => {
+  const q = new URLSearchParams(location.search);
+  const h = q.get('handles');
+  if (h) {
+    $('tokens').value = h.split(',').map(x => x.trim()).filter(Boolean).join('\n');
+    if (q.get('drafts') === '1') $('includeDrafts').checked = true;
+    setStatus($('dryStatus'), `${$('tokens').value.split('\n').length} product(s) from Step 3 filled in — click "Run dry run"`, 'ok');
+  }
+})();
 $('btnNext').onclick = () => runDry(state.nextCursor);
 
 function renderAll() {

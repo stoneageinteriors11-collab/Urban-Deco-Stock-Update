@@ -518,7 +518,104 @@ function plansToCsv(plans) {
   return toCsv(rows);
 }
 
+// ── Photos to remove when variants are deleted (Step 3) ──────────────────────
+//
+// input = {
+//   product:           Shopify product node (media + variants), BEFORE the delete
+//   removedVariantIds: variant ids that Step 3 is about to delete
+//   feedById, cfsHash, shopHash: same as buildProductPlan (CFS feed + fingerprints)
+// }
+// A "group" is a colour (or, for products without a colour option, a CFS product).
+// Only groups with NO variants left are orphaned — deleting one size of a colour
+// that keeps other sizes removes no photos.
+// Each current photo gets a verdict:
+//   remove — belongs to an orphaned group (matches its CFS photos by name/picture,
+//            alt text = that colour, or is the photo linked to a deleted variant)
+//   keep   — belongs to a remaining group, or is not a picture (video etc.)
+//   check  — can't be tied to any group → kept, flagged for a human
+function planVariantRemoval(input) {
+  const { product, removedVariantIds = [], feedById = new Map(), cfsHash = new Map(), shopHash = new Map() } = input;
+  const removedSet = new Set(removedVariantIds);
+  const colourOpt = colourOptionName(product.options);
+  const variants = (product.variants?.nodes || []).map(v => ({
+    id: v.id, sku: v.sku || '', title: v.title,
+    colour: variantColour(v, colourOpt),
+    cfsId: (parseUdSku(v.sku) || {}).cfsId || null,
+    mediaIds: (v.media?.nodes || []).map(n => n.id),
+  }));
+  const groupOf = v => (colourOpt ? (v.colour || v.title) : (v.cfsId || v.sku || v.title));
+  const removed = variants.filter(v => removedSet.has(v.id));
+  const remaining = variants.filter(v => !removedSet.has(v.id));
+  const remainingGroups = new Set(remaining.map(groupOf));
+  const orphanGroups = new Set(removed.map(groupOf).filter(g => !remainingGroups.has(g)));
+
+  // CFS photos (ALL of them — incl. ones Image Sync would skip — because old copies may be live)
+  const cfsPhotos = (vs) => {
+    const out = [];
+    for (const v of vs) {
+      const rec = v.cfsId && feedById.get(v.cfsId);
+      if (!rec) continue;
+      [rec.mainImage, ...(rec.galleryImages || [])].forEach((u, i) => u && out.push({ url: u, group: groupOf(v), cfsId: v.cfsId, pos: i === 0 ? 'main photo' : `gallery photo ${i}` }));
+    }
+    return out;
+  };
+  const orphanVariants = removed.filter(v => orphanGroups.has(groupOf(v)));
+  const orphanCfs = cfsPhotos(orphanVariants);
+  const keepCfs = cfsPhotos(remaining);
+  const orphanCfsMissing = [...new Set(orphanVariants.filter(v => !v.cfsId || !feedById.get(v.cfsId)).map(groupOf))];
+
+  const matchCfs = (m, list) => {
+    for (const c of list) {
+      if (nameKey(c.url) === nameKey(m.url)) {
+        const v = compareVisual(cfsHash.get(c.url), shopHash.get(m.mediaId));
+        if (v.verdict === 'different') continue;
+        return { ...c, how: v.verdict === 'same' ? 'name + picture' : 'file name' };
+      }
+    }
+    for (const c of list) {
+      const v = compareVisual(cfsHash.get(c.url), shopHash.get(m.mediaId), { strict: true });
+      if (v.verdict === 'same') return { ...c, how: 'same picture' };
+    }
+    return null;
+  };
+
+  const items = [];
+  const media = product.media?.nodes || [];
+  media.forEach((n, i) => {
+    const m = { mediaId: n.id, position: i + 1, alt: (n.alt || '').trim(), type: n.mediaContentType,
+      url: n.image?.url || n.originalSource?.url || null };
+    const usedByRemaining = remaining.filter(v => v.mediaIds.includes(m.mediaId));
+    const usedByRemoved = removed.filter(v => v.mediaIds.includes(m.mediaId));
+    let verdict, reason, cfs = null;
+    if (m.type !== 'IMAGE') { verdict = 'keep'; reason = `${m.type} — not touched`; }
+    else if (!orphanGroups.size) { verdict = 'keep'; reason = 'No colour is fully removed — photos stay'; }
+    else if (usedByRemaining.length) { verdict = 'keep'; reason = `Main photo of remaining variant ${usedByRemaining[0].title}`; }
+    else if ((cfs = matchCfs(m, keepCfs))) { verdict = 'keep'; reason = `Matches CFS ${cfs.pos} of remaining ${cfs.group} (${cfs.how})`; }
+    else if (m.alt && remainingGroups.has(m.alt)) { verdict = 'keep'; reason = `Alt text "${m.alt}" = a remaining colour`; }
+    else if ((cfs = matchCfs(m, orphanCfs))) { verdict = 'remove'; reason = `Matches CFS ${cfs.pos} of removed ${cfs.group} (${cfs.how})`; }
+    else if (m.alt && orphanGroups.has(m.alt)) { verdict = 'remove'; reason = `Alt text "${m.alt}" = removed colour`; }
+    else if (usedByRemoved.length && usedByRemoved.every(v => orphanGroups.has(groupOf(v)))) {
+      verdict = 'remove'; reason = `Main photo of deleted variant ${usedByRemoved[0].title}`;
+    } else { verdict = 'check'; reason = "Can't tell which colour this photo belongs to — kept, please check"; }
+    items.push({ ...m, verdict, reason, cfsUrl: cfs ? cfs.url : null });
+  });
+
+  const keepCount = items.filter(x => x.verdict !== 'remove').length;
+  const warnings = [];
+  if (orphanCfsMissing.length) warnings.push(`No CFS photos for removed ${orphanCfsMissing.join(', ')} — matched by alt text / variant photo only`);
+  if (media.length && keepCount === 0) warnings.push('Every photo would be removed — nothing will be removed from this product, please check');
+  if (media.length && keepCount === 0) for (const it of items) if (it.verdict === 'remove') { it.verdict = 'check'; it.reason += ' — kept because it would leave the product with no photos'; }
+
+  return {
+    productId: product.id, handle: product.handle, title: product.title,
+    removedGroups: [...orphanGroups], remainingGroups: [...remainingGroups],
+    items, warnings,
+    counts: { remove: items.filter(x => x.verdict === 'remove').length, keep: items.filter(x => x.verdict === 'keep').length,
+      check: items.filter(x => x.verdict === 'check').length },
+  };
+}
+
 module.exports = {
   parseUdSku, applyCfsudRule, nameKey, fileNameFromUrl, colourOptionName,
-  buildProductPlan, plansToCsv, toCsv, compareVisual, VIS, applyPhotoFilters, FILTER,
+  buildProductPlan, plansToCsv, toCsv, compareVisual, VIS, applyPhotoFilters, FILTER, planVariantRemoval,
 };

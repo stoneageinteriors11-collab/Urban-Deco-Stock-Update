@@ -3,6 +3,8 @@ const axios   = require('axios');
 require('dotenv').config();
 
 const { fetchCfsProducts, buildSkuCodeMap } = require('../utils/cfsApi');
+// Image Sync helpers (photo check, backup check, detach) — see routes/imagesync.js
+const imageSync = require('./imagesync').helpers;
 
 const router = express.Router();
 
@@ -239,90 +241,105 @@ function productRefSku(variantSku) {
   return parts.length >= 3 ? parts.slice(0, 2).join('-') : variantSku;
 }
 
-// ── Image orphan detection (two-tier) ────────────────────────────────────────
-//
-// Tier 1 — Alt text colour matching (preferred):
-//   Extract the colour option from each variant's selectedOptions.
-//   If a colour is present ONLY in deleted variants (not in remaining),
-//   all product images whose altText equals that colour are queued for deletion.
-//
-// Tier 2 — Direct variant.image.id fallback:
-//   Used when a variant's colour had no alt-text match (alt text blank/different).
-//   Deletes the variant's one directly-assigned image, but only if no remaining
-//   variant also references that same image ID.
-//
-// Returns { imageIdsToDelete: string[], logMessages: string[] }
-//
-function getOrphanedImageIds(allProductImages, deletedVariantNodes, remainingVariantNodes) {
-  const imageIdsToDelete = new Set();
-  const logMessages      = [];
+// (Old alt-text/variant-photo image deletion was replaced by the photo check —
+//  see /delete-variants-image-plan below. Photos are now detached, never deleted.)
 
-  // Extract the colour option value from a variant node's selectedOptions array.
-  // Prefers an option named "Colour"/"Color"/"Finish"/"Shade"; falls back to first option.
-  function getColour(node) {
-    const opts = node.selectedOptions || [];
-    const opt  = opts.find(o => /colou?r|finish|shade/i.test(o.name)) || opts[0];
-    return opt?.value?.trim() || null;
-  }
-
-  const deletedColours   = new Set(deletedVariantNodes.map(getColour).filter(Boolean));
-  const remainingColours = new Set(remainingVariantNodes.map(getColour).filter(Boolean));
-  // Colours that belong ONLY to deleted variants — no remaining variant shares them
-  const orphanedColours  = new Set([...deletedColours].filter(c => !remainingColours.has(c)));
-
-  // For Tier 2 safety: image IDs still referenced by remaining variants
-  const remainingVariantImageIds = new Set(
-    remainingVariantNodes.map(n => n.image?.id).filter(Boolean)
-  );
-
-  // ── Tier 1: alt text matching ─────────────────────────────────────────────
-  const tier1Handled = new Set(); // colours resolved by tier 1
-  for (const img of allProductImages) {
-    if (img.altText && orphanedColours.has(img.altText)) {
-      imageIdsToDelete.add(img.id);
-      tier1Handled.add(img.altText);
-    }
-  }
-  for (const colour of tier1Handled) {
-    const count = allProductImages.filter(i => i.altText === colour).length;
-    logMessages.push(`delete ${count} image(s) for colour "${colour}" via alt text (no remaining ${colour} variants)`);
-  }
-
-  // ── Tier 2: direct variant image fallback ─────────────────────────────────
-  for (const node of deletedVariantNodes) {
-    const colour = getColour(node);
-    // Skip if this colour was already handled by tier 1
-    if (colour && tier1Handled.has(colour)) continue;
-    // Skip if no directly assigned image
-    if (!node.image?.id) continue;
-    // Skip if a remaining variant still uses this image (shared image)
-    if (remainingVariantImageIds.has(node.image.id)) continue;
-    // Skip if already queued
-    if (imageIdsToDelete.has(node.image.id)) continue;
-
-    imageIdsToDelete.add(node.image.id);
-    logMessages.push(`delete 1 variant image for "${colour || node.title}" via direct assignment (alt text not available)`);
-  }
-
-  return { imageIdsToDelete: [...imageIdsToDelete], logMessages };
+// ── Which variants Step 3 will really delete for one product ─────────────────
+// Mirrors the rules in delete-variants-bulk below:
+//   some variants orphaned            → delete those
+//   all orphaned, none in CFS feeds   → product set to DRAFT (photos untouched)
+//   all orphaned, all in CFS feeds    → keep everything
+//   all orphaned, mixed               → delete only the ones not in CFS feeds
+function decideDeletion(allVariants, orphanedSKUs, productIdSet, variantAttrIdSet) {
+  const inCfs = v => { const { prodId, varId } = parseSku(v.sku); return (prodId && productIdSet.has(prodId)) || (varId && variantAttrIdSet.has(varId)); };
+  const orphaned = allVariants.filter(v => orphanedSKUs.has(v.sku));
+  if (!orphaned.length) return { mode: 'none', toDelete: [] };
+  if (orphaned.length < allVariants.length) return { mode: 'variants', toDelete: orphaned };
+  const unmatched = allVariants.filter(v => !inCfs(v));
+  if (unmatched.length === allVariants.length) return { mode: 'draft', toDelete: [] };
+  if (!unmatched.length) return { mode: 'keep', toDelete: [] };
+  return { mode: 'mixed', toDelete: unmatched };
 }
 
-// ── Execute orphaned image deletion (non-fatal) ───────────────────────────────
-// Errors are logged as warnings and do not abort the parent operation.
-async function deleteOrphanedImages(client, productId, imageIds, log, handle) {
-  if (!imageIds.length) return;
+// ── POST /api/shopify/delete-variants-image-plan  (live progress, Stop) ──────
+// Same body as delete-variants-bulk. Read-only: works out, photo by photo, which
+// photos belong ONLY to the variants that will be deleted (using the CFS image
+// feed + picture check from Image Sync). Returns an imagePlanId that
+// delete-variants-bulk uses for its dry-run log and live run.
+router.post('/delete-variants-image-plan', async (req, res) => {
+  const { variants = [], cfsProductIds = [], cfsVariantAttrIds = [] } = req.body || {};
+  let client;
+  try { client = graphqlClient(); } catch (err) { return res.status(400).json({ error: err.message }); }
+  const sse = imageSync.openSse(res);
+  const { send } = sse;
+  const runId = imageSync.startRun(send);
+  const check = imageSync.stopCheck(runId);
   try {
-    const result     = await gql(client, DELETE_PRODUCT_IMAGES_MUTATION, { id: productId, imageIds });
-    const userErrors = result?.productDeleteImages?.userErrors || [];
-    if (userErrors.length) {
-      const errMsg = userErrors.map(e => e.message).join(', ');
-      log.push({ sku: '-', handle, status: 'warning', message: `Image delete warning: ${errMsg}` });
-    } else {
-      const count = result?.productDeleteImages?.deletedImageIds?.length ?? imageIds.length;
-      console.log(`    ✓ Deleted ${count} orphaned image(s)`);
+    const productIdSet = new Map(cfsProductIds);
+    const variantAttrIdSet = new Set(cfsVariantAttrIds);
+    const byHandle = new Map();
+    for (const v of variants) { if (!byHandle.has(v.handle)) byHandle.set(v.handle, new Set()); byHandle.get(v.handle).add(v.variantSku); }
+    const items = [];
+    let n = 0;
+    for (const [handle, orphanedSKUs] of byHandle) {
+      check();
+      n++;
+      send({ type: 'progress', done: n - 1, total: byHandle.size, message: `Working out which variants go: ${handle}` });
+      const data = await gql(client, PRODUCT_BY_HANDLE_QUERY, { handle });
+      const product = data?.productByHandle;
+      if (!product) continue;
+      const decision = decideDeletion(product.variants.edges.map(e => e.node), orphanedSKUs, productIdSet, variantAttrIdSet);
+      if (decision.toDelete.length) items.push({ handle, removedSkus: decision.toDelete.map(v => v.sku) });
     }
+    const plan = await imageSync.buildRemovalPlan({ client, items, send, check });
+    const products = Object.entries(plan.byHandle).map(([handle, p]) => ({ handle, title: p.title, error: p.error || null,
+      counts: p.counts || null, removedGroups: p.removedGroups || [], warnings: p.warnings || [] }));
+    const summary = products.reduce((a, p) => { if (p.counts) { a.remove += p.counts.remove; a.keep += p.counts.keep; a.check += p.counts.check; } return a; },
+      { products: products.length, remove: 0, keep: 0, check: 0 });
+    send({ type: 'done', imagePlanId: plan.id, summary, products,
+      handlesWithRemovals: products.filter(p => p.counts && p.counts.remove > 0).map(p => p.handle) });
+  } catch (e) {
+    if (e.stopped) send({ type: 'stopped', message: 'Photo check stopped — nothing was changed' });
+    else send({ type: 'error', message: e.message });
+  }
+  imageSync.endRun(runId);
+  sse.end();
+});
+
+// Log lines for one product's photos (dry run and live)
+function photoLogLines(plan, handle, dryRun) {
+  if (!plan) return [{ sku: '-', handle, status: dryRun ? 'dry_run' : 'warning', message: 'Photos: no photo check for this product — photos left as they are' }];
+  if (plan.error) return [{ sku: '-', handle, status: 'warning', message: `Photos: ${plan.error}` }];
+  const lines = [];
+  if (plan.removedGroups?.length) lines.push({ sku: '-', handle, status: dryRun ? 'dry_run' : 'info',
+    message: `Photos: ${plan.counts.remove} to remove for removed ${plan.removedGroups.join(', ')} · ${plan.counts.keep} stay · ${plan.counts.check} to check — ${plan.title}` });
+  for (const w of plan.warnings || []) lines.push({ sku: '-', handle, status: 'warning', message: `Photos: ${w}` });
+  for (const it of plan.items || []) {
+    if (it.verdict === 'keep' && !dryRun) continue;
+    const verb = it.verdict === 'remove' ? (dryRun ? 'WOULD REMOVE' : 'REMOVE') : it.verdict === 'check' ? 'CHECK (kept)' : 'KEEP';
+    lines.push({ sku: '-', handle, status: it.verdict === 'remove' ? (dryRun ? 'image_remove' : 'image_removed') : it.verdict === 'check' ? 'image_check' : 'image_keep',
+      message: `Photo ${it.position}: ${verb} — ${it.reason} · ${String(it.url || '').split('/').pop().split('?')[0]}`,
+      imageUrl: it.url, imageVerdict: it.verdict, cfsUrl: it.cfsUrl || null });
+  }
+  return lines;
+}
+
+// Live: detach the photos marked "remove" (kept in Shopify Files for 7 days)
+async function detachPlannedPhotos(product, handle, plan, backupId, log) {
+  if (!plan || plan.error || !plan.counts?.remove) return;
+  if (!imageSync.backupCovers(backupId, product.id)) {
+    log.push({ sku: '-', handle, status: 'warning', message: 'Photos: not in the backup zip — photos left as they are' });
+    return;
+  }
+  try {
+    const done = await imageSync.detachPhotos(graphqlClient(), product.id, plan.items.filter(i => i.verdict === 'remove'), 'step3-variant-removed');
+    for (const l of photoLogLines(plan, handle, false)) {
+      if (l.imageVerdict === 'remove' && !done.some(d => d.url === l.imageUrl)) l.message += ' (already gone)';
+      log.push(l);
+    }
+    log.push({ sku: '-', handle, status: 'info', message: `Photos: detached ${done.length} — kept in Shopify Files for 7 days (Image Sync → Clean-up)` });
   } catch (err) {
-    log.push({ sku: '-', handle, status: 'warning', message: `Image delete failed (non-fatal): ${err.message}` });
+    log.push({ sku: '-', handle, status: 'warning', message: `Photos: detach failed (variants were still deleted): ${err.message}` });
   }
 }
 
@@ -346,7 +363,15 @@ async function deleteOrphanedImages(client, productId, imageIds, log, handle) {
 //   4. 350ms pause between product operations to stay inside Shopify's rate limit.
 //
 router.post('/delete-variants-bulk', async (req, res) => {
-  const { variants = [], dryRun = true, cfsProductIds = [], cfsVariantAttrIds = [] } = req.body;
+  const { variants = [], dryRun = true, cfsProductIds = [], cfsVariantAttrIds = [], imagePlanId = null, backupId = null } = req.body;
+  // Photo plan from /delete-variants-image-plan (which photos belong only to deleted variants)
+  const imagePlan = imagePlanId ? imageSync.loadRemovalPlan(imagePlanId) : null;
+  if (imagePlanId && !imagePlan) return res.status(400).json({ error: 'Photo check not found (server may have restarted) — run it again' });
+  const photoPlanFor = handle => (imagePlan ? imagePlan.byHandle[handle] || null : null);
+  if (!dryRun && imagePlan) {
+    const needBackup = Object.values(imagePlan.byHandle).some(p => p.counts && p.counts.remove > 0);
+    if (needBackup && !backupId) return res.status(400).json({ error: 'A backup zip is required before photos are removed — create it first' });
+  }
   // cfsProductIds arrives as [[prodId, status], ...] entries; build a Map (has() still works)
   const productIdSet    = new Map(cfsProductIds);
   const variantAttrIdSet = new Set(cfsVariantAttrIds);
@@ -387,6 +412,8 @@ router.post('/delete-variants-bulk', async (req, res) => {
         // whether it would be a full-product delete or a variant-only delete.
         let productTitle = orphanedForProduct[0].title || handle;
         let action = 'delete variant(s)';
+        let deletedNodes = [], remainingNodes = [];   // used after the lookup below
+        const photoLines = [];                         // photo lines go after the variant lines
 
         try {
           const data = await gql(client, PRODUCT_BY_HANDLE_QUERY, { handle });
@@ -397,8 +424,8 @@ router.post('/delete-variants-bulk', async (req, res) => {
             const allVariants      = product.variants.edges.map(e => e.node);
             const allImages        = product.images.edges.map(e => e.node);
             const allOrphaned      = allVariants.every(v => orphanedSKUs.has(v.sku));
-            const deletedNodes     = allVariants.filter(v => orphanedSKUs.has(v.sku));
-            const remainingNodes   = allVariants.filter(v => !orphanedSKUs.has(v.sku));
+            deletedNodes           = allVariants.filter(v => orphanedSKUs.has(v.sku));
+            remainingNodes         = allVariants.filter(v => !orphanedSKUs.has(v.sku));
 
             if (allOrphaned) {
               // Per-variant CFS presence check
@@ -418,22 +445,11 @@ router.post('/delete-variants-bulk', async (req, res) => {
               action = `delete ${orphanedSKUs.size} of ${allVariants.length} variant(s)`;
             }
 
-            // Image dry-run: report what would be deleted (only for paths that delete variants)
-            const willDeleteVariants = action.startsWith('delete') || action.startsWith('set product to DRAFT') === false;
-            if (willDeleteVariants && !action.startsWith('keep') && !action.startsWith('set product to DRAFT')) {
-              const effectiveDeleted  = allOrphaned
-                ? allVariants.filter(v => { const { prodId, varId } = parseSku(v.sku); return !(prodId && productIdSet.has(prodId)) && !(varId && variantAttrIdSet.has(varId)); })
-                : deletedNodes;
-              const effectiveRemaining = allOrphaned
-                ? allVariants.filter(v => { const { prodId, varId } = parseSku(v.sku); return (prodId && productIdSet.has(prodId)) || (varId && variantAttrIdSet.has(varId)); })
-                : remainingNodes;
-              const { logMessages: imgMsgs } = getOrphanedImageIds(allImages, effectiveDeleted, effectiveRemaining);
-              for (const msg of imgMsgs) {
-                log.push({ sku: '-', handle, status: 'dry_run', message: `Images: would ${msg}: ${productTitle}` });
-              }
-              if (!imgMsgs.length) {
-                log.push({ sku: '-', handle, status: 'dry_run', message: `Images: no orphaned images found for ${productTitle}` });
-              }
+            // Photos: photo-by-photo plan from the photo check (Image Sync engine)
+            if (action.startsWith('set product to DRAFT')) {
+              photoLines.push({ sku: '-', handle, status: 'dry_run', message: `Photos: product goes to DRAFT — photos left as they are: ${productTitle}` });
+            } else if (!action.startsWith('keep')) {
+              photoLines.push(...photoLogLines(photoPlanFor(handle), handle, true));
             }
           }
         } catch (_) { /* dry-run lookup failure is non-fatal */ }
@@ -457,6 +473,8 @@ router.post('/delete-variants-bulk', async (req, res) => {
           }
           log.push({ sku: v.variantSku, handle, status: 'dry_run', message: msg, productCode: v.productCode || '' });
         }
+
+        log.push(...photoLines);
 
         await sleep(150); // lighter pause during dry-run lookups
         continue;
@@ -525,9 +543,8 @@ router.post('/delete-variants-bulk', async (req, res) => {
               log.push({ sku: node.sku, handle, status: 'deleted', message: `Deleted: ${product.title} / ${node.title}`, productCode: productCodeBySku.get(node.sku) || '' });
               deleted++;
             }
-            // Delete images orphaned by the removed variants
-            const { imageIdsToDelete } = getOrphanedImageIds(allImages, cfsUnmatched, cfsMatched);
-            await deleteOrphanedImages(client, product.id, imageIdsToDelete, log, handle);
+            // Photos of the removed variants → detached (from the photo check)
+            await detachPlannedPhotos(product, handle, photoPlanFor(handle), backupId, log);
           }
 
         } else if (cfsUnmatched.length === 0) {
@@ -568,10 +585,8 @@ router.post('/delete-variants-bulk', async (req, res) => {
             log.push({ sku: node.sku, handle, status: 'deleted', message: `Deleted: ${product.title} / ${node.title}`, productCode: productCodeBySku.get(node.sku) || '' });
             deleted++;
           }
-          // Delete images orphaned by the removed variants
-          const remainingNodes = allVariants.filter(v => !orphanedSKUs.has(v.sku));
-          const { imageIdsToDelete } = getOrphanedImageIds(allImages, orphanedNodes, remainingNodes);
-          await deleteOrphanedImages(client, product.id, imageIdsToDelete, log, handle);
+          // Photos of the removed variants → detached (from the photo check)
+          await detachPlannedPhotos(product, handle, photoPlanFor(handle), backupId, log);
         }
       }
 
@@ -744,6 +759,7 @@ router.post('/publish-products', async (req, res) => {
   }
 
   console.log(`▶ Promoting ${byHandle.size} CFS-product-match products (dryRun=${dryRun})`);
+  const imageSyncHandles = new Set();   // products whose photos Image Sync should update afterwards
 
   for (const [handle, variantsForProduct] of byHandle) {
     const affectedSKUs     = variantsForProduct.map(v => v.variantSku);
@@ -806,14 +822,9 @@ router.post('/publish-products', async (req, res) => {
           log.push({ sku: v.variantSku, handle, status: 'dry_run', message: msg, productCode: v.productCode || '' });
         }
 
-        // Image dry-run
-        const { logMessages: imgMsgs } = getOrphanedImageIds(allImages, variantsToDelete, remainingVariants);
-        for (const msg of imgMsgs) {
-          log.push({ sku: '-', handle, status: 'dry_run', message: `Images: would ${msg}: ${product.title}` });
-        }
-        if (!imgMsgs.length) {
-          log.push({ sku: '-', handle, status: 'dry_run', message: `Images: no orphaned images found for ${product.title}` });
-        }
+        // Photos: handed over to Image Sync (it builds the correct CFS gallery for the promoted product)
+        log.push({ sku: '-', handle, status: 'dry_run', message: `Photos: not changed here — will be updated in Image Sync after the promotion: ${product.title}` });
+        imageSyncHandles.add(handle);
         await sleep(150);
         continue;
       }
@@ -867,9 +878,8 @@ router.post('/publish-products', async (req, res) => {
           console.log(`  ✓ SKU promoted: "${keepNode.sku}" → "${newSku}"`);
         }
 
-        // Step C — delete orphaned images (treating all original variants as deleted)
-        const { imageIdsToDelete } = getOrphanedImageIds(allImages, variantsToDelete, []);
-        await deleteOrphanedImages(client, product.id, imageIdsToDelete, log, handle);
+        // Step C — photos are handed over to Image Sync (correct CFS gallery for UD-{prodId})
+        imageSyncHandles.add(handle);
 
         // Step D — set product status
         const statusMutation = targetStatus === 'ACTIVE' ? SET_PRODUCT_ACTIVE_MUTATION : SET_PRODUCT_DRAFT_MUTATION;
@@ -910,9 +920,8 @@ router.post('/publish-products', async (req, res) => {
         deleted += variantIds.length;
         console.log(`  ✓ Deleted ${variantIds.length} variant(s) from "${product.title}"`);
 
-        // Delete orphaned images
-        const { imageIdsToDelete } = getOrphanedImageIds(allImages, variantsToDelete, remainingVariants);
-        await deleteOrphanedImages(client, product.id, imageIdsToDelete, log, handle);
+        // Photos are handed over to Image Sync
+        imageSyncHandles.add(handle);
 
         for (const v of variantsForProduct) {
           log.push({
@@ -938,7 +947,8 @@ router.post('/publish-products', async (req, res) => {
   }
 
   console.log(`  ✓ Done — deleted variants: ${deleted}, published: ${published}, drafted: ${drafted}, failed: ${failed}`);
-  res.json({ success: true, dryRun, deleted, published, drafted, failed, total: variants.length, log });
+  res.json({ success: true, dryRun, deleted, published, drafted, failed, total: variants.length, log,
+    imageSyncHandles: [...imageSyncHandles] });
 });
 
 
