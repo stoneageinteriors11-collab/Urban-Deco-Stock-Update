@@ -595,7 +595,7 @@ router.get('/plan/:id/csv', async (req, res) => {
   if (onlySelected) out = out.filter(p => p.include && p.ok && !p.noChange);
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="image-sync-${onlySelected ? 'to-apply' : 'dry-run'}_${s.id}.csv"`);
-  res.send(core.plansToCsv(out));
+  res.send('\uFEFF' + core.plansToCsv(out));   // \uFEFF: Excel reads it as UTF-8
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -801,7 +801,7 @@ router.get('/jobs/:id/csv', (req, res) => {
   }
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="image-sync-results_${j.id}.csv"`);
-  res.send(core.toCsv(rows));
+  res.send('\uFEFF' + core.toCsv(rows));
 });
 
 router.get('/jobs/:id', (req, res) => {
@@ -1348,10 +1348,12 @@ async function cachedHash(urls, check) {
 
 // items: [{ handle, removedSkus: [...] }]  → stores and returns a removal plan
 async function buildRemovalPlan({ client, items, send = () => {}, check = () => {} }) {
+  const plan = { id: newId('rmplan'), createdAt: new Date().toISOString(), byHandle: {} };
+  if (!items.length) { saveRemovalPlan(plan); return plan; }   // nothing to check → don't load the 20 MB feed
   let feed = null;
+  const feedWasCached = !!feedCache;
   try { feed = await getFeed(); }
   catch (e) { send({ type: 'warn', message: `CFS image feed unavailable (${e.message}) — photos will be matched by alt text / variant photo only` }); }
-  const plan = { id: newId('rmplan'), createdAt: new Date().toISOString(), byHandle: {} };
   let n = 0;
   for (const it of items) {
     check();
@@ -1378,6 +1380,8 @@ async function buildRemovalPlan({ client, items, send = () => {}, check = () => 
   }
   send({ type: 'progress', done: items.length, total: items.length, message: 'Photo check done' });
   saveRemovalPlan(plan);
+  // Free the feed's memory again if Step 3 was the one that loaded it (Render has limited memory)
+  if (!feedWasCached) feedCache = null;
   return plan;
 }
 

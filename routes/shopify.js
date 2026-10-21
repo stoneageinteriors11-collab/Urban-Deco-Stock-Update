@@ -291,7 +291,7 @@ router.post('/delete-variants-image-plan', async (req, res) => {
       const decision = decideDeletion(product.variants.edges.map(e => e.node), orphanedSKUs, productIdSet, variantAttrIdSet);
       if (decision.toDelete.length) items.push({ handle, removedSkus: decision.toDelete.map(v => v.sku) });
     }
-    const plan = await imageSync.buildRemovalPlan({ client, items, send, check });
+    const plan = await imageSync.buildRemovalPlan({ client, items, send, check });   // loads the CFS feed only if items exist
     const products = Object.entries(plan.byHandle).map(([handle, p]) => ({ handle, title: p.title, error: p.error || null,
       counts: p.counts || null, removedGroups: p.removedGroups || [], warnings: p.warnings || [] }));
     const summary = products.reduce((a, p) => { if (p.counts) { a.remove += p.counts.remove; a.keep += p.counts.keep; a.check += p.counts.check; } return a; },

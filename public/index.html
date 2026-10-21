@@ -1257,16 +1257,47 @@ async function testConnection() {
     document.getElementById('photo-check-bar').style.width = total ? Math.round(100 * done / total) + '%' : '0';
   }
   // Works out, photo by photo, which photos belong only to the variants that will be deleted.
+  // Which selected products really lose SOME variants (only those need a photo check).
+  // Uses the comparison results already on the page — no Shopify lookups.
+  //   all variants selected + none in CFS feeds → product goes to DRAFT → photos untouched → skip
+  //   all variants selected + all in CFS feeds  → kept as is → skip
+  //   anything else                              → variants deleted → photo check
+  function productsNeedingPhotoCheck(variantsToDelete) {
+    const prodIds = new Map(cfsProductIds), attrIds = new Set(cfsVariantAttrIds);
+    const inCfs = sku => { const p = String(sku || '').split('-'); return (p[1] && prodIds.has(p[1])) || (p[2] && attrIds.has(p[2])); };
+    const selected = new Map();
+    for (const v of variantsToDelete) { if (!selected.has(v.handle)) selected.set(v.handle, new Set()); selected.get(v.handle).add(v.variantSku); }
+    const need = [], skipped = { draft: 0, keep: 0 };
+    for (const [handle, skus] of selected) {
+      const all = allResults.filter(r => r.handle === handle);
+      const allSelected = all.length > 0 && all.every(r => skus.has(r.variantSku));
+      if (allSelected) {
+        const n = all.filter(r => inCfs(r.variantSku)).length;
+        if (n === 0) { skipped.draft++; continue; }
+        if (n === all.length) { skipped.keep++; continue; }
+      }
+      need.push(handle);
+    }
+    return { need, skipped };
+  }
+
   async function runPhotoCheck(variantsToDelete) {
-    photoStatus('Checking photos of the products (CFS image feed + picture check)… this can take a minute', 0, 0);
+    const { need, skipped } = productsNeedingPhotoCheck(variantsToDelete);
+    const skipTxt = `${skipped.draft} going to Draft (photos untouched)${skipped.keep ? `, ${skipped.keep} kept as is` : ''}`;
+    if (!need.length) {
+      photoStatus(`Photo check skipped — no product loses only some of its variants (${skipTxt})`, 1, 1);
+      return { imagePlanId: null, summary: { products: 0, remove: 0, keep: 0, check: 0 }, handlesWithRemovals: [] };
+    }
+    photoStatus(`Checking photos of ${need.length} product(s) (CFS image feed + picture check)… ${skipTxt} skipped`, 0, 0);
+    const needSet = new Set(need);
     const last = await readStream('/api/shopify/delete-variants-image-plan',
-      { variants: variantsToDelete, cfsProductIds, cfsVariantAttrIds },
+      { variants: variantsToDelete.filter(v => needSet.has(v.handle)), cfsProductIds, cfsVariantAttrIds },
       ev => { if (ev.type === 'progress') photoStatus(ev.message, ev.done, ev.total); if (ev.type === 'warn') photoStatus(ev.message); },
       'btn-photo-stop');
     if (last?.type === 'stopped') throw new Error(last.message);
     if (!last || last.type !== 'done') throw new Error(last?.message || 'Photo check failed');
     const s = last.summary;
-    photoStatus(`Photo check: ${s.remove} photo(s) to remove, ${s.check} to check, ${s.keep} stay — across ${s.products} product(s)`, 1, 1);
+    photoStatus(`Photo check: ${s.remove} photo(s) to remove, ${s.check} to check, ${s.keep} stay — across ${s.products} product(s) · ${skipTxt} skipped`, 1, 1);
     return last;
   }
   // Backup zip (same as Image Sync): create → download → check it arrived complete → save.
@@ -1699,7 +1730,8 @@ async function testConnection() {
       ];
     });
     const csv  = [headers, ...rows].map(r => r.join(',')).join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
+    // \uFEFF tells Excel the file is UTF-8 (otherwise "—" shows as "â€”")
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
     const a    = document.createElement('a');
     a.href     = URL.createObjectURL(blob);
     a.download = `dry-run-log-${Date.now()}.csv`;
