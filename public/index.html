@@ -264,6 +264,11 @@
     #photo-check { margin-top: 10px; font-size: 13px; color: var(--text-muted); }
     #photo-check .bar { height: 6px; background: var(--surface2); border-radius: 99px; overflow: hidden; margin-top: 6px; }
     #photo-check .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+    #undo-panel { margin-top: 12px; padding: 12px 14px; border-radius: 8px; background: var(--surface2); border: 1px solid var(--border); font-size: 13px; }
+    #undo-panel table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+    #undo-panel th, #undo-panel td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+    #undo-panel .btn { padding: 4px 10px; font-size: 12px; }
+    .log-undone { color: var(--success); } .log-conflict { color: var(--warning); }
     #imagesync-handoff { margin-top: 12px; padding: 12px 14px; border-radius: 8px; background: rgba(99,102,241,.1); border: 1px solid rgba(99,102,241,.35); font-size: 13px; }
     .log-match     { color: var(--text-muted); }
     .log-overwrite { color: #f59e0b; }
@@ -486,6 +491,20 @@
     </div>
     <!-- Hand-over to Image Sync after promoting CFS products -->
     <div id="imagesync-handoff" class="hidden"></div>
+    <!-- Undo previous live runs (drafts, status, SKU, photos) -->
+    <div style="margin-top:10px">
+      <button class="btn btn-outline" id="btn-undo-toggle" onclick="toggleUndo()">↩ Undo a previous run</button>
+    </div>
+    <div id="undo-panel" class="hidden">
+      <div><b>Undo a live run.</b> Puts back: products set to Draft or Active, SKU changes, and detached photos.
+        <span style="color:var(--text-muted)">Deleted variants can't be brought back by Shopify, so they're listed but not undone.
+        Products changed by someone after the run are skipped unless you tick "Overwrite".</span></div>
+      <div style="margin-top:8px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <label style="font-size:12px"><input type="checkbox" id="undo-force"> Overwrite changes made after the run</label>
+        <label style="font-size:12px">Older run? Upload its undo file: <input type="file" id="undo-file" accept=".json" onchange="uploadUndoFile(this)"></label>
+      </div>
+      <div id="undo-list" style="color:var(--text-muted);margin-top:6px">Loading…</div>
+    </div>
 
     <!-- Summary Tiles -->
     <div class="summary-tiles hidden" id="summary-tiles">
@@ -1388,6 +1407,7 @@ async function testConnection() {
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
+      if (!dryRun) await saveUndoFile(data.undoId);
       showLog(data.log, dryRun);
 
       if (!dryRun && data.deleted > 0) {
@@ -1441,6 +1461,7 @@ async function testConnection() {
         body: JSON.stringify({ variants: variantsToUpdate, dryRun }),
       });
       const data = await res.json();
+      if (!dryRun) await saveUndoFile(data.undoId);
       showLog(data.log, dryRun);
 
       if (!dryRun && data.drafted > 0) {
@@ -1502,6 +1523,7 @@ async function testConnection() {
         body: JSON.stringify({ variants: variantsToPublish, dryRun }),
       });
       const data = await res.json();
+      if (!dryRun) await saveUndoFile(data.undoId);
       showLog(data.log, dryRun);
       showImageSyncHandoff(data.imageSyncHandles || [], dryRun);
 
@@ -1548,6 +1570,67 @@ async function testConnection() {
     box.classList.remove('hidden');
   }
 
+  // ── Undo ──────────────────────────────────────────────────────────────────
+  // After every live run the undo file is downloaded too (the server's copy is
+  // lost when Render restarts — the file can be uploaded again).
+  async function saveUndoFile(undoId) {
+    if (!undoId) return;
+    try {
+      const res = await fetch(`/api/shopify/undo/${undoId}/download`);
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const name = (res.headers.get('content-disposition') || '').match(/filename="?([^"]+)"?/)?.[1] || `${undoId}.json`;
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    } catch (_) {}
+  }
+  function toggleUndo() {
+    const p = document.getElementById('undo-panel');
+    p.classList.toggle('hidden');
+    if (!p.classList.contains('hidden')) loadUndoRuns();
+  }
+  const UNDO_TYPES = { status: 'status change(s)', sku: 'SKU change(s)', photos: 'photo set(s)' };
+  async function loadUndoRuns() {
+    const el = document.getElementById('undo-list');
+    try {
+      const { runs = [], error } = await (await fetch('/api/shopify/undo/runs')).json();
+      if (error) throw new Error(error);
+      if (!runs.length) { el.innerHTML = 'No live runs saved on the server. If the server restarted, upload the undo file you downloaded after the run.'; return; }
+      el.innerHTML = `<table><tr><th>When</th><th>Action</th><th>Products</th><th>Can be undone</th><th>Not undoable</th><th>Status</th><th></th></tr>` +
+        runs.map(r => {
+          const what = Object.entries(r.counts).map(([k, v]) => `${v} ${UNDO_TYPES[k] || k}`).join(' · ') || '—';
+          const done = r.changes && r.undone === r.changes;
+          return `<tr><td>${new Date(r.createdAt).toLocaleString()}</td><td>${r.label}</td><td>${r.products}</td><td>${what}</td>
+            <td>${r.variantsDeleted ? `${r.variantsDeleted} deleted variant(s)` : '—'}</td>
+            <td>${done ? '✓ undone' : r.undone ? `${r.undone} of ${r.changes} undone` : 'not undone'}</td>
+            <td style="white-space:nowrap"><button class="btn btn-outline" onclick="runUndo('${r.id}', true)">Preview</button>
+              <button class="btn btn-danger" ${done || !r.changes ? 'disabled' : ''} onclick="runUndo('${r.id}', false)">Undo</button></td></tr>`;
+        }).join('') + `</table>`;
+    } catch (e) { el.textContent = 'Could not load runs: ' + e.message; }
+  }
+  async function runUndo(id, dryRun) {
+    const force = document.getElementById('undo-force').checked;
+    if (!dryRun && !confirm(`Undo this run on the LIVE store?\n\nStatus, SKU and photo changes are put back.${force ? '\n"Overwrite" is ticked: later edits to these products will be overwritten.' : ''}`)) return;
+    try {
+      const data = await (await fetch(`/api/shopify/undo/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dryRun, force }) })).json();
+      if (data.error) throw new Error(data.error);
+      showLog(data.log, dryRun);
+      if (!dryRun) {
+        alert(`Undo done: ${data.undone} change(s) put back, ${data.skipped} skipped (changed after the run), ${data.failed} failed.\n\nRun the comparison again to refresh the results.`);
+        loadUndoRuns();
+      }
+    } catch (e) { alert('Undo failed: ' + e.message); }
+  }
+  async function uploadUndoFile(input) {
+    const f = input.files[0]; if (!f) return;
+    try {
+      const text = await f.text();
+      const data = await (await fetch('/api/shopify/undo/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file: text }) })).json();
+      if (data.error) throw new Error(data.error);
+      loadUndoRuns();
+    } catch (e) { alert('Upload failed: ' + e.message); }
+    input.value = '';
+  }
+
   // ── Log panel ─────────────────────────────────────────────────────────────
   function showLog(log, dryRun) {
     // Save for CSV download
@@ -1578,6 +1661,8 @@ async function testConnection() {
                   : l.status==='published' ? 'log-ok'
                   : l.status==='warning'   ? 'log-dry'
                   : l.status==='flagged'   ? 'log-error'
+                  : l.status==='undone'    ? 'log-undone'
+                  : l.status==='conflict'  ? 'log-conflict'
                   : 'log-ok';
         return `<p class="${cls}">[${l.status.toUpperCase()}] ${l.sku} — ${l.message}</p>`;
       }).join('');

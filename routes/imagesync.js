@@ -1424,9 +1424,11 @@ function backupCovers(backupId, productId) {
 async function detachPhotos(client, productId, photos, reasonTag) {
   if (!photos.length) return [];
   const product = await fetchProduct(client, productId);
-  const attached = new Set((product?.media?.nodes || []).map(m => m.id));
+  const orderBefore = (product?.media?.nodes || []).map(m => m.id);   // for Undo: put the old order back
+  const attached = new Set(orderBefore);
   const todo = photos.filter(p => attached.has(p.mediaId));
-  if (!todo.length) return [];
+  todo.orderBefore = orderBefore;
+  if (!todo.length) return todo;
   await fileUpdateBatched(client, todo.map(p => ({ id: p.mediaId, referencesToRemove: [productId] })), 'Detaching photos');
   const record = parseRecord(product) || {};
   const now = new Date().toISOString();
@@ -1436,7 +1438,34 @@ async function detachPhotos(client, productId, photos, reasonTag) {
   return todo;
 }
 
-router.helpers = { graphqlClient, gql, openSse, startRun, stopCheck, endRun, buildRemovalPlan, loadRemovalPlan, backupCovers, detachPhotos,
+// Undo for detached photos: re-attach the ones that still exist in Shopify Files,
+// put the old photo order back, and take them off the clean-up list.
+async function reattachPhotos(client, productId, mediaIds, orderBefore = []) {
+  const exist = new Set();
+  for (let k = 0; k < mediaIds.length; k += 100) {
+    const d = await gql(client, Q_NODES_MEDIA, { ids: mediaIds.slice(k, k + 100) });
+    for (const n of d.nodes || []) if (n && n.id) exist.add(n.id);
+  }
+  const missing = mediaIds.filter(id => !exist.has(id));
+  let product = await fetchProduct(client, productId);
+  if (!product) throw new Error('Product no longer exists');
+  const attached = new Set((product.media?.nodes || []).map(m => m.id));
+  const toAttach = mediaIds.filter(id => exist.has(id) && !attached.has(id));
+  if (toAttach.length) await fileUpdateBatched(client, toAttach.map(id => ({ id, referencesToAdd: [productId] })), 'Re-attaching photos');
+  // old order first, then anything added since
+  product = await fetchProduct(client, productId);
+  const now = (product.media?.nodes || []).map(m => m.id);
+  const ordered = [...orderBefore.filter(id => now.includes(id)), ...now.filter(id => !orderBefore.includes(id))];
+  if (ordered.join(',') !== now.join(',')) await reorderTo(client, productId, ordered);
+  const record = parseRecord(product) || {};
+  if (record.detached) {
+    record.detached = record.detached.filter(d => !mediaIds.includes(d.mediaId) || missing.includes(d.mediaId));
+    await saveRecord(client, productId, record);
+  }
+  return { reattached: toAttach.length, alreadyThere: mediaIds.filter(id => attached.has(id)).length, missing };
+}
+
+router.helpers = { graphqlClient, gql, openSse, startRun, stopCheck, endRun, buildRemovalPlan, loadRemovalPlan, backupCovers, detachPhotos, reattachPhotos,
   isBusy: () => activeRun };
 router._visualFingerprint = visualFingerprint;
 router._getFeed = getFeed;                     // exposed for tests // exposed for tests

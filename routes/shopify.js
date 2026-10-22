@@ -6,6 +6,9 @@ const { fetchCfsProducts, buildSkuCodeMap } = require('../utils/cfsApi');
 // Image Sync helpers (photo check, backup check, detach) — see routes/imagesync.js
 const imageSync = require('./imagesync').helpers;
 const { pickCfsProductByColour } = require('../utils/colourMatch');
+const undo = require('../utils/undoLog');
+// Adds an entry to a live run's undo record (no-op on dry runs)
+const rec = (run, entry) => { if (run) undo.add(run, entry); };
 
 const router = express.Router();
 
@@ -81,6 +84,7 @@ const PRODUCT_BY_HANDLE_QUERY = `
     productByHandle(handle: $handle) {
       id
       title
+      status
       images(first: 250) {
         edges { node { id altText } }
       }
@@ -326,7 +330,7 @@ function photoLogLines(plan, handle, dryRun) {
 }
 
 // Live: detach the photos marked "remove" (kept in Shopify Files for 7 days)
-async function detachPlannedPhotos(product, handle, plan, backupId, log) {
+async function detachPlannedPhotos(product, handle, plan, backupId, log, undoRun) {
   if (!plan || plan.error || !plan.counts?.remove) return;
   if (!imageSync.backupCovers(backupId, product.id)) {
     log.push({ sku: '-', handle, status: 'warning', message: 'Photos: not in the backup zip — photos left as they are' });
@@ -334,6 +338,8 @@ async function detachPlannedPhotos(product, handle, plan, backupId, log) {
   }
   try {
     const done = await imageSync.detachPhotos(graphqlClient(), product.id, plan.items.filter(i => i.verdict === 'remove'), 'step3-variant-removed');
+    if (done.length) rec(undoRun, { type: 'photos', productId: product.id, handle, title: product.title,
+      photos: done.map(d => ({ mediaId: d.mediaId, url: d.url || null })), orderBefore: done.orderBefore || [] });
     for (const l of photoLogLines(plan, handle, false)) {
       if (l.imageVerdict === 'remove' && !done.some(d => d.url === l.imageUrl)) l.message += ' (already gone)';
       log.push(l);
@@ -369,6 +375,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
   const imagePlan = imagePlanId ? imageSync.loadRemovalPlan(imagePlanId) : null;
   if (imagePlanId && !imagePlan) return res.status(400).json({ error: 'Photo check not found (server may have restarted) — run it again' });
   const photoPlanFor = handle => (imagePlan ? imagePlan.byHandle[handle] || null : null);
+  const undoRun = dryRun ? null : undo.startRun('delete-orphaned', 'Delete Selected Orphaned');
   if (!dryRun && imagePlan) {
     const needBackup = Object.values(imagePlan.byHandle).some(p => p.counts && p.counts.remove > 0);
     if (needBackup && !backupId) return res.status(400).json({ error: 'A backup zip is required before photos are removed — create it first' });
@@ -544,8 +551,9 @@ router.post('/delete-variants-bulk', async (req, res) => {
               log.push({ sku: node.sku, handle, status: 'deleted', message: `Deleted: ${product.title} / ${node.title}`, productCode: productCodeBySku.get(node.sku) || '' });
               deleted++;
             }
+            rec(undoRun, { type: 'variants-deleted', productId: product.id, handle, title: product.title, skus: cfsUnmatched.map(n => n.sku) });
             // Photos of the removed variants → detached (from the photo check)
-            await detachPlannedPhotos(product, handle, photoPlanFor(handle), backupId, log);
+            await detachPlannedPhotos(product, handle, photoPlanFor(handle), backupId, log, undoRun);
           }
 
         } else if (cfsUnmatched.length === 0) {
@@ -567,6 +575,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
               log.push({ sku: v.variantSku, handle, status: 'drafted', message: `Product set to DRAFT: ${product.title}`, productCode: v.productCode || '' });
               deleted++;
             }
+            rec(undoRun, { type: 'status', productId: product.id, handle, title: product.title, before: product.status || 'ACTIVE', after: 'DRAFT' });
           }
         }
 
@@ -586,8 +595,9 @@ router.post('/delete-variants-bulk', async (req, res) => {
             log.push({ sku: node.sku, handle, status: 'deleted', message: `Deleted: ${product.title} / ${node.title}`, productCode: productCodeBySku.get(node.sku) || '' });
             deleted++;
           }
+          rec(undoRun, { type: 'variants-deleted', productId: product.id, handle, title: product.title, skus: orphanedNodes.map(n => n.sku) });
           // Photos of the removed variants → detached (from the photo check)
-          await detachPlannedPhotos(product, handle, photoPlanFor(handle), backupId, log);
+          await detachPlannedPhotos(product, handle, photoPlanFor(handle), backupId, log, undoRun);
         }
       }
 
@@ -603,9 +613,114 @@ router.post('/delete-variants-bulk', async (req, res) => {
   }
 
   console.log(`  ✓ Done — deleted: ${deleted}, failed: ${failed}, total: ${variants.length}`);
-  res.json({ success: true, dryRun, deleted, failed, total: variants.length, log });
+  const undoId = undoRun ? undo.save(undoRun) : null;
+  res.json({ success: true, dryRun, deleted, failed, total: variants.length, log, undoId });
 });
 
+
+// ════════════════════════════════════════════════════════════════════════════
+// UNDO for Step 3 live runs — drafts, status changes, SKU changes, photos.
+// (Deleted variants can't be brought back by Shopify; they are listed, not undone.)
+//   GET  /api/shopify/undo/runs              recent runs (saved on the server)
+//   GET  /api/shopify/undo/:id/download      the undo file
+//   POST /api/shopify/undo/upload            { file: <contents of an undo file> }
+//   POST /api/shopify/undo/:id               { dryRun, force, entries?: [index,…] }
+// ════════════════════════════════════════════════════════════════════════════
+const Q_UNDO_PRODUCT = `query P($id: ID!) { product(id: $id) { id title status variants(first: 250) { nodes { id sku } } } }`;
+const M_SET_STATUS = `mutation S($product: ProductUpdateInput!) { productUpdate(product: $product) { product { id status } userErrors { field message } } }`;
+
+router.get('/undo/runs', (req, res) => {
+  try { res.json({ runs: undo.list() }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get('/undo/:id/download', (req, res) => {
+  const run = undo.load(req.params.id);
+  if (!run) return res.status(404).send('Undo record not found (server may have restarted) — upload the undo file instead');
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="step3-undo_${run.createdAt.slice(0, 10)}_${run.id.slice(-6)}.json"`);
+  res.send(JSON.stringify(run, null, 2));
+});
+
+router.post('/undo/upload', (req, res) => {
+  try {
+    const obj = typeof req.body?.file === 'string' ? JSON.parse(req.body.file) : req.body?.file;
+    const run = undo.importRun(obj);
+    res.json({ ok: true, run: undo.summarise(run) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+router.post('/undo/:id', async (req, res) => {
+  const run = undo.load(req.params.id);
+  if (!run) return res.status(404).json({ error: 'Undo record not found — upload the undo file' });
+  const dryRun = req.body?.dryRun !== false;
+  const force = !!req.body?.force;
+  const only = Array.isArray(req.body?.entries) ? new Set(req.body.entries.map(Number)) : null;
+  if (!dryRun && imageSync.isBusy()) return res.status(409).json({ error: 'Image Sync is running — try again when it has finished' });
+  let client;
+  try { client = graphqlClient(); } catch (e) { return res.status(400).json({ error: e.message }); }
+
+  const log = [];
+  const doneIdx = [];
+  let undone = 0, skipped = 0, failed = 0;
+  // newest change first, so several changes to one product unwind in the right order
+  const order = run.entries.map((e, i) => i).reverse();
+  const cache = new Map();
+  const current = async pid => {
+    if (!cache.has(pid)) cache.set(pid, (await gql(client, Q_UNDO_PRODUCT, { id: pid }))?.product || null);
+    return cache.get(pid);
+  };
+  for (const i of order) {
+    const e = run.entries[i];
+    if (only && !only.has(i)) continue;
+    const base = { sku: '-', handle: e.handle };
+    const name = e.title || e.handle;
+    if (e.type === 'variants-deleted') {
+      log.push({ ...base, status: 'info', message: `Can't undo: ${e.skus.length} deleted variant(s) (${e.skus.join(', ')}) — Shopify can't bring deleted variants back · ${name}` });
+      continue;
+    }
+    if (e.undoneAt) { log.push({ ...base, status: 'info', message: `Already undone (${e.undoneAt.slice(0, 16).replace('T', ' ')}): ${e.type} · ${name}` }); continue; }
+    try {
+      const p = await current(e.productId);
+      if (!p) { log.push({ ...base, status: 'error', message: `Product no longer exists — can't undo · ${name}` }); failed++; continue; }
+      if (e.type === 'status') {
+        if (p.status === e.before) { log.push({ ...base, status: 'info', message: `Status is already ${e.before} — nothing to do · ${name}` }); doneIdx.push(i); continue; }
+        if (p.status !== e.after && !force) { log.push({ ...base, status: 'conflict', message: `Status was changed after the run (now ${p.status}, the run set ${e.after}) — skipped; tick "Overwrite" to undo anyway · ${name}` }); skipped++; continue; }
+        if (dryRun) { log.push({ ...base, status: 'dry_run', message: `Would set status back: ${p.status} → ${e.before} · ${name}` }); continue; }
+        const r = await gql(client, M_SET_STATUS, { product: { id: p.id, status: e.before } });
+        const errs = r?.productUpdate?.userErrors || [];
+        if (errs.length) throw new Error(errs.map(x => x.message).join(', '));
+        p.status = e.before;
+        log.push({ ...base, status: 'undone', message: `Status put back: ${e.after} → ${e.before} · ${name}` });
+      } else if (e.type === 'sku') {
+        const v = (p.variants?.nodes || []).find(x => x.id === e.variantId);
+        if (!v) { log.push({ ...base, status: 'error', message: `Variant no longer exists — can't put SKU ${e.before} back · ${name}` }); failed++; continue; }
+        if (v.sku === e.before) { log.push({ ...base, status: 'info', message: `SKU is already ${e.before} · ${name}` }); doneIdx.push(i); continue; }
+        if (v.sku !== e.after && !force) { log.push({ ...base, status: 'conflict', message: `SKU was changed after the run (now ${v.sku}) — skipped; tick "Overwrite" to undo anyway · ${name}` }); skipped++; continue; }
+        if (dryRun) { log.push({ ...base, sku: e.before, status: 'dry_run', message: `Would put SKU back: ${v.sku} → ${e.before} · ${name}` }); continue; }
+        const r = await gql(client, UPDATE_VARIANT_SKU_MUTATION, { productId: p.id, variants: [{ id: v.id, sku: e.before }] });
+        const errs = r?.productVariantsBulkUpdate?.userErrors || [];
+        if (errs.length) throw new Error(errs.map(x => x.message).join(', '));
+        v.sku = e.before;
+        log.push({ ...base, sku: e.before, status: 'undone', message: `SKU put back: ${e.after} → ${e.before} · ${name}` });
+      } else if (e.type === 'photos') {
+        if (dryRun) {
+          for (const ph of e.photos) log.push({ ...base, status: 'dry_run', message: `Would re-attach photo · ${name}`, imageUrl: ph.url, imageVerdict: 'keep' });
+          continue;
+        }
+        const r = await imageSync.reattachPhotos(client, e.productId, e.photos.map(x => x.mediaId), e.orderBefore || []);
+        log.push({ ...base, status: r.missing.length ? 'warning' : 'undone',
+          message: `Photos: ${r.reattached} re-attached${r.alreadyThere ? `, ${r.alreadyThere} already there` : ''}, old order put back` +
+            (r.missing.length ? ` — ${r.missing.length} already deleted from Shopify Files (use Image Sync → Restore with the backup zip)` : '') + ` · ${name}` });
+      }
+      if (!dryRun) { doneIdx.push(i); undone++; }
+    } catch (err) {
+      log.push({ ...base, status: 'error', message: `Undo failed: ${err.message} · ${name}` }); failed++;
+    }
+    await sleep(150);
+  }
+  if (!dryRun && doneIdx.length) undo.markUndone(run, doneIdx);
+  res.json({ success: true, dryRun, undone, skipped, failed, log, run: undo.summarise(undo.load(run.id)) });
+});
 
 // ── POST /api/shopify/set-draft ───────────────────────────────────────────────
 //
@@ -640,6 +755,7 @@ router.post('/set-draft', async (req, res) => {
   }
 
   console.log(`▶ Setting ${byHandle.size} products to DRAFT (dryRun=${dryRun})`);
+  const undoRun = dryRun ? null : undo.startRun('set-draft', 'Set Selected to Draft');
 
   for (const [handle, representative] of byHandle) {
     const variantsForHandle = variants.filter(v => v.handle === handle);
@@ -681,6 +797,7 @@ router.post('/set-draft', async (req, res) => {
           log.push({ sku, handle, status: 'drafted', message: `Set to DRAFT: ${product.title}`, productCode: productCodeBySku.get(sku) || '' });
           drafted++;
         }
+        rec(undoRun, { type: 'status', productId: product.id, handle, title: product.title, before: product.status || 'ACTIVE', after: 'DRAFT' });
       }
 
       await sleep(350);
@@ -695,7 +812,8 @@ router.post('/set-draft', async (req, res) => {
   }
 
   console.log(`  ✓ Done — drafted: ${drafted}, failed: ${failed}`);
-  res.json({ success: true, dryRun, drafted, failed, total: variants.length, log });
+  const undoId = undoRun ? undo.save(undoRun) : null;
+  res.json({ success: true, dryRun, drafted, failed, total: variants.length, log, undoId });
 });
 
 
@@ -762,6 +880,7 @@ router.post('/publish-products', async (req, res) => {
 
   console.log(`▶ Promoting ${byHandle.size} CFS-product-match products (dryRun=${dryRun})`);
   const imageSyncHandles = new Set();   // products whose photos Image Sync should update afterwards
+  const undoRun = dryRun ? null : undo.startRun('publish', 'Publish Selected as Main Product');
 
   // ── Before changing anything: decide WHICH CFS product each fully-promoted
   //    Shopify product becomes (same rules for dry run and live run) ─────────
@@ -903,6 +1022,7 @@ router.post('/publish-products', async (req, res) => {
             continue;
           }
           deleted += deleteRest.length;
+          rec(undoRun, { type: 'variants-deleted', productId: product.id, handle, title: product.title, skus: deleteRest.map(n => n.sku) });
           for (const node of deleteRest) {
             log.push({ sku: node.sku, handle, status: 'deleted', message: `Deleted (cleanup before SKU promotion): ${product.title} / ${variantLabel(node)}`, productCode: productCodeBySku.get(node.sku) || '' });
           }
@@ -920,6 +1040,7 @@ router.post('/publish-products', async (req, res) => {
           failed++;
         } else {
           log.push({ sku: newSku, handle, status: 'updated', message: `SKU promoted: "${keepNode.sku}" → "${newSku}" on "${product.title}"`, productCode: productCodeBySku.get(keepNode.sku) || '' });
+          if (newSku !== keepNode.sku) rec(undoRun, { type: 'sku', productId: product.id, handle, title: product.title, variantId: keepNode.id, before: keepNode.sku, after: newSku });
           console.log(`  ✓ SKU promoted: "${keepNode.sku}" → "${newSku}"`);
         }
 
@@ -938,6 +1059,7 @@ router.post('/publish-products', async (req, res) => {
           const verb      = targetStatus === 'ACTIVE' ? 'published' : 'drafted';
           const cfsStatus = anyCfsInactive ? 'inactive' : 'active';
           log.push({ sku: newSku, handle, status: verb, message: `Promoted to main product & set to ${targetStatus} (CFS: ${cfsStatus}): ${product.title}`, productCode: productCodeBySku.get(keepNode.sku) || '' });
+          if ((product.status || '') !== targetStatus) rec(undoRun, { type: 'status', productId: product.id, handle, title: product.title, before: product.status || 'ACTIVE', after: targetStatus });
           if (targetStatus === 'ACTIVE') published++;
           else drafted++;
           console.log(`  ✓ "${product.title}" → ${targetStatus} as main product (CFS: ${cfsStatus})`);
@@ -964,6 +1086,7 @@ router.post('/publish-products', async (req, res) => {
 
         deleted += variantIds.length;
         console.log(`  ✓ Deleted ${variantIds.length} variant(s) from "${product.title}"`);
+        rec(undoRun, { type: 'variants-deleted', productId: product.id, handle, title: product.title, skus: variantsToDelete.map(n => n.sku) });
 
         // Photos are handed over to Image Sync
         imageSyncHandles.add(handle);
@@ -992,7 +1115,8 @@ router.post('/publish-products', async (req, res) => {
   }
 
   console.log(`  ✓ Done — deleted variants: ${deleted}, published: ${published}, drafted: ${drafted}, failed: ${failed}`);
-  res.json({ success: true, dryRun, deleted, published, drafted, failed, flagged, total: variants.length, log,
+  const undoId = undoRun ? undo.save(undoRun) : null;
+  res.json({ success: true, dryRun, deleted, published, drafted, failed, flagged, total: variants.length, log, undoId,
     imageSyncHandles: [...imageSyncHandles] });
 });
 
