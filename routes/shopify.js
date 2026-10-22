@@ -7,6 +7,33 @@ const { fetchCfsProducts, buildSkuCodeMap } = require('../utils/cfsApi');
 const imageSync = require('./imagesync').helpers;
 const { pickCfsProductByColour } = require('../utils/colourMatch');
 const undo = require('../utils/undoLog');
+const { findOwnVariants } = require('../utils/ownVariant');
+
+// CFS product names (stock feed), cached 30 min — used to tell "Default"-option variants apart
+let cfsNamesCache = null;
+async function getCfsNames() {
+  if (cfsNamesCache && Date.now() - cfsNamesCache.at < 30 * 60 * 1000) return cfsNamesCache.map;
+  const map = new Map();
+  try { for (const p of await fetchCfsProducts()) map.set(String(p.productId), p.productName || null); }
+  catch (e) { console.warn('  ⚠ CFS product names unavailable:', e.message); return map; }
+  cfsNamesCache = { at: Date.now(), map };
+  return map;
+}
+
+// Is the variant being removed this product's OWN variant? (see utils/ownVariant.js)
+//   own variant(s) all being removed → draft the whole product instead
+//   otherwise → delete just the other variant(s)
+function ownDraftCheck(product, handle, deletingSkus, cfsNames) {
+  const variants = product.variants.edges.map(e => e.node);
+  const r = findOwnVariants({ title: product.title, handle }, variants, cfsNames);
+  if (!r.ok) return { draft: false, note: `couldn't tell which variant this product is (${r.reason}) — only the missing variant(s) are deleted` };
+  const own = variants.filter(v => r.ownIds.includes(v.id));
+  const ownSkus = own.map(v => v.sku);
+  if (own.every(v => deletingSkus.has(v.sku))) {
+    return { draft: true, reason: `this product is "${r.label}" (${ownSkus.join(', ')}) and that is not in CFS — whole product goes to DRAFT, variants and photos kept` };
+  }
+  return { draft: false, note: `this product is "${r.label}" (${ownSkus.join(', ')}), still in CFS — only the other variant(s) are deleted` };
+}
 // Adds an entry to a live run's undo record (no-op on dry runs)
 const rec = (run, entry) => { if (run) undo.add(run, entry); };
 
@@ -255,15 +282,23 @@ function productRefSku(variantSku) {
 //   all orphaned, none in CFS feeds   → product set to DRAFT (photos untouched)
 //   all orphaned, all in CFS feeds    → keep everything
 //   all orphaned, mixed               → delete only the ones not in CFS feeds
-function decideDeletion(allVariants, orphanedSKUs, productIdSet, variantAttrIdSet) {
+function decideDeletion(allVariants, orphanedSKUs, productIdSet, variantAttrIdSet, product = null, handle = '', cfsNames = new Map()) {
   const inCfs = v => { const { prodId, varId } = parseSku(v.sku); return (prodId && productIdSet.has(prodId)) || (varId && variantAttrIdSet.has(varId)); };
   const orphaned = allVariants.filter(v => orphanedSKUs.has(v.sku));
   if (!orphaned.length) return { mode: 'none', toDelete: [] };
-  if (orphaned.length < allVariants.length) return { mode: 'variants', toDelete: orphaned };
-  const unmatched = allVariants.filter(v => !inCfs(v));
-  if (unmatched.length === allVariants.length) return { mode: 'draft', toDelete: [] };
-  if (!unmatched.length) return { mode: 'keep', toDelete: [] };
-  return { mode: 'mixed', toDelete: unmatched };
+  let result;
+  if (orphaned.length < allVariants.length) result = { mode: 'variants', toDelete: orphaned };
+  else {
+    const unmatched = allVariants.filter(v => !inCfs(v));
+    if (unmatched.length === allVariants.length) return { mode: 'draft', toDelete: [] };
+    if (!unmatched.length) return { mode: 'keep', toDelete: [] };
+    result = { mode: 'mixed', toDelete: unmatched };
+  }
+  if (product) {
+    const own = ownDraftCheck(product, handle, new Set(result.toDelete.map(v => v.sku)), cfsNames);
+    if (own.draft) return { mode: 'draft-own', toDelete: [], reason: own.reason };
+  }
+  return result;
 }
 
 // ── POST /api/shopify/delete-variants-image-plan  (live progress, Stop) ──────
@@ -284,6 +319,7 @@ router.post('/delete-variants-image-plan', async (req, res) => {
     const variantAttrIdSet = new Set(cfsVariantAttrIds);
     const byHandle = new Map();
     for (const v of variants) { if (!byHandle.has(v.handle)) byHandle.set(v.handle, new Set()); byHandle.get(v.handle).add(v.variantSku); }
+    const cfsNames = await getCfsNames();
     const items = [];
     let n = 0;
     for (const [handle, orphanedSKUs] of byHandle) {
@@ -293,7 +329,7 @@ router.post('/delete-variants-image-plan', async (req, res) => {
       const data = await gql(client, PRODUCT_BY_HANDLE_QUERY, { handle });
       const product = data?.productByHandle;
       if (!product) continue;
-      const decision = decideDeletion(product.variants.edges.map(e => e.node), orphanedSKUs, productIdSet, variantAttrIdSet);
+      const decision = decideDeletion(product.variants.edges.map(e => e.node), orphanedSKUs, productIdSet, variantAttrIdSet, product, handle, cfsNames);
       if (decision.toDelete.length) items.push({ handle, removedSkus: decision.toDelete.map(v => v.sku) });
     }
     const plan = await imageSync.buildRemovalPlan({ client, items, send, check });   // loads the CFS feed only if items exist
@@ -422,6 +458,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
         let action = 'delete variant(s)';
         let deletedNodes = [], remainingNodes = [];   // used after the lookup below
         const photoLines = [];                         // photo lines go after the variant lines
+        let ownReason = null, ownNote = null;          // own-variant rule (draft instead of delete)
 
         try {
           const data = await gql(client, PRODUCT_BY_HANDLE_QUERY, { handle });
@@ -453,6 +490,16 @@ router.post('/delete-variants-bulk', async (req, res) => {
               action = `delete ${orphanedSKUs.size} of ${allVariants.length} variant(s)`;
             }
 
+            // Own-variant rule: is one of the variants being deleted this product's OWN one?
+            if (action.startsWith('delete')) {
+              const deleting = allOrphaned
+                ? allVariants.filter(v => { const { prodId, varId } = parseSku(v.sku); return !(prodId && productIdSet.has(prodId)) && !(varId && variantAttrIdSet.has(varId)); })
+                : deletedNodes;
+              const own = ownDraftCheck(product, handle, new Set(deleting.map(v => v.sku)), await getCfsNames());
+              if (own.draft) { action = 'set product to DRAFT (own variant not in CFS)'; ownReason = own.reason; }
+              else ownNote = own.note;
+            }
+
             // Photos: photo-by-photo plan from the photo check (Image Sync engine)
             if (action.startsWith('set product to DRAFT')) {
               photoLines.push({ sku: '-', handle, status: 'dry_run', message: `Photos: product goes to DRAFT — photos left as they are: ${productTitle}` });
@@ -467,7 +514,9 @@ router.post('/delete-variants-bulk', async (req, res) => {
           const label    = shopNode ? variantLabel(shopNode) : (v.option1 || v.option2 || v.variantSku);
 
           let msg;
-          if (action.startsWith('set product to DRAFT')) {
+          if (ownReason) {
+            msg = `Would set "${productTitle}" to DRAFT — ${ownReason}`;
+          } else if (action.startsWith('set product to DRAFT')) {
             msg = `Would set "${productTitle}" to DRAFT — all variants orphaned, deleting "${label}" (no CFS match)`;
           } else if (action.startsWith('keep all')) {
             msg = `Would keep "${label}" — all variants found in CFS feeds: ${productTitle}`;
@@ -481,6 +530,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
           }
           log.push({ sku: v.variantSku, handle, status: 'dry_run', message: msg, productCode: v.productCode || '' });
         }
+        if (ownNote) log.push({ sku: '-', handle, status: /couldn't tell/.test(ownNote) ? 'warning' : 'info', message: `Which variant is this product: ${ownNote} · ${productTitle}` });
 
         log.push(...photoLines);
 
@@ -504,6 +554,18 @@ router.post('/delete-variants-bulk', async (req, res) => {
 
       const allVariants     = product.variants.edges.map(e => e.node);
       const allImages       = product.images.edges.map(e => e.node);
+      const cfsNames        = await getCfsNames();
+      // Own-variant rule (live): draft the whole product instead of deleting its own variant
+      const draftBecauseOwn = async (reason) => {
+        const result = await gql(client, SET_PRODUCT_DRAFT_MUTATION, { productId: product.id });
+        const errs = result?.productUpdate?.userErrors || [];
+        if (errs.length) {
+          for (const v of orphanedForProduct) { log.push({ sku: v.variantSku, handle, status: 'error', message: `Set-to-draft failed: ${errs.map(e => e.message).join(', ')}`, productCode: v.productCode || '' }); failed++; }
+          return;
+        }
+        rec(undoRun, { type: 'status', productId: product.id, handle, title: product.title, before: product.status || 'ACTIVE', after: 'DRAFT' });
+        for (const v of orphanedForProduct) { log.push({ sku: v.variantSku, handle, status: 'drafted', message: `Product set to DRAFT — ${reason}: ${product.title}`, productCode: v.productCode || '' }); deleted++; }
+      };
       const orphanedNodes   = allVariants.filter(v => orphanedSKUs.has(v.sku));
       const nonOrphanedLeft = allVariants.length - orphanedNodes.length;
 
@@ -534,7 +596,12 @@ router.post('/delete-variants-bulk', async (req, res) => {
           log.push({ sku: node.sku, handle, status: 'kept', message: `Kept - found in CFS feeds: ${product.title} / ${node.title}`, productCode: productCodeBySku.get(node.sku) || '' });
         }
 
-        if (cfsMatched.length > 0 && cfsUnmatched.length > 0) {
+        const ownMixed = (cfsMatched.length > 0 && cfsUnmatched.length > 0)
+          ? ownDraftCheck(product, handle, new Set(cfsUnmatched.map(n => n.sku)), cfsNames) : null;
+        if (ownMixed && ownMixed.draft) {
+          console.log(`  → Drafting "${product.title}" — own variant not in CFS`);
+          await draftBecauseOwn(ownMixed.reason);
+        } else if (cfsMatched.length > 0 && cfsUnmatched.length > 0) {
           console.log(`  ↗ "${product.title}" — deleting ${cfsUnmatched.length} unmatched, keeping ${cfsMatched.length} CFS-matched`);
           const variantIds = cfsUnmatched.map(v => v.id);
           const result = await gql(client, DELETE_VARIANTS_MUTATION, { productId: product.id, variantsIds: variantIds });
@@ -579,6 +646,9 @@ router.post('/delete-variants-bulk', async (req, res) => {
           }
         }
 
+      } else if (ownDraftCheck(product, handle, new Set(orphanedNodes.map(n => n.sku)), cfsNames).draft) {
+        console.log(`  → Drafting "${product.title}" — own variant not in CFS`);
+        await draftBecauseOwn(ownDraftCheck(product, handle, new Set(orphanedNodes.map(n => n.sku)), cfsNames).reason);
       } else {
         const variantIds = orphanedNodes.map(v => v.id);
         const result = await gql(client, DELETE_VARIANTS_MUTATION, { productId: product.id, variantsIds: variantIds });
