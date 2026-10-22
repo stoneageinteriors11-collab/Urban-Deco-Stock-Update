@@ -245,20 +245,22 @@ const last = ev => ev[ev.length - 1];
     ev = await call('POST', '/api/images/cleanup/scan', {});
     assert.strictEqual(last(ev).items.length, 0, 'photos were put back by Undo, so nothing to clean up');
 
-    // 6. promote (CFS product match) → photos handed over to Image Sync
+    // 6. promote (CFS product match): unclear title → flagged; title says White → keep White, delete the rest
+    r = await call('POST', '/api/shopify/publish-products', { variants: [{ handle: 'milan', variantSku: product.variants[0].sku, cfsProductStatus: 'active' }], dryRun: true });
+    assert(r.flagged === 1 && /NOT changed — can't tell which variant/.test(r.log[0].message), JSON.stringify(r.log));
+    product.title = 'Milan Dining Table - White Marble';
     r = await call('POST', '/api/shopify/publish-products', { variants: [{ handle: 'milan', variantSku: product.variants[0].sku, cfsProductStatus: 'active' }], dryRun: true });
     assert.deepStrictEqual(r.imageSyncHandles, ['milan']);
+    assert(r.log.some(l => /Would update SKU .* → "UD-144250" & set product to ACTIVE/.test(l.message)), JSON.stringify(r.log));
+    assert.strictEqual(r.log.filter(l => /not this product's own variant/.test(l.message)).length, product.variants.length - 1);
     assert(r.log.some(l => /will be updated in Image Sync/.test(l.message)));
-    const mediaBefore = [...product.mediaIds];
-    r = await call('POST', '/api/shopify/publish-products', { variants: [{ handle: 'milan', variantSku: product.variants[0].sku, cfsProductStatus: 'active' }], dryRun: false });
-    assert.deepStrictEqual(r.imageSyncHandles, ['milan']); assert.deepStrictEqual(product.mediaIds, mediaBefore, 'promotion no longer deletes photos');
     // 7. Promote when ALL variants go and they point at 2 CFS products (White 144250 + Beige 1262189)
     const allRows = () => product.variants.map(v => ({ handle: 'milan', variantSku: v.sku, cfsProductStatus: 'active' }));
     product.title = 'Milan Dining Table';                                  // no colour in the title → unclear
     let before7 = JSON.stringify(product.variants);
     r = await call('POST', '/api/shopify/publish-products', { variants: allRows(), dryRun: false });
     assert.strictEqual(r.flagged, 1, JSON.stringify(r.log.slice(-2)));
-    assert(r.log.every(l => l.status === 'flagged' && /NOT promoted — No CFS product matches the colour/.test(l.message)));
+    assert(r.log.every(l => l.status === 'flagged' && /NOT changed — No CFS product matches the colour/.test(l.message)));
     assert.strictEqual(JSON.stringify(product.variants), before7, 'flagged product untouched on the LIVE run too');
     assert.deepStrictEqual(r.imageSyncHandles, []);
     product.title = 'Milan Dining Table - Light White Marble';           // shade word CFS doesn't have → flag
@@ -267,7 +269,7 @@ const last = ev => ev[ev.length - 1];
     product.title = 'Milan Dining Table - Travertine Beige Marble';      // clear colour → keep the Beige CFS product
     r = await call('POST', '/api/shopify/publish-products', { variants: allRows(), dryRun: true });
     const keeper = r.log.find(l => /Would update SKU/.test(l.message));
-    assert(keeper && keeper.sku.startsWith('UD-1262189') && /colour match: travertine beige/.test(keeper.message), JSON.stringify(r.log));
+    assert(keeper && keeper.sku.startsWith('UD-1262189') && /matches CFS product "Milan Travertine Beige/.test(keeper.message), JSON.stringify(r.log));
     r = await call('POST', '/api/shopify/publish-products', { variants: allRows(), dryRun: false });
     assert.strictEqual(product.variants.length, 1);
     assert.strictEqual(product.variants[0].sku, 'UD-1262189', 'kept the Beige CFS product, not the first variant');

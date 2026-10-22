@@ -1486,6 +1486,12 @@ async function testConnection() {
     }
   }
 
+  function relatedRowsFor(rows) {
+    const handles = new Set(rows.flatMap(r => [r.handle, ...(r.sharedSkuHandles || [])]));
+    return allResults.filter(r => handles.has(r.handle))
+      .map(r => ({ handle: r.handle, variantSku: r.variantSku, matchStatus: r.matchStatus, cfsProductStatus: r.cfsProductStatus }));
+  }
+
   // ── Publish selected CFS-product-match variants as Active on Shopify ────────
   async function publishSelected() {
     const skus = [...selectedSKUs];
@@ -1497,19 +1503,15 @@ async function testConnection() {
       return;
     }
 
-    // Count how many will be active vs draft based on CFS status
-    const toActive = variantsToPublish.filter(v => (v.cfsProductStatus || 'active') === 'active').length;
-    const toDraft  = variantsToPublish.filter(v => v.cfsProductStatus === 'inactive').length;
 
     const dryRun = document.getElementById('dry-run-toggle').checked;
     const msg = dryRun
       ? `DRY RUN: Will log what would happen to ${variantsToPublish.length} variants (no actual changes).\n\nNote: product status is only updated when no other variants remain on the product.`
       : `Promote ${variantsToPublish.length} CFS Product Match items:\n` +
-        `  • Delete variant from Shopify\n` +
-        `  • If no other variants remain on the product:\n` +
-        `      – ${toActive} → ACTIVE (CFS active)\n` +
-        `      – ${toDraft} → DRAFT (CFS inactive)\n` +
-        `  • Products with other variants: variant deleted, status unchanged\n\nContinue?`;
+        `  • Each product keeps only its OWN variant (from its title) as the main product → ACTIVE (DRAFT if CFS inactive)\n` +
+        `  • Product whose own variant is not in CFS → whole product DRAFT, variants & photos kept\n` +
+        `  • Products that share a selected SKU are checked too\n` +
+        `  • Unclear titles → flagged, nothing changed\n\nRun a dry run first to see each product. Continue?`;
 
     if (!confirm(msg)) return;
 
@@ -1520,7 +1522,9 @@ async function testConnection() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         // variants already carry cfsProductStatus from the compare response
-        body: JSON.stringify({ variants: variantsToPublish, dryRun }),
+        // + comparison status of EVERY variant on these products (and products sharing a selected SKU),
+        //   so the server can tell whether each product's own variant is still in CFS
+        body: JSON.stringify({ variants: variantsToPublish, related: relatedRowsFor(variantsToPublish), dryRun }),
       });
       const data = await res.json();
       if (!dryRun) await saveUndoFile(data.undoId);

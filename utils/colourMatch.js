@@ -68,4 +68,23 @@ function pickCfsProductByColour(shopifyTitle, candidates) {
   return { ok: false, reason: `More than one CFS product matches the title (${matches.map(m => m.prodId).join(', ')}) — please check` };
 }
 
-module.exports = { pickCfsProductByColour, colourWords };
+/**
+ * Does ONE CFS product fit the Shopify title? (used when a product is promoted to
+ * the CFS product behind its own variant)
+ *   • a shade word in the title the CFS name doesn't have → no ("Light Grey" vs "Grey")
+ *   • title and CFS name both name colours but share none → no ("Brown" vs "Grey")
+ *   • no CFS name → can't compare → ok
+ */
+function titleFitsCfsName(shopifyTitle, cfsName) {
+  if (!cfsName) return { ok: true, reason: 'no CFS name to compare' };
+  const t = colourWords(shopifyTitle), n = colourWords(cfsName);
+  const stray = [...t].filter(w => SHADE_WORDS.has(w) && !n.has(w));
+  if (stray.length) return { ok: false, reason: `Title says "${stray.join(' ')}" but the CFS product doesn't ("${cfsName}") — please check` };
+  const tCol = [...t].filter(w => !SHADE_WORDS.has(w)), nCol = [...n].filter(w => !SHADE_WORDS.has(w));
+  if (tCol.length && nCol.length && !tCol.some(w => n.has(w))) {
+    return { ok: false, reason: `Title colour (${tCol.join(' ')}) doesn't match the CFS product "${cfsName}" — please check` };
+  }
+  return { ok: true, reason: `matches CFS product "${cfsName}"` };
+}
+
+module.exports = { pickCfsProductByColour, colourWords, titleFitsCfsName };
