@@ -1508,7 +1508,8 @@ async function testConnection() {
     const msg = dryRun
       ? `DRY RUN: Will log what would happen to ${variantsToPublish.length} variants (no actual changes).\n\nNote: product status is only updated when no other variants remain on the product.`
       : `Promote ${variantsToPublish.length} CFS Product Match items:\n` +
-        `  • Each product keeps only its OWN variant (from its title) as the main product → ACTIVE (DRAFT if CFS inactive)\n` +
+        `  • Own variant (from the title) → SKU shortened to the CFS product, product ACTIVE\n` +
+        `  • Other variants: kept (SKU shortened) if their CFS product exists, deleted if not in CFS\n` +
         `  • Product whose own variant is not in CFS → whole product DRAFT, variants & photos kept\n` +
         `  • Products that share a selected SKU are checked too\n` +
         `  • Unclear titles → flagged, nothing changed\n\nRun a dry run first to see each product. Continue?`;

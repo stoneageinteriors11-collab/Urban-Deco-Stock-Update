@@ -1000,8 +1000,7 @@ router.post('/publish-products', async (req, res) => {
         const cands = [...new Set(all.map(n => parseSku(n.sku).prodId).filter(Boolean))].map(prodId => ({ prodId, name: cfsNames.get(prodId) || null }));
         const d = pickCfsProductByColour(product.title, cands);
         if (!d.ok) return { action: 'flag', reason: d.reason };
-        const keep = all.find(n => parseSku(n.sku).prodId === d.prodId);
-        return promotePlan(keep, all, d.reason);
+        return tidyPlan(product, all, stat, all.filter(n => parseSku(n.sku).prodId === d.prodId), d.prodId, d.reason);
       }
       return { action: 'flag', reason: `can't tell which variant this product is (${own.reason})` };
     }
@@ -1012,10 +1011,8 @@ router.post('/publish-products', async (req, res) => {
     const label    = `this product is "${own.label}" (${ownSkus})`;
 
     if (ownStats.includes('ok')) {
-      // Own variant is a normal CFS variant → just remove the selected OTHER variants
-      const del = picked.filter(n => !own.ownIds.includes(n.id));
-      if (!del.length) return { action: 'none', reason: `${label}, still in CFS — nothing to change` };
-      return { action: 'delete', deleteNodes: del, reason: `${label}, still in CFS — only the other variant(s) are removed` };
+      // Own variant is a normal CFS variant → leave it; tidy the other variants only
+      return tidyPlan(product, all, stat, [], null, `${label}, still in CFS`);
     }
     const ownCfs = ownNodes.filter(n => stat(n)?.matchStatus === 'cfs-product');
     if (ownCfs.length) {
@@ -1030,24 +1027,45 @@ router.post('/publish-products', async (req, res) => {
         if (!fit.ok) return { action: 'flag', reason: fit.reason };
         why = fit.reason;
       }
-      const keep = ownCfs.find(n => parseSku(n.sku).prodId === prodId);
-      if (stat(keep)?.cfsProductStatus === 'inactive') {
+      const keepRow = stat(ownCfs.find(n => parseSku(n.sku).prodId === prodId));
+      if (keepRow?.cfsProductStatus === 'inactive') {
         return { action: 'draft', reason: `${label} — CFS product UD-${prodId} is inactive — whole product goes to DRAFT, variants and photos kept` };
       }
-      return promotePlan(keep, all, `${label} — ${why}`);
+      return tidyPlan(product, all, stat, ownCfs.filter(n => parseSku(n.sku).prodId === prodId), prodId, `${label} — ${why}`);
     }
     if (ownStats.every(s => s === 'unknown')) return { action: 'flag', reason: `${label} — its CFS status is unknown, run the comparison again` };
     return { action: 'draft', reason: `${label} and that is not in CFS — whole product goes to DRAFT, variants and photos kept` };
   }
-  function promotePlan(keep, all, reason) {
-    const { prodId } = parseSku(keep.sku);
-    return { action: 'promote', keepNode: keep, prodId, newSku: prodId ? `UD-${prodId}` : keep.sku,
-      deleteNodes: all.filter(n => n !== keep), reason };
+
+  // What happens to every variant of a product that stays:
+  //   own variant (CFS product)          → SKU shortened to UD-{prodId}, product ACTIVE
+  //   other variant, CFS product active  → kept, SKU shortened to UD-{prodId}
+  //   other variant, normal CFS variant  → kept as is
+  //   other variant, not in CFS          → deleted
+  //   anything else (inactive, code-only, unknown) → kept as is, noted
+  // Two variants that would get the same SKU → flag, nothing changed.
+  function tidyPlan(product, all, stat, ownKeep, ownProdId, reason) {
+    if (ownKeep.length > 1) return { action: 'flag', reason: `${ownKeep.length} variants (${ownKeep.map(variantLabel).join(', ')}) point at the same CFS product UD-${ownProdId}, which has no variants in CFS — please check` };
+    const renames = [], deleteNodes = [], asIs = [];
+    for (const n of all) {
+      const s = stat(n), { prodId } = parseSku(n.sku);
+      const isOwn = ownKeep.includes(n);
+      if (isOwn || (s?.matchStatus === 'cfs-product' && s.cfsProductStatus !== 'inactive' && prodId)) {
+        if (n.sku !== `UD-${prodId}`) renames.push({ node: n, newSku: `UD-${prodId}`, own: isOwn });
+      } else if (s?.matchStatus === 'orphaned') deleteNodes.push(n);
+      else if (s?.matchStatus !== 'ok') asIs.push({ node: n, why: ({ 'cfs-product': 'its CFS product is inactive', 'cfs-inactive': 'inactive in CFS',
+        'code-only': 'only an old saved code matches CFS — check', draft: 'product is draft' })[s?.matchStatus] || 'status unknown' });
+    }
+    const newSkus = renames.map(r => r.newSku);
+    const dup = newSkus.find((x, i) => newSkus.indexOf(x) !== i || all.some(n => n.sku === x && !renames.some(r => r.node === n)));
+    if (dup) return { action: 'flag', reason: `two variants would both get SKU ${dup} (CFS has no variants for it) — please check` };
+    if (!renames.length && !deleteNodes.length && !ownProdId) return { action: 'none', reason: `${reason} — nothing to change` };
+    return { action: 'promote', prodId: ownProdId, setActive: !!ownProdId, renames, deleteNodes, asIs, reason };
   }
 
   // Two Shopify products must not become the same CFS product
   const byProd = new Map();
-  for (const [h, p] of plans) if (p.action === 'promote') { if (!byProd.has(p.prodId)) byProd.set(p.prodId, []); byProd.get(p.prodId).push(h); }
+  for (const [h, p] of plans) if (p.action === 'promote' && p.prodId) { if (!byProd.has(p.prodId)) byProd.set(p.prodId, []); byProd.get(p.prodId).push(h); }
   for (const [prodId, handles] of byProd) if (handles.length > 1) {
     for (const h of handles) plans.set(h, { action: 'flag', reason: `would become the same CFS product (UD-${prodId}) as ${handles.filter(x => x !== h).join(', ')} — please check` });
   }
@@ -1094,45 +1112,30 @@ router.post('/publish-products', async (req, res) => {
         continue;
       }
 
-      if (plan.action === 'delete') {
-        if (dryRun) {
-          const remaining = product.variants.edges.map(e => e.node).filter(n => !plan.deleteNodes.includes(n));
-          for (const n of plan.deleteNodes) log.push({ sku: n.sku, handle, status: 'dry_run', productCode: codeOf(n.sku),
-            message: `Would delete variant "${variantLabel(n)}" — ${plan.reason}; ${remaining.length} remaining: ${variantList(remaining)} · ${product.title}${extra}` });
-          log.push({ sku: '-', handle, status: 'dry_run', message: `Photos: not changed here — will be updated in Image Sync: ${product.title}` });
-          imageSyncHandles.add(handle);
-          continue;
-        }
-        const result = await gql(client, DELETE_VARIANTS_MUTATION, { productId: product.id, variantsIds: plan.deleteNodes.map(n => n.id) });
-        const errs = result?.productVariantsBulkDelete?.userErrors || [];
-        if (errs.length) {
-          for (const n of plan.deleteNodes) { log.push({ sku: n.sku, handle, status: 'error', productCode: codeOf(n.sku), message: `Variant delete failed: ${errs.map(e => e.message).join(', ')}` }); failed++; }
-        } else {
-          deleted += plan.deleteNodes.length;
-          rec(undoRun, { type: 'variants-deleted', productId: product.id, handle, title: product.title, skus: plan.deleteNodes.map(n => n.sku) });
-          for (const n of plan.deleteNodes) log.push({ sku: n.sku, handle, status: 'deleted', productCode: codeOf(n.sku),
-            message: `Variant "${variantLabel(n)}" deleted — ${plan.reason}: ${product.title}${extra}` });
-          imageSyncHandles.add(handle);
-        }
-        await sleep(350);
-        continue;
-      }
-
-      // ── PROMOTE: keep the own variant as UD-{prodId}, delete the rest, set status ──
-      const keepRow = statusBySku.get(`${handle}|${plan.keepNode.sku}`) || {};
+      // ── KEEP & TIDY: shorten SKUs of variants that are CFS products, delete variants
+      //    not in CFS, set ACTIVE when the product's own variant is a CFS product ──
+      const ownRename = plan.renames.find(r => r.own);
+      const keepRow = ownRename ? (statusBySku.get(`${handle}|${ownRename.node.sku}`) || {}) : {};
       const targetStatus = keepRow.cfsProductStatus === 'inactive' ? 'DRAFT' : 'ACTIVE';
       if (dryRun) {
         for (const n of plan.deleteNodes) log.push({ sku: n.sku, handle, status: 'dry_run', productCode: codeOf(n.sku),
-          message: `Would delete variant "${variantLabel(n)}" (not this product's own variant) · ${product.title}${extra}` });
-        log.push({ sku: plan.keepNode.sku, handle, status: 'dry_run', productCode: codeOf(plan.keepNode.sku),
-          message: `Would update SKU "${plan.keepNode.sku}" → "${plan.newSku}" & set product to ${targetStatus} (promoted to main product — ${plan.reason}) · ${product.title}${extra}` });
-        log.push({ sku: '-', handle, status: 'dry_run', message: `Photos: not changed here — will be updated in Image Sync after the promotion: ${product.title}` });
+          message: `Would delete variant "${variantLabel(n)}" (not in CFS) · ${product.title}${extra}` });
+        for (const r of plan.renames) log.push({ sku: r.node.sku, handle, status: 'dry_run', productCode: codeOf(r.node.sku),
+          message: r.own
+            ? `Would update SKU "${r.node.sku}" → "${r.newSku}" (own variant "${variantLabel(r.node)}") · ${product.title}${extra}`
+            : `Would keep variant "${variantLabel(r.node)}" and update SKU "${r.node.sku}" → "${r.newSku}" (CFS product exists) · ${product.title}${extra}` });
+        for (const a of plan.asIs) log.push({ sku: a.node.sku, handle, status: 'dry_run', productCode: codeOf(a.node.sku),
+          message: `Would leave variant "${variantLabel(a.node)}" as it is (${a.why}) · ${product.title}${extra}` });
+        log.push({ sku: '-', handle, status: 'dry_run', message: plan.setActive
+          ? `Would set product to ${targetStatus} (main product — ${plan.reason}) · ${product.title}${extra}`
+          : `Product status unchanged (${plan.reason}) · ${product.title}${extra}` });
+        log.push({ sku: '-', handle, status: 'dry_run', message: `Photos: not changed here — will be updated in Image Sync: ${product.title}` });
         imageSyncHandles.add(handle);
         await sleep(150);
         continue;
       }
 
-      // Step A — delete every other variant
+      // Step A — delete variants not in CFS
       if (plan.deleteNodes.length) {
         const delResult = await gql(client, DELETE_VARIANTS_MUTATION, { productId: product.id, variantsIds: plan.deleteNodes.map(v => v.id) });
         const delErrors = delResult?.productVariantsBulkDelete?.userErrors || [];
@@ -1145,40 +1148,45 @@ router.post('/publish-products', async (req, res) => {
         deleted += plan.deleteNodes.length;
         rec(undoRun, { type: 'variants-deleted', productId: product.id, handle, title: product.title, skus: plan.deleteNodes.map(n => n.sku) });
         for (const n of plan.deleteNodes) log.push({ sku: n.sku, handle, status: 'deleted', productCode: codeOf(n.sku),
-          message: `Deleted (not this product's own variant): ${product.title} / ${variantLabel(n)}` });
+          message: `Deleted (not in CFS): ${product.title} / ${variantLabel(n)}` });
       }
 
-      // Step B — kept variant's SKU → UD-{prodId}
-      const keepNode = plan.keepNode, newSku = plan.newSku;
-      if (newSku !== keepNode.sku) {
-        const updateResult = await gql(client, UPDATE_VARIANT_SKU_MUTATION, { productId: product.id, variants: [{ id: keepNode.id, sku: newSku }] });
+      // Step B — shorten SKUs to UD-{prodId}
+      if (plan.renames.length) {
+        const updateResult = await gql(client, UPDATE_VARIANT_SKU_MUTATION, { productId: product.id, variants: plan.renames.map(r => ({ id: r.node.id, sku: r.newSku })) });
         const updateErrors = updateResult?.productVariantsBulkUpdate?.userErrors || [];
         if (updateErrors.length) {
-          log.push({ sku: keepNode.sku, handle, status: 'error', message: `SKU update failed: ${updateErrors.map(e => e.message).join(', ')}`, productCode: codeOf(keepNode.sku) });
-          failed++;
+          for (const r of plan.renames) { log.push({ sku: r.node.sku, handle, status: 'error', message: `SKU update failed: ${updateErrors.map(e => e.message).join(', ')}`, productCode: codeOf(r.node.sku) }); failed++; }
         } else {
-          log.push({ sku: newSku, handle, status: 'updated', message: `SKU promoted: "${keepNode.sku}" → "${newSku}" on "${product.title}"`, productCode: codeOf(keepNode.sku) });
-          rec(undoRun, { type: 'sku', productId: product.id, handle, title: product.title, variantId: keepNode.id, before: keepNode.sku, after: newSku });
-          console.log(`  ✓ SKU promoted: "${keepNode.sku}" → "${newSku}"`);
+          for (const r of plan.renames) {
+            log.push({ sku: r.newSku, handle, status: 'updated', productCode: codeOf(r.node.sku),
+              message: `SKU updated: "${r.node.sku}" → "${r.newSku}" (${r.own ? 'own variant' : 'kept, CFS product exists'}) on "${product.title}" / ${variantLabel(r.node)}` });
+            rec(undoRun, { type: 'sku', productId: product.id, handle, title: product.title, variantId: r.node.id, before: r.node.sku, after: r.newSku });
+          }
+          console.log(`  ✓ ${plan.renames.length} SKU(s) updated on "${product.title}"`);
         }
       }
+      for (const a of plan.asIs) log.push({ sku: a.node.sku, handle, status: 'skipped', productCode: codeOf(a.node.sku),
+        message: `Left as it is (${a.why}): ${product.title} / ${variantLabel(a.node)}` });
 
       // Step C — photos are handed over to Image Sync
       imageSyncHandles.add(handle);
 
-      // Step D — product status
-      const statusMutation = targetStatus === 'ACTIVE' ? SET_PRODUCT_ACTIVE_MUTATION : SET_PRODUCT_DRAFT_MUTATION;
-      const statusResult = await gql(client, statusMutation, { productId: product.id });
-      const statusErrors = statusResult?.productUpdate?.userErrors || [];
-      if (statusErrors.length) {
-        log.push({ sku: newSku, handle, status: 'error', message: `Status update failed: ${statusErrors.map(e => e.message).join(', ')}`, productCode: codeOf(keepNode.sku) });
-        failed++;
-      } else {
-        const verb = targetStatus === 'ACTIVE' ? 'published' : 'drafted';
-        log.push({ sku: newSku, handle, status: verb, message: `Promoted to main product & set to ${targetStatus} (${plan.reason}): ${product.title}${extra}`, productCode: codeOf(keepNode.sku) });
-        if ((product.status || '') !== targetStatus) rec(undoRun, { type: 'status', productId: product.id, handle, title: product.title, before: product.status || 'ACTIVE', after: targetStatus });
-        if (targetStatus === 'ACTIVE') published++; else drafted++;
-        console.log(`  ✓ "${product.title}" → ${targetStatus} as main product`);
+      // Step D — product status (only when the product's own variant became the main CFS product)
+      if (plan.setActive) {
+        const statusMutation = targetStatus === 'ACTIVE' ? SET_PRODUCT_ACTIVE_MUTATION : SET_PRODUCT_DRAFT_MUTATION;
+        const statusResult = await gql(client, statusMutation, { productId: product.id });
+        const statusErrors = statusResult?.productUpdate?.userErrors || [];
+        if (statusErrors.length) {
+          log.push({ sku: '-', handle, status: 'error', message: `Status update failed: ${statusErrors.map(e => e.message).join(', ')}` });
+          failed++;
+        } else {
+          const verb = targetStatus === 'ACTIVE' ? 'published' : 'drafted';
+          log.push({ sku: ownRename?.newSku || '-', handle, status: verb, message: `Main product, set to ${targetStatus} (${plan.reason}): ${product.title}${extra}` });
+          if ((product.status || '') !== targetStatus) rec(undoRun, { type: 'status', productId: product.id, handle, title: product.title, before: product.status || 'ACTIVE', after: targetStatus });
+          if (targetStatus === 'ACTIVE') published++; else drafted++;
+          console.log(`  ✓ "${product.title}" → ${targetStatus} as main product`);
+        }
       }
       await sleep(350);
 

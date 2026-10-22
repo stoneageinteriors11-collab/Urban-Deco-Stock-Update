@@ -251,8 +251,9 @@ const last = ev => ev[ev.length - 1];
     product.title = 'Milan Dining Table - White Marble';
     r = await call('POST', '/api/shopify/publish-products', { variants: [{ handle: 'milan', variantSku: product.variants[0].sku, cfsProductStatus: 'active' }], dryRun: true });
     assert.deepStrictEqual(r.imageSyncHandles, ['milan']);
-    assert(r.log.some(l => /Would update SKU .* → "UD-144250" & set product to ACTIVE/.test(l.message)), JSON.stringify(r.log));
-    assert.strictEqual(r.log.filter(l => /not this product's own variant/.test(l.message)).length, product.variants.length - 1);
+    assert(r.log.some(l => /Would update SKU .* → "UD-144250" \(own variant/.test(l.message)), JSON.stringify(r.log));
+    assert(r.log.some(l => /Would set product to ACTIVE \(main product/.test(l.message)), JSON.stringify(r.log));
+    assert.strictEqual(r.log.filter(l => /Would leave variant .* as it is \(status unknown\)/.test(l.message)).length, product.variants.length - 1, 'unknown variants are left alone');
     assert(r.log.some(l => /will be updated in Image Sync/.test(l.message)));
     // 7. Promote when ALL variants go and they point at 2 CFS products (White 144250 + Beige 1262189)
     const allRows = () => product.variants.map(v => ({ handle: 'milan', variantSku: v.sku, cfsProductStatus: 'active' }));
@@ -266,18 +267,12 @@ const last = ev => ev[ev.length - 1];
     product.title = 'Milan Dining Table - Light White Marble';           // shade word CFS doesn't have → flag
     r = await call('POST', '/api/shopify/publish-products', { variants: allRows(), dryRun: true });
     assert(r.flagged === 1 && /Title says "light"/.test(r.log[0].message), r.log[0].message);
-    product.title = 'Milan Dining Table - Travertine Beige Marble';      // clear colour → keep the Beige CFS product
-    r = await call('POST', '/api/shopify/publish-products', { variants: allRows(), dryRun: true });
-    const keeper = r.log.find(l => /Would update SKU/.test(l.message));
-    assert(keeper && keeper.sku.startsWith('UD-1262189') && /matches CFS product "Milan Travertine Beige/.test(keeper.message), JSON.stringify(r.log));
+    product.title = 'Milan Dining Table - Travertine Beige Marble';      // Beige 160 + 180 both = one CFS product with no variants → flag
+    before7 = JSON.stringify(product.variants);
     r = await call('POST', '/api/shopify/publish-products', { variants: allRows(), dryRun: false });
-    assert.strictEqual(product.variants.length, 1);
-    assert.strictEqual(product.variants[0].sku, 'UD-1262189', 'kept the Beige CFS product, not the first variant');
-    assert.deepStrictEqual(r.imageSyncHandles, ['milan']);
-    const keptId = product.variants[0].id;
-    u = await call('POST', `/api/shopify/undo/${r.undoId}`, { dryRun: false });
-    assert.strictEqual(product.variants.find(v => v.id === keptId).sku.startsWith('UD-1262189-'), true, 'SKU put back');
-    assert(u.log.some(l => /Can't undo: \d+ deleted variant/.test(l.message)));
+    assert(r.flagged === 1 && /point at the same CFS product UD-1262189/.test(r.log[0].message), JSON.stringify(r.log));
+    assert.strictEqual(JSON.stringify(product.variants), before7, 'nothing changed');
+
     // 8. OWN-VARIANT rule: the product's own variant is not in CFS → whole product to DRAFT
     const resetVariants = () => { let n = 500; product.variants = [];
       for (const [colour, cfs] of [['White', 144250], ['Grey', 601535], ['Beige', 1262189]]) for (const size of ['160', '180'])

@@ -1,6 +1,6 @@
 // Step 3 "Publish Selected as Main Product" — the own-variant rule (London case).
 //   Brown product: own variant Brown → CFS product inactive/missing → whole product DRAFT
-//   Grey product:  own variant Grey  → promoted (UD-1239265), Brown variant removed
+//   Grey product:  own variant Grey  → UD-1239265; Brown kept if its CFS product exists, deleted if not in CFS
 // Fake Shopify + fake CFS feed; nothing real is called.
 const assert = require('assert');
 const fs = require('fs');
@@ -70,22 +70,27 @@ const rows = (brownStatus) => [H_B, H_G].flatMap(h => [
       let r = await call('/api/shopify/publish-products', { variants: selected, related, dryRun: true });
       const msgs = r.log.map(l => `${l.handle}: ${l.message}`);
       assert(msgs.some(m => m.startsWith(H_B) && /Would set "London Recliner Sofa - 3 Seater - Brown Leather" to DRAFT — this product is "Brown"/.test(m)), msgs.join('\n'));
-      assert(msgs.some(m => m.startsWith(H_G) && /Would delete variant "Brown \/ Manual Recliner" \(not this product's own variant\)/.test(m)), msgs.join('\n'));
-      assert(msgs.some(m => m.startsWith(H_G) && /Would update SKU "UD-1239265-17200080" → "UD-1239265" & set product to ACTIVE/.test(m)), msgs.join('\n'));
+      assert(msgs.some(m => m.startsWith(H_G) && (brownStatus === 'orphaned' ? /Would delete variant "Brown \/ Manual Recliner" \(not in CFS\)/ : /Would leave variant "Brown \/ Manual Recliner" as it is/).test(m)), msgs.join('\n'));
+      assert(msgs.some(m => m.startsWith(H_G) && /Would update SKU "UD-1239265-17200080" → "UD-1239265" \(own variant/.test(m)), msgs.join('\n'));
       assert.deepStrictEqual(r.imageSyncHandles, [H_G], 'only the Grey product goes to Image Sync');
       r = await call('/api/shopify/publish-products', { variants: selected, related, dryRun: false });
       const b = products[H_B], g = products[H_G];
       assert.strictEqual(b.status, 'DRAFT'); assert.strictEqual(b.variants.length, 2, 'Brown product keeps its variants');
-      assert.strictEqual(g.status, 'ACTIVE'); assert.deepStrictEqual(g.variants.map(n => n.sku), ['UD-1239265'], 'Grey product = main product');
-      if (brownStatus === 'cfs-product') console.log(msgs.join('\n'));
+      assert.strictEqual(g.status, 'ACTIVE');
+      if (brownStatus === 'orphaned') assert.deepStrictEqual(g.variants.map(n => n.sku), ['UD-1239265'], 'Brown (not in CFS) removed from Grey product');
+      else assert.deepStrictEqual(g.variants.map(n => n.sku), [BROWN, 'UD-1239265'], 'Brown (CFS product inactive) left as it is');
+      console.log(msgs.join('\n'));
     }
-    // B. CFS Brown product ACTIVE → Brown product becomes its own main product (Grey removed)
+    // B. CFS Brown product ACTIVE → both products keep Brown + Grey, SKUs shortened to the CFS products
     reset();
     const related = rows('cfs-product').map(r => r.variantSku === BROWN ? { ...r, cfsProductStatus: 'active' } : r);
     const selected = related.filter(r => r.handle === H_B);
+    const rr = await call('/api/shopify/publish-products', { variants: selected, related, dryRun: true });
+    console.log(rr.log.map(l => `${l.handle}: ${l.message}`).join('\n'));
     await call('/api/shopify/publish-products', { variants: selected, related, dryRun: false });
-    assert.deepStrictEqual(products[H_B].variants.map(n => n.sku), ['UD-1239270']);
-    assert.deepStrictEqual(products[H_G].variants.map(n => n.sku), ['UD-1239265']);
+    assert.deepStrictEqual(products[H_B].variants.map(n => n.sku), ['UD-1239270', 'UD-1239265'], 'Brown product: own Brown + Grey sibling kept, both shortened');
+    assert.deepStrictEqual(products[H_G].variants.map(n => n.sku), ['UD-1239270', 'UD-1239265'], 'Grey product: Brown sibling kept too');
+    assert(products[H_B].status === 'ACTIVE' && products[H_G].status === 'ACTIVE');
     // C. Unclear title → nothing changed
     reset(); products[H_B].title = 'London Recliner Sofa - 3 Seater - Brown and Grey Leather';
     const r = await call('/api/shopify/publish-products', { variants: rows('orphaned').filter(x => x.handle === H_B && x.variantSku === BROWN), related: rows('orphaned').filter(x => x.handle === H_B), dryRun: false });
