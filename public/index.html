@@ -1094,6 +1094,7 @@ async function testConnection() {
   // ── Filtering ─────────────────────────────────────────────────────────────
   function setFilter(f, btn) {
     activeFilter = f;
+    document.getElementById('btn-delete').textContent = '🗑 Delete Selected Orphaned';   // default label
     document.querySelectorAll('.fbtn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
 
@@ -1131,6 +1132,7 @@ async function testConnection() {
       labelEl.textContent  = 'Select all "SKU not in CFS"';
       wrapEl.style.display = '';
       btnDel.style.display = '';
+      btnDel.textContent   = '🗑 Draft / Remove Selected';
     } else if (f === 'all') {
       labelEl.textContent    = 'Select all orphaned & CFS Inactive';
       wrapEl.style.display   = '';
@@ -1141,8 +1143,10 @@ async function testConnection() {
     }
     // OK / Draft — nothing selectable; all hidden (already done by hideAll)
 
-    // Uncheck select-all when switching filters
+    // Switching tabs starts with nothing selected (ticks from another tab must
+    // never be acted on by this tab's button)
     document.getElementById('select-all').checked = false;
+    selectedSKUs.clear();
     currentPage = 1;
     applyFilter2();
   }
@@ -1344,13 +1348,21 @@ async function testConnection() {
 
   // ── Delete selected ───────────────────────────────────────────────────────
   async function deleteSelected() {
-    const skus = [...selectedSKUs];
-    if (!skus.length) { alert('No orphaned variants selected.'); return; }
+    // Only selected rows that belong to the tab you're on (All = orphaned + "SKU not in CFS")
+    const allowed = activeFilter === 'code-only' ? ['code-only']
+                  : activeFilter === 'orphaned'  ? ['orphaned']
+                  : ['orphaned', 'code-only'];
+    const skus = allResults.filter(r => selectedSKUs.has(r.variantSku) && allowed.includes(r.matchStatus)).map(r => r.variantSku);
+    if (!skus.length) { alert('No rows selected on this tab.'); return; }
+    const productCount = new Set(allResults.filter(r => skus.includes(r.variantSku)).map(r => r.handle)).size;
 
     const dryRun = document.getElementById('dry-run-toggle').checked;
     const msg = dryRun
-      ? `DRY RUN: Will log what would happen to ${skus.length} variants (no actual changes).`
-      : `⚠️ This will PERMANENTLY DELETE ${skus.length} variants from Shopify.\n\n` +
+      ? `DRY RUN: Will log what would happen to ${skus.length} variant(s) across ${productCount} product(s) (no actual changes).\n\n` +
+        `Products where ALL variants are selected (and none are in CFS) go to DRAFT; otherwise only the selected variants are deleted.`
+      : `⚠️ ${skus.length} variant(s) across ${productCount} product(s):\n` +
+        `  • products where ALL variants are selected (and none are in CFS) → set to DRAFT\n` +
+        `  • otherwise the selected variants are PERMANENTLY DELETED\n\n` +
         `Photos that belong only to removed colours will be DETACHED (kept in Shopify Files for 7 days).\n` +
         `A backup zip of those products' photos is downloaded first. Continue?`;
 
@@ -1359,8 +1371,7 @@ async function testConnection() {
     document.getElementById('btn-delete').disabled = true;
     document.getElementById('delete-spinner').classList.remove('hidden');
 
-    const variantsToDelete = allResults.filter(r => skus.includes(r.variantSku) && ['orphaned', 'code-only'].includes(r.matchStatus));
-    if (!variantsToDelete.length) { alert('Select Orphaned or "SKU not in CFS" rows to delete.'); return; }
+    const variantsToDelete = allResults.filter(r => skus.includes(r.variantSku));
 
     try {
       // 1. Photo check (read-only) — which photos belong only to the deleted variants
