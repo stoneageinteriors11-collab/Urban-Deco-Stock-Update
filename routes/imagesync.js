@@ -34,6 +34,7 @@ const multer   = require('multer');
 const archiver = require('archiver');
 const yauzl    = require('yauzl');
 const sharp    = require('sharp');
+const { parse: parseCsv } = require('csv-parse/sync');
 require('dotenv').config();
 
 const core = require('../utils/imageSyncCore');
@@ -42,6 +43,7 @@ const router = express.Router();
 
 // ── Settings ─────────────────────────────────────────────────────────────────
 const FEED_URL        = 'https://www.choicefurnituresuperstore.co.uk/cronItemGalleryUrls_Json.php';
+const FEED_CSV_URL    = 'https://www.choicefurnituresuperstore.co.uk/cronItemGalleryUrls.php';   // same data as CSV (fallback)
 const FEED_TTL_MS     = 30 * 60 * 1000;
 const MF_NAMESPACE    = 'ud_image_sync';
 const MF_KEY          = 'record';
@@ -237,16 +239,42 @@ function sameSnapshot(a, b) {
 
 // ── CFS feed (cached) ────────────────────────────────────────────────────────
 let feedCache = null; // { at, generated, byId: Map }
+// The JSON feed is the normal source. If it's broken (e.g. damaged file) or empty,
+// the same data is read from the CSV export instead. If BOTH fail we stop —
+// an empty / broken feed is never treated as "no images".
+async function readJsonFeed() {
+  const res = await axios.get(FEED_URL, { timeout: 240000, maxContentLength: 200 * 1024 * 1024, responseType: 'text', transformResponse: r => r });
+  let data;
+  try { data = JSON.parse(res.data); } catch (e) { throw new Error(`JSON feed is damaged (${e.message.slice(0, 60)})`); }
+  const products = data?.products;
+  if (!Array.isArray(products) || !products.length) throw new Error('JSON feed has no products');
+  return { products, generated: data.generated || null };
+}
+async function readCsvFeed() {
+  const res = await axios.get(FEED_CSV_URL, { timeout: 240000, maxContentLength: 200 * 1024 * 1024, responseType: 'text', transformResponse: r => r });
+  const rows = parseCsv(res.data, { columns: true, bom: true, skip_empty_lines: true, relax_column_count: true, trim: true });
+  if (!rows.length || !('iProductId' in rows[0])) throw new Error('CSV feed has no products / unexpected columns');
+  const products = rows.map(r => {
+    // gallery columns are "Gallery Image1", "Gallery Image2", … in order
+    const gallery = Object.keys(r).filter(k => /^Gallery Image\d+$/i.test(k))
+      .sort((a, b) => parseInt(a.replace(/\D/g, ''), 10) - parseInt(b.replace(/\D/g, ''), 10))
+      .map(k => r[k]).filter(Boolean);
+    return { iProductId: r.iProductId, vSKU: r.vSKU, mainImage: r['Main Image'], galleryCount: Number(r['Gallery Count']), galleryImages: gallery };
+  });
+  return { products, generated: null };
+}
 async function getFeed(force = false) {
   if (!force && feedCache && Date.now() - feedCache.at < FEED_TTL_MS) return feedCache;
-  const res = await axios.get(FEED_URL, { timeout: 240000, maxContentLength: 200 * 1024 * 1024 });
-  const products = res.data?.products;
-  if (!Array.isArray(products) || products.length === 0) {
-    // Never treat an empty / broken feed as "no images" — stop instead.
-    throw new Error('CFS image feed returned no products — stopping (nothing was changed)');
+  let got, source, jsonProblem = null;
+  try { got = await readJsonFeed(); source = 'JSON feed'; }
+  catch (e) {
+    jsonProblem = e.message;
+    console.warn(`  ⚠ CFS image JSON feed unusable (${jsonProblem}) — using the CSV export instead`);
+    try { got = await readCsvFeed(); source = 'CSV export (JSON feed unavailable)'; }
+    catch (e2) { throw new Error(`CFS image feed unavailable — JSON: ${jsonProblem}; CSV: ${e2.message} — stopping (nothing was changed)`); }
   }
-  const byId = new Map(products.map(p => [String(p.iProductId), p]));
-  feedCache = { at: Date.now(), generated: res.data.generated || null, total: products.length, byId };
+  const byId = new Map(got.products.map(p => [String(p.iProductId), p]));
+  feedCache = { at: Date.now(), generated: got.generated, total: got.products.length, byId, source, jsonProblem };
   return feedCache;
 }
 
@@ -459,7 +487,8 @@ router.post('/dry-run', async (req, res) => {
 
     send({ type: 'status', message: 'Loading CFS image feed (can take ~90 seconds)…' });
     const feed = await getFeed(!!req.body?.refreshFeed);
-    send({ type: 'status', message: `CFS feed: ${feed.total} products (generated ${feed.generated})` });
+    send({ type: 'status', message: `CFS photos from: ${feed.source} — ${feed.total} products${feed.generated ? ` (generated ${feed.generated})` : ''}` });
+    if (feed.jsonProblem) send({ type: 'warn', message: `CFS JSON feed problem: ${feed.jsonProblem} — using the CSV export` });
 
     // 1. Which products?
     let products = [];
@@ -1352,7 +1381,7 @@ async function buildRemovalPlan({ client, items, send = () => {}, check = () => 
   if (!items.length) { saveRemovalPlan(plan); return plan; }   // nothing to check → don't load the 20 MB feed
   let feed = null;
   const feedWasCached = !!feedCache;
-  try { feed = await getFeed(); }
+  try { feed = await getFeed(); send({ type: 'progress', done: 0, total: items.length, message: `CFS photos from: ${feed.source}` }); }
   catch (e) { send({ type: 'warn', message: `CFS image feed unavailable (${e.message}) — photos will be matched by alt text / variant photo only` }); }
   let n = 0;
   for (const it of items) {
@@ -1409,5 +1438,6 @@ async function detachPhotos(client, productId, photos, reasonTag) {
 
 router.helpers = { graphqlClient, gql, openSse, startRun, stopCheck, endRun, buildRemovalPlan, loadRemovalPlan, backupCovers, detachPhotos,
   isBusy: () => activeRun };
-router._visualFingerprint = visualFingerprint; // exposed for tests
+router._visualFingerprint = visualFingerprint;
+router._getFeed = getFeed;                     // exposed for tests // exposed for tests
 module.exports = router;

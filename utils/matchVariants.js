@@ -20,11 +20,10 @@
  *        (CFS has this as a product entry but no matching variant — needs review)
  *
  *   d) Deep search — Shopify metafield codes already synced to the product:
- *      Shopify variant_code (custom.variant_code) found in cfsVarCodeSet
- *        → matchStatus = 'ok'   (CFS variant feed still carries this code)
- *      Shopify product_code (custom.product_code) found in cfsProductCodeToStatus
- *        AND CFS status is 'active'   → matchStatus = 'ok'
- *        AND CFS status is 'inactive' → matchStatus = 'cfs-inactive'
+ *      Shopify variant_code / product_code still found in the CFS feeds, BUT the
+ *      SKU's own CFS IDs are not → matchStatus = 'code-only'
+ *        (only an old saved code matches — the code may now belong to a different
+ *         CFS product; shown for a human to check, never actioned automatically)
  *
  *   e) Not found in any check → matchStatus = 'orphaned'
  *
@@ -34,7 +33,10 @@
  *   'cfs-inactive'— product exists in CFS but is marked Inactive there
  *   'cfs-product' — raw prodId found in CFS Product Id column; exists as a CFS product,
  *                   not as a CFS variant — surface for review/restructuring
+ *   'code-only'   — SKU not in CFS, only an old saved code matches; check
  *   'orphaned'    — not found anywhere in CFS; candidate for deletion/drafting
+ *
+ * Every row also gets sharedSkuHandles: other Shopify products using the same SKU.
  *
  * @param {Array}  shopifyVariants       — from streamShopifyVariants()
  * @param {Set}    validVariantSKUs      — from streamVariantSKUs()       (full UD-x-y format)
@@ -78,6 +80,7 @@ function compareVariants(
     const shopifyStatus = (v.status || '').toLowerCase();
 
     let matchStatus;
+    let codeOnlyNote = '';
 
     if (SHOPIFY_INACTIVE.has(shopifyStatus)) {
       // Product is already draft/archived on Shopify — no action needed
@@ -107,17 +110,16 @@ function compareVariants(
         matchStatus = 'cfs-product';
 
       } else if (v.shopifyVariantCode && cfsVarCodeSet.has(v.shopifyVariantCode)) {
-        // Deep search — Step 2d(i):
-        // The variant's already-synced custom.variant_code exists in the CFS variant
-        // feed's var_code column. SKU may have changed but the product is still live.
-        matchStatus = 'ok';
+        // Deep search — Step 2d(i): only the saved custom.variant_code matches.
+        // The SKU itself isn't in CFS, so the code may now belong to another
+        // CFS product → flag for a human, don't treat as OK.
+        matchStatus = 'code-only';
+        codeOnlyNote = `saved variant code "${v.shopifyVariantCode}" is in CFS, but SKU ${sku} is not`;
 
       } else if (v.shopifyProductCode && cfsProductCodeToStatus.has(v.shopifyProductCode)) {
-        // Deep search — Step 2d(ii):
-        // The product's already-synced custom.product_code exists in the CFS product
-        // feed's Product Code column. Honour the CFS status for this product.
-        const cfsStatus = cfsProductCodeToStatus.get(v.shopifyProductCode);
-        matchStatus = cfsStatus === 'inactive' ? 'cfs-inactive' : 'ok';
+        // Deep search — Step 2d(ii): only the saved custom.product_code matches.
+        matchStatus = 'code-only';
+        codeOnlyNote = `saved product code "${v.shopifyProductCode}" is in CFS, but SKU ${sku} is not`;
 
       } else {
         // Not found anywhere — SKU, raw IDs, and both code lookups all missed
@@ -151,7 +153,20 @@ function compareVariants(
     // Combined display value (variant code preferred; falls back to product code)
     const productCode = variantCode || productCodeOnly || '';
 
-    results.push({ ...v, matchStatus, productCode, variantCode, productCodeOnly, ...(cfsProductStatus !== undefined && { cfsProductStatus }) });
+    results.push({ ...v, matchStatus, productCode, variantCode, productCodeOnly, ...(cfsProductStatus !== undefined && { cfsProductStatus }),
+      ...(codeOnlyNote && { codeOnlyNote }) });
+  }
+
+  // Same SKU on more than one Shopify product → note the other products on each row
+  const handlesBySku = new Map();
+  for (const r of results) {
+    if (!r.variantSku) continue;
+    if (!handlesBySku.has(r.variantSku)) handlesBySku.set(r.variantSku, new Set());
+    handlesBySku.get(r.variantSku).add(r.handle);
+  }
+  for (const r of results) {
+    const hs = handlesBySku.get(r.variantSku);
+    r.sharedSkuHandles = hs && hs.size > 1 ? [...hs].filter(h => h !== r.handle) : [];
   }
 
   const orphaned    = results.filter(r => r.matchStatus === 'orphaned').length;
@@ -159,8 +174,10 @@ function compareVariants(
   const draft       = results.filter(r => r.matchStatus === 'draft').length;
   const cfsInactive = results.filter(r => r.matchStatus === 'cfs-inactive').length;
   const cfsProduct  = results.filter(r => r.matchStatus === 'cfs-product').length;
+  const codeOnly    = results.filter(r => r.matchStatus === 'code-only').length;
+  const sharedSku   = results.filter(r => r.sharedSkuHandles.length).length;
 
-  return { results, summary: { total: results.length, orphaned, ok, draft, cfsInactive, cfsProduct } };
+  return { results, summary: { total: results.length, orphaned, ok, draft, cfsInactive, cfsProduct, codeOnly, sharedSku } };
 }
 
 module.exports = { compareVariants, parseSku };

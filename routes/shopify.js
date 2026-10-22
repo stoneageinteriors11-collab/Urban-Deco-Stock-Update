@@ -5,6 +5,7 @@ require('dotenv').config();
 const { fetchCfsProducts, buildSkuCodeMap } = require('../utils/cfsApi');
 // Image Sync helpers (photo check, backup check, detach) — see routes/imagesync.js
 const imageSync = require('./imagesync').helpers;
+const { pickCfsProductByColour } = require('../utils/colourMatch');
 
 const router = express.Router();
 
@@ -750,6 +751,7 @@ router.post('/publish-products', async (req, res) => {
   let drafted    = 0;
   let deleted    = 0;
   let failed     = 0;
+  let flagged    = 0;   // not promoted: unclear which CFS product it is
 
   // Group all selected variants by handle
   const byHandle = new Map();
@@ -761,6 +763,37 @@ router.post('/publish-products', async (req, res) => {
   console.log(`▶ Promoting ${byHandle.size} CFS-product-match products (dryRun=${dryRun})`);
   const imageSyncHandles = new Set();   // products whose photos Image Sync should update afterwards
 
+  // ── Before changing anything: decide WHICH CFS product each fully-promoted
+  //    Shopify product becomes (same rules for dry run and live run) ─────────
+  // CFS product names (stock feed) — used to match the colour in the Shopify title
+  const cfsNames = new Map();
+  try { for (const p of await fetchCfsProducts()) cfsNames.set(String(p.productId), p.productName || null); }
+  catch (e) { console.warn('  ⚠ CFS product names unavailable:', e.message); }
+  const productCache = new Map();   // handle → product (looked up once)
+  const keepDecision = new Map();   // handle → { ok, prodId, reason }
+  for (const [handle, variantsForProduct] of byHandle) {
+    try {
+      const data = await gql(client, PRODUCT_BY_HANDLE_QUERY, { handle });
+      const product = data?.productByHandle;
+      productCache.set(handle, product || null);
+      if (!product) continue;
+      const skuSet = new Set(variantsForProduct.map(v => v.variantSku));
+      const all = product.variants.edges.map(e => e.node);
+      const promoted = all.filter(n => skuSet.has(n.sku));
+      if (!promoted.length || promoted.length < all.length) continue;   // only when ALL variants go
+      const candidates = [...new Set(promoted.map(n => parseSku(n.sku).prodId).filter(Boolean))]
+        .map(prodId => ({ prodId, name: cfsNames.get(prodId) || null }));
+      keepDecision.set(handle, pickCfsProductByColour(product.title, candidates));
+      await sleep(100);
+    } catch (e) { productCache.delete(handle); }
+  }
+  // Two Shopify products must not become the same CFS product
+  const byProd = new Map();
+  for (const [handle, d] of keepDecision) if (d.ok) { if (!byProd.has(d.prodId)) byProd.set(d.prodId, []); byProd.get(d.prodId).push(handle); }
+  for (const [prodId, handles] of byProd) if (handles.length > 1) {
+    for (const h of handles) keepDecision.set(h, { ok: false, reason: `would become the same CFS product (UD-${prodId}) as ${handles.filter(x => x !== h).join(', ')} — please check` });
+  }
+
   for (const [handle, variantsForProduct] of byHandle) {
     const affectedSKUs     = variantsForProduct.map(v => v.variantSku);
     const skuSet           = new Set(affectedSKUs);
@@ -771,9 +804,9 @@ router.post('/publish-products', async (req, res) => {
     const targetStatus   = anyCfsInactive ? 'DRAFT' : 'ACTIVE';
 
     try {
-      // Always look up the product — we need to know how many variants it has
-      const data    = await gql(client, PRODUCT_BY_HANDLE_QUERY, { handle });
-      const product = data?.productByHandle;
+      // Product was looked up above (re-fetch only if that lookup failed)
+      const product = productCache.has(handle) ? productCache.get(handle)
+        : (await gql(client, PRODUCT_BY_HANDLE_QUERY, { handle }))?.productByHandle;
 
       if (!product) {
         for (const sku of affectedSKUs) {
@@ -795,6 +828,19 @@ router.post('/publish-products', async (req, res) => {
         continue;
       }
 
+      // ── All variants go, but it's unclear which CFS product this is → flag, change nothing
+      const decision = remainingVariants.length === 0 ? keepDecision.get(handle) : null;
+      if (decision && !decision.ok) {
+        for (const v of variantsForProduct) {
+          log.push({ sku: v.variantSku, handle, status: 'flagged', productCode: v.productCode || '',
+            message: `NOT promoted — ${decision.reason} · ${product.title}` });
+        }
+        flagged++;
+        continue;
+      }
+      // The variant that stays (and becomes UD-{prodId}) = the CFS product chosen above
+      const keepNode = (decision && variantsToDelete.find(n => parseSku(n.sku).prodId === decision.prodId)) || variantsToDelete[0];
+
       // ── Dry-run: report what would happen ────────────────────────────────
       if (dryRun) {
         const allImages = product.images.edges.map(e => e.node);
@@ -810,11 +856,11 @@ router.post('/publish-products', async (req, res) => {
           } else {
             // Shopify forbids deleting the last variant — keep the first and update its SKU
             // to the product-level format; delete any others before it.
-            const isKeeper = variantsToDelete[0]?.sku === v.variantSku;
+            const isKeeper = keepNode?.sku === v.variantSku;
             const { prodId } = parseSku(v.variantSku);
             const newSku = prodId ? `UD-${prodId}` : v.variantSku;
             if (isKeeper) {
-              msg = `Would update SKU "${v.variantSku}" → "${newSku}" & set product to ${targetStatus} (last variant — promoted to main product) · ${product.title}`;
+              msg = `Would update SKU "${v.variantSku}" → "${newSku}" & set product to ${targetStatus} (promoted to main product${decision ? ` — ${decision.reason}` : ''}) · ${product.title}`;
             } else {
               msg = `Would delete variant "${label}" (cleanup before SKU promotion) · ${product.title}`;
             }
@@ -837,8 +883,7 @@ router.post('/publish-products', async (req, res) => {
         // Strategy: keep the first variant and update its SKU to the product-level
         // format (UD-{prodId}); delete all others; then set the product status.
 
-        const keepNode   = variantsToDelete[0];
-        const deleteRest = variantsToDelete.slice(1);
+        const deleteRest = variantsToDelete.filter(n => n !== keepNode);
         const { prodId } = parseSku(keepNode.sku);
         const newSku     = prodId ? `UD-${prodId}` : keepNode.sku;
 
@@ -947,7 +992,7 @@ router.post('/publish-products', async (req, res) => {
   }
 
   console.log(`  ✓ Done — deleted variants: ${deleted}, published: ${published}, drafted: ${drafted}, failed: ${failed}`);
-  res.json({ success: true, dryRun, deleted, published, drafted, failed, total: variants.length, log,
+  res.json({ success: true, dryRun, deleted, published, drafted, failed, flagged, total: variants.length, log,
     imageSyncHandles: [...imageSyncHandles] });
 });
 

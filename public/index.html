@@ -171,6 +171,7 @@
     .tile.draft-count       .num { color: var(--text-muted); }
     .tile.cfs-inactive-count .num { color: var(--warning); }
     .tile.cfs-product-count  .num { color: #a78bfa; }
+    .tile.code-only-count    .num { color: #fb923c; }
 
     /* ── Table toolbar ── */
     .table-toolbar {
@@ -218,6 +219,8 @@
     .badge-draft        { background: rgba(148,163,184,.12); color: var(--text-muted); }
     .badge-cfs-inactive { background: rgba(245,158,11,.15);  color: var(--warning); }
     .badge-cfs-product  { background: rgba(167,139,250,.15); color: #a78bfa; }
+    .badge-code-only    { background: rgba(251,146,60,.15);  color: #fb923c; }
+    .badge-shared       { background: rgba(251,146,60,.10);  color: #fb923c; margin-left: 4px; cursor: help; }
 
     /* ── Pagination ── */
     .pagination {
@@ -510,6 +513,10 @@
         <div class="num" id="tile-cfs-product">0</div>
         <div class="lbl">CFS Product Match (review)</div>
       </div>
+      <div class="tile code-only-count" title="The SKU is not in CFS. Only an old CFS code saved on the product still matches — that code may now belong to a different CFS product. Nothing is done to these automatically.">
+        <div class="num" id="tile-code-only">0</div>
+        <div class="lbl">Check: SKU not in CFS (only old saved code matches)</div>
+      </div>
     </div>
 
     <!-- Table toolbar -->
@@ -520,6 +527,8 @@
         <button class="fbtn"        data-filter="orphaned"     onclick="setFilter('orphaned',this)">Orphaned</button>
         <button class="fbtn"        data-filter="cfs-inactive" onclick="setFilter('cfs-inactive',this)">CFS Inactive</button>
         <button class="fbtn"        data-filter="cfs-product"  onclick="setFilter('cfs-product',this)">CFS Product Match</button>
+        <button class="fbtn"        data-filter="code-only"    onclick="setFilter('code-only',this)">Check: SKU not in CFS</button>
+        <button class="fbtn"        data-filter="shared"       onclick="setFilter('shared',this)">Shared SKU</button>
         <button class="fbtn"        data-filter="ok"           onclick="setFilter('ok',this)">OK</button>
         <button class="fbtn"        data-filter="draft"        onclick="setFilter('draft',this)">Draft / Archived</button>
       </div>
@@ -1053,6 +1062,7 @@ async function testConnection() {
       document.getElementById('tile-draft').textContent        = (data.summary.draft       || 0).toLocaleString();
       document.getElementById('tile-cfs-inactive').textContent  = (data.summary.cfsInactive || 0).toLocaleString();
       document.getElementById('tile-cfs-product').textContent   = (data.summary.cfsProduct  || 0).toLocaleString();
+      document.getElementById('tile-code-only').textContent     = (data.summary.codeOnly    || 0).toLocaleString();
       document.getElementById('summary-tiles').classList.remove('hidden');
       document.getElementById('table-toolbar').classList.remove('hidden');
       document.getElementById('results-table').classList.remove('hidden');
@@ -1116,6 +1126,11 @@ async function testConnection() {
       labelEl.textContent    = 'Select all CFS Product Matches';
       wrapEl.style.display   = '';
       btnPublish.style.display = '';
+    } else if (f === 'code-only') {
+      // Same action as orphaned (delete variants / draft whole product) — only when YOU select them
+      labelEl.textContent  = 'Select all "SKU not in CFS"';
+      wrapEl.style.display = '';
+      btnDel.style.display = '';
     } else if (f === 'all') {
       labelEl.textContent    = 'Select all orphaned & CFS Inactive';
       wrapEl.style.display   = '';
@@ -1135,7 +1150,8 @@ async function testConnection() {
   function applyFilter2() {
     const q = document.getElementById('search-input').value.toLowerCase();
     filtered = allResults.filter(r => {
-      const matchFilter = activeFilter === 'all' || r.matchStatus === activeFilter;
+      const matchFilter = activeFilter === 'all' || r.matchStatus === activeFilter
+        || (activeFilter === 'shared' && (r.sharedSkuHandles || []).length > 0);
       const matchSearch = !q || [r.title,r.variantSku,r.option1,r.option2,r.handle]
         .join(' ').toLowerCase().includes(q);
       return matchFilter && matchSearch;
@@ -1153,16 +1169,19 @@ async function testConnection() {
       const isDraft       = r.matchStatus === 'draft';
       const isCfsInactive = r.matchStatus === 'cfs-inactive';
       const isCfsProduct  = r.matchStatus === 'cfs-product';
-      const isSelectable  = isOrphaned || isCfsInactive || isCfsProduct;
+      const isCodeOnly    = r.matchStatus === 'code-only';
+      const isSelectable  = isOrphaned || isCfsInactive || isCfsProduct || isCodeOnly;
       const checked       = selectedSKUs.has(r.variantSku) ? 'checked' : '';
       const badgeCls      = isOrphaned    ? 'badge-orphaned'
                           : isCfsInactive ? 'badge-cfs-inactive'
                           : isCfsProduct  ? 'badge-cfs-product'
+                          : isCodeOnly    ? 'badge-code-only'
                           : isDraft       ? 'badge-draft'
                           : 'badge-ok';
       const badgeTxt      = isOrphaned    ? 'Orphaned'
                           : isCfsInactive ? 'CFS Inactive'
                           : isCfsProduct  ? 'CFS Product'
+                          : isCodeOnly    ? 'Check: SKU not in CFS'
                           : isDraft       ? 'Draft'
                           : 'OK';
       const variantLabel  = [r.option1, r.option2, r.option3].filter(Boolean).join(' / ') || 'Default';
@@ -1174,7 +1193,8 @@ async function testConnection() {
         <td><code style="font-size:11px;color:var(--text-muted)">${r.variantSku}</code></td>
         <td>£${r.price || '—'}</td>
         <td>${r.inventoryQty || '—'}</td>
-        <td><span class="badge ${badgeCls}">${badgeTxt}</span></td>
+        <td><span class="badge ${badgeCls}" title="${(r.codeOnlyNote || '').replace(/"/g, '&quot;')}">${badgeTxt}</span>${
+          (r.sharedSkuHandles || []).length ? `<span class="badge badge-shared" title="Same SKU also on: ${r.sharedSkuHandles.join(', ')}">Shared SKU ×${r.sharedSkuHandles.length + 1}</span>` : ''}</td>
       </tr>`;
     }).join('');
 
@@ -1215,6 +1235,8 @@ async function testConnection() {
       selectable = allResults.filter(r => r.matchStatus === 'cfs-inactive');
     } else if (activeFilter === 'cfs-product') {
       selectable = allResults.filter(r => r.matchStatus === 'cfs-product');
+    } else if (activeFilter === 'code-only') {
+      selectable = allResults.filter(r => r.matchStatus === 'code-only');
     } else {
       // 'all' — select all actionable types
       selectable = allResults.filter(r => ['orphaned','cfs-inactive','cfs-product'].includes(r.matchStatus));
@@ -1337,7 +1359,8 @@ async function testConnection() {
     document.getElementById('btn-delete').disabled = true;
     document.getElementById('delete-spinner').classList.remove('hidden');
 
-    const variantsToDelete = allResults.filter(r => skus.includes(r.variantSku));
+    const variantsToDelete = allResults.filter(r => skus.includes(r.variantSku) && ['orphaned', 'code-only'].includes(r.matchStatus));
+    if (!variantsToDelete.length) { alert('Select Orphaned or "SKU not in CFS" rows to delete.'); return; }
 
     try {
       // 1. Photo check (read-only) — which photos belong only to the deleted variants
@@ -1380,6 +1403,7 @@ async function testConnection() {
     document.getElementById('tile-draft').textContent         = allResults.filter(r=>r.matchStatus==='draft').length.toLocaleString();
     document.getElementById('tile-cfs-inactive').textContent  = allResults.filter(r=>r.matchStatus==='cfs-inactive').length.toLocaleString();
     document.getElementById('tile-cfs-product').textContent   = allResults.filter(r=>r.matchStatus==='cfs-product').length.toLocaleString();
+    document.getElementById('tile-code-only').textContent     = allResults.filter(r=>r.matchStatus==='code-only').length.toLocaleString();
   }
 
   // ── Set selected CFS-inactive variants to Draft on Shopify ───────────────
@@ -1488,6 +1512,7 @@ async function testConnection() {
         `Variants deleted: ${data.deleted ?? 0}\n` +
         `Products → ACTIVE: ${data.published ?? 0}\n` +
         `Products → DRAFT: ${data.drafted ?? 0}\n` +
+        `Not promoted (unclear which CFS product — see log): ${data.flagged ?? 0}\n` +
         `Failed: ${data.failed}\n` +
         `Dry run: ${dryRun}`
       );
@@ -1541,6 +1566,7 @@ async function testConnection() {
                   : l.status==='kept'      ? 'log-dry'
                   : l.status==='published' ? 'log-ok'
                   : l.status==='warning'   ? 'log-dry'
+                  : l.status==='flagged'   ? 'log-error'
                   : 'log-ok';
         return `<p class="${cls}">[${l.status.toUpperCase()}] ${l.sku} — ${l.message}</p>`;
       }).join('');
@@ -2384,7 +2410,7 @@ async function testConnection() {
   // ── Export Results CSV ────────────────────────────────────────────────────
   function exportCSV() {
     if (!allResults.length) return;
-    const headers = ['Handle','Product Title','Variant','SKU','Price','Inventory Qty','Status','Product Code'];
+    const headers = ['Handle','Product Title','Variant','SKU','Price','Inventory Qty','Status','Product Code','Note','Same SKU also on'];
     const rows = filtered.map(r => [
       r.handle,
       `"${(r.title||'').replace(/"/g,'""')}"`,
@@ -2394,9 +2420,11 @@ async function testConnection() {
       r.inventoryQty,
       r.matchStatus,
       r.productCode || '',
+      `"${(r.codeOnlyNote || '').replace(/"/g,'""')}"`,
+      `"${(r.sharedSkuHandles || []).join(' | ')}"`,
     ]);
     const csv  = [headers, ...rows].map(r => r.join(',')).join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
     const a    = document.createElement('a');
     a.href     = URL.createObjectURL(blob);
     a.download = `variant-sync-results-${Date.now()}.csv`;
