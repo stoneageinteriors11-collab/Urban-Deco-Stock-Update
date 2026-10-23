@@ -61,6 +61,7 @@
   .t-unchanged { background: rgba(34,197,94,.12); color: var(--success); }
   .t-flag, .t-warning { background: rgba(245,158,11,.15); color: var(--warning); }
   .t-not_in_cfs, .t-error { background: rgba(239,68,68,.15); color: var(--danger); }
+  .t-skipped { background: rgba(148,163,184,.15); color: var(--text-muted); }
   .logwrap { max-height: 560px; overflow: auto; }
   .banner { border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 12px; background: rgba(245,158,11,.12); border: 1px solid rgba(245,158,11,.35); color: var(--warning); }
   .hidden { display: none; }
@@ -118,6 +119,26 @@
     <div class="row">
       <button class="btn" id="cleanupBtn" onclick="openCleanup()" disabled>🧹 Open clean-up</button>
     </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="num">5</span> Order-ahead (pre-Christmas)</div>
+    <p class="help">Lets customers order products that CFS has <b>OUT OF STOCK</b> but with stock <b>due before the cut-off date</b>:
+      sets <b>stock_status_override = IN STOCK</b> and quantity <b>5</b>. The real stock status, due date and delivery time stay as CFS has them,
+      so the store can say "order now — expected 17 Nov". When stock arrives, or the due date moves past the cut-off, it's switched off again —
+      by this step or by the normal stock update. Active products only.</p>
+    <div class="row">
+      <label class="chk">Cut-off: due before <input type="date" id="aheadCutoff" value="2026-12-12" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 8px;font:inherit"></label>
+      <label class="chk"><input type="radio" name="aheadScope" value="one" checked> Selected brand</label>
+      <label class="chk"><input type="radio" name="aheadScope" value="all"> All 14 brands</label>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label class="chk"><input type="checkbox" id="dryRunAhead" checked> Dry run (show what would change, change nothing)</label>
+      <button class="btn" id="runAheadBtn" onclick="run('ahead')">▶ Run order-ahead</button>
+      <button class="btn danger hidden" id="stopAheadBtn" onclick="stop()">■ Stop</button>
+    </div>
+    <div class="status" id="statusAhead">Pick a brand, or choose "All 14 brands".</div>
+    <div class="bar"><div id="barAhead"></div></div>
   </div>
 
   <div class="card hidden" id="resultCard">
@@ -183,19 +204,26 @@
              warn: v => `LIVE stock update for ${v}.\n\nThis writes delivery time, stock status, due date and quantity on Shopify for every Active ${v} product found in CFS.\n\nContinue?` },
     codes: { url: '/api/brands/codes-sync', dry: 'dryRunCodes', run: 'runCodesBtn', stop: 'stopCodesBtn', status: 'statusCodes', bar: 'barCodes', name: 'product codes',
              warn: v => `LIVE product codes for ${v}.\n\nThis writes product_code and variant_code on Shopify for every ${v} product found in CFS (only missing or different codes).\n\nContinue?` },
+    ahead: { url: '/api/brands/order-ahead', dry: 'dryRunAhead', run: 'runAheadBtn', stop: 'stopAheadBtn', status: 'statusAhead', bar: 'barAhead', name: 'order-ahead',
+             warn: v => `LIVE order-ahead for ${v} (cut-off ${$('aheadCutoff').value}).\n\nOUT OF STOCK variants due before the cut-off get stock_status_override = IN STOCK and quantity 5. Ones that no longer qualify are switched back.\n\nContinue?` },
   };
+  const allBrandsScope = () => document.querySelector('input[name=aheadScope]:checked')?.value === 'all';
   let runningKind = null;
 
   async function run(kind) {
-    if (!selected || runId) return;
     const u = UI[kind];
+    if (runId || (!selected && !(kind === 'ahead' && allBrandsScope()))) { if (!runId) alert('Pick a brand first.'); return; }
+    if (kind === 'ahead' && !$('aheadCutoff').value) { alert('Set the cut-off date.'); return; }
+    const who = kind === 'ahead' && allBrandsScope() ? 'ALL 14 brands' : selected.vendor;
     const dryRun = $(u.dry).checked;
-    if (!dryRun && !confirm(u.warn(selected.vendor))) return;
+    if (!dryRun && !confirm(u.warn(who))) return;
     runningKind = kind;
-    $('runBtn').disabled = $('runCodesBtn').disabled = true; $(u.stop).classList.remove('hidden');
+    $('runBtn').disabled = $('runCodesBtn').disabled = $('runAheadBtn').disabled = true; $(u.stop).classList.remove('hidden');
     $(u.status).className = 'status'; $(u.status).textContent = 'Starting…'; $(u.bar).style.width = '0';
     try {
-      const res = await fetch(u.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ brandId: selected.id, dryRun }) });
+      const res = await fetch(u.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(kind === 'ahead'
+        ? { brandIds: allBrandsScope() ? brands.map(b => b.id) : [selected.id], cutoff: $('aheadCutoff').value, dryRun }
+        : { brandId: selected.id, dryRun }) });
       if (!res.ok) throw new Error((await res.json()).error || res.statusText);
       const reader = res.body.getReader(), dec = new TextDecoder();
       let buf = '';
@@ -220,7 +248,7 @@
       $(u.status).className = 'status err'; $(u.status).textContent = 'Error: ' + e.message;
     } finally {
       runId = null; runningKind = null;
-      $('runBtn').disabled = $('runCodesBtn').disabled = !selected; $(u.stop).classList.add('hidden');
+      $('runBtn').disabled = $('runCodesBtn').disabled = !selected; $('runAheadBtn').disabled = false; $(u.stop).classList.add('hidden');
     }
   }
 
@@ -247,7 +275,16 @@
 
   function renderStats() {
     const c = lastResult.counts;
-    const tiles = lastResult.kind === 'codes' ? [
+    const tiles = lastResult.kind === 'ahead' ? [
+      ['all', '', c.products, 'Active products'],
+      ['all', '', c.variants, 'Variants checked'],
+      ['changes', 'upd', c.newAhead, lastResult.dryRun ? `Would allow ordering (due before ${lastResult.cutoff})` : `Now orderable (due before ${lastResult.cutoff})`],
+      ['unchanged', 'ok', c.keptAhead, 'Already orderable'],
+      ['changes', 'flag', c.cleared, lastResult.dryRun ? 'Would switch back' : 'Switched back'],
+      ['skipped', '', c.oosLater, 'Out of stock, due after cut-off'],
+      ['skipped', '', c.oosNoDate, 'Out of stock, no due date'],
+      ['error', 'nf', c.failed, 'Errors'],
+    ] : lastResult.kind === 'codes' ? [
       ['all', '', c.products, 'Products'],
       ['changes', 'upd', c.productCodes, lastResult.dryRun ? 'Product codes to set' : 'Product codes set'],
       ['all', '', c.variants, 'Variants checked'],
@@ -284,12 +321,12 @@
     const rows = visibleRows();
     const shown = rows.slice(0, 2000);
     $('logBody').innerHTML = shown.map(l => `<tr><td><span class="tag t-${l.status}">${esc(l.status.replace(/_/g, ' '))}</span></td>
-      <td>${esc(l.handle)}</td><td>${esc(l.sku)}</td><td class="msg">${esc(l.message)}</td></tr>`).join('')
+      <td>${l.brand ? `<span style="color:var(--text-muted)">${esc(l.brand)} · </span>` : ''}${esc(l.handle)}</td><td>${esc(l.sku)}</td><td class="msg">${esc(l.message)}</td></tr>`).join('')
       + (rows.length > shown.length ? `<tr><td colspan="4" class="msg">… ${rows.length - shown.length} more rows — use search or download the CSV</td></tr>` : '');
   }
 
   function downloadCsv() {
-    const rows = [['Status', 'Handle', 'SKU', 'Message'], ...visibleRows().map(l => [l.status, l.handle, l.sku, l.message])];
+    const rows = [['Status', 'Brand', 'Handle', 'SKU', 'Message'], ...visibleRows().map(l => [l.status, l.brand || lastResult.brand || '', l.handle, l.sku, l.message])];
     const csv = '﻿' + rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));

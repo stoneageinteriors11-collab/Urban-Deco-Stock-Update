@@ -6,6 +6,7 @@
  *   POST /stock-sync       { brandId, dryRun }  → live progress (SSE), then a log
  *   POST /codes-sync       { brandId, dryRun }  → Step 2: product_code / variant_code (SSE)
  *   POST /compare          { brandId }          → Step 4 clean-up: Compare & Results for one brand
+ *   POST /order-ahead      { brandIds, cutoff, dryRun } → pre-Christmas order-ahead override (SSE)
  *   POST /cancel           { runId }            → Stop
  *
  * For every ACTIVE Shopify product of the brand, each variant's SKU is looked up in
@@ -85,6 +86,25 @@ const PRODUCTS = `
     }
   }`;
 const METAFIELDS_SET = `mutation m($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { userErrors { field message } } }`;
+const METAFIELDS_DELETE = `mutation d($metafields: [MetafieldIdentifierInput!]!) { metafieldsDelete(metafields: $metafields) { userErrors { field message } } }`;
+
+// ── Order-ahead (pre-Christmas) ──────────────────────────────────────────────
+// A variant that CFS has OUT OF STOCK but with stock due before the cut-off date can be
+// ordered now: custom.stock_status_override = "IN STOCK" and quantity 5. The real
+// custom.inoutstock stays OUT OF STOCK and the due date / delivery time stay as CFS has them.
+// custom.override_cutoff remembers the cut-off used, so the normal stock update (Step 1)
+// keeps these at 5 — and clears them once they no longer qualify (stock arrived, due date
+// moved past the cut-off, or no due date any more).
+const OVERRIDE_KEY = 'stock_status_override', CUTOFF_KEY = 'override_cutoff', OVERRIDE_QTY = 5;
+function dueDay(due) {
+  const m = String(due || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;      // "NA", blank, odd formats → no date
+}
+function qualifiesOrderAhead(s, cutoff) {
+  const day = dueDay(s?.dueDate);
+  return !!(s && cutoff && s.stockStatus === 'OUT OF STOCK' && day && day < cutoff);
+}
+
 const INVENTORY_SET = `mutation s($input: InventorySetQuantitiesInput!, $key: String!) {
   inventorySetQuantities(input: $input) @idempotent(key: $key) { userErrors { field message } } }`;
 
@@ -214,7 +234,7 @@ router.post('/stock-sync', async (req, res) => {
       }
       c.products++;
       try {
-        const metafields = [], inventory = [], rows = [];
+        const metafields = [], inventory = [], rows = [], toDelete = [], ahead = [];
         const prodMf = mfMap(p.metafields?.nodes);
         const matched = [];
         for (const v of p.variants.nodes) {
@@ -237,10 +257,19 @@ router.post('/stock-sync', async (req, res) => {
           setMf('inoutstock', s.stockStatus, 'stock status');
           setMf('vnotificationtitle', s.deliveryTime, 'delivery');
           setMf('duedate', s.dueDate, 'due date');
+          // Order-ahead override (separate step) still valid? → keep quantity 5; otherwise clear it
+          let targetQty = s.qty;
+          if (mf[OVERRIDE_KEY]) {
+            if (qualifiesOrderAhead(s, mf[CUTOFF_KEY])) { targetQty = OVERRIDE_QTY; c.orderAhead = (c.orderAhead || 0) + 1; ahead.push(v.id); }
+            else {
+              toDelete.push({ ownerId: v.id, namespace: 'custom', key: OVERRIDE_KEY }, { ownerId: v.id, namespace: 'custom', key: CUTOFF_KEY });
+              changes.push(`order-ahead ended (${s.stockStatus === 'IN STOCK' ? 'back in stock' : 'due date no longer before ' + (mf[CUTOFF_KEY] || 'the cut-off')})`);
+            }
+          }
           const cur = v.inventoryItem?.inventoryLevel?.quantities?.find(q => q.name === 'available')?.quantity ?? null;
-          if (cur !== s.qty) {
-            if (!v.inventoryItem?.inventoryLevel) rows.push({ handle: p.handle, sku: v.sku, status: 'warning', message: `Not stocked at "${loc.name}" — quantity not changed (would be ${s.qty})` });
-            else { inventory.push({ inventoryItemId: v.inventoryItem.id, locationId: loc.id, quantity: s.qty, changeFromQuantity: cur ?? 0 }); changes.push(`quantity: ${cur ?? '?'} → ${s.qty}`); }
+          if (cur !== targetQty) {
+            if (!v.inventoryItem?.inventoryLevel) rows.push({ handle: p.handle, sku: v.sku, status: 'warning', message: `Not stocked at "${loc.name}" — quantity not changed (would be ${targetQty})` });
+            else { inventory.push({ inventoryItemId: v.inventoryItem.id, locationId: loc.id, quantity: targetQty, changeFromQuantity: cur ?? 0 }); changes.push(`quantity: ${cur ?? '?'} → ${targetQty}${targetQty === OVERRIDE_QTY && mf[OVERRIDE_KEY] ? ' (order-ahead)' : ''}`); }
           }
           if (v.inventoryItem && v.inventoryItem.tracked === false) rows.push({ handle: p.handle, sku: v.sku, status: 'warning', message: 'Inventory is not tracked on Shopify for this variant — quantity has no effect' });
           const cfsText = `CFS: ${s.cfsStatus || '(blank)'}, on hand ${s.cfsOnHand ?? 0}, ${s.deliveryTime || 'no delivery time'}${s.dueDate && s.dueDate !== 'NA' ? `, due ${s.dueDate}` : ''}`;
@@ -263,12 +292,20 @@ router.post('/stock-sync', async (req, res) => {
           if (prodStatus && prodMf.inoutstock !== prodStatus) metafields.push({ ownerId: p.id, namespace: 'custom', key: 'inoutstock', value: prodStatus, type: 'single_line_text_field' });
           if (prodDue && prodMf.duedate !== prodDue) metafields.push({ ownerId: p.id, namespace: 'custom', key: 'duedate', value: prodDue, type: 'single_line_text_field' });
         }
+        // Product-level order-ahead flag: cleared when no variant has it any more
+        const othersAhead = p.variants.nodes.some(v => mfMap(v.metafields?.nodes)[OVERRIDE_KEY] && !toDelete.some(d => d.ownerId === v.id));
+        if (prodMf[OVERRIDE_KEY] && !othersAhead) toDelete.push({ ownerId: p.id, namespace: 'custom', key: OVERRIDE_KEY });
 
-        if (!dryRun && (metafields.length || inventory.length)) {
+        if (!dryRun && (metafields.length || inventory.length || toDelete.length)) {
           for (let i = 0; i < metafields.length; i += 25) {
             const r = await gql(client, METAFIELDS_SET, { metafields: metafields.slice(i, i + 25) });
             const errs = r?.metafieldsSet?.userErrors || [];
             if (errs.length) { c.failed++; rows.push({ handle: p.handle, sku: '-', status: 'error', message: `Metafields: ${errs.map(e => e.message).join(', ')}` }); }
+          }
+          if (toDelete.length) {
+            const r = await gql(client, METAFIELDS_DELETE, { metafields: toDelete });
+            const errs = r?.metafieldsDelete?.userErrors || [];
+            if (errs.length) { c.failed++; rows.push({ handle: p.handle, sku: '-', status: 'error', message: `Clearing order-ahead: ${errs.map(e => e.message).join(', ')}` }); }
           }
           if (inventory.length) {
             const r = await gql(client, INVENTORY_SET, { key: crypto.randomUUID(), input: { name: 'available', reason: 'correction', quantities: inventory } });
@@ -534,6 +571,148 @@ router.post('/compare', async (req, res) => {
     console.error('[brands/compare]', e.message);
     res.status(500).json({ success: false, error: e.message });
   } finally { stopKeepAwake(); }
+});
+
+// ── Order-ahead step (pre-Christmas) ──────────────────────────────────────────
+// Body: { brandIds: [ids] (one brand or all 14), cutoff: 'YYYY-MM-DD', dryRun }
+// Per variant (Active products, SKU in the brand's CFS feed):
+//   OUT OF STOCK + due date before the cut-off → stock_status_override "IN STOCK",
+//       override_cutoff = cut-off, quantity 5 (J-Line / Richmond included)
+//   has an override but no longer qualifies     → override cleared, quantity back to the normal rule
+// Product-level stock_status_override = "IN STOCK" while any variant has it.
+router.post('/order-ahead', async (req, res) => {
+  const ids = (Array.isArray(req.body?.brandIds) ? req.body.brandIds : [req.body?.brandId]).map(Number).filter(Boolean);
+  const brands = ids.map(getBrand).filter(Boolean);
+  const cutoff = String(req.body?.cutoff || '');
+  const dryRun = req.body?.dryRun !== false && req.body?.dryRun !== 'false';
+  if (!brands.length) return res.status(400).json({ error: 'Pick a brand' });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(cutoff)) return res.status(400).json({ error: 'Set a cut-off date' });
+  let client;
+  try { client = graphqlClient(); } catch (e) { return res.status(400).json({ error: e.message }); }
+
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (res.socket) res.socket.setNoDelay(true);
+  res.flushHeaders();
+  const send = o => { if (!res.writableEnded && !res.destroyed) res.write(`data: ${JSON.stringify(o)}\n\n`); };
+  const ping = setInterval(() => { if (!res.writableEnded && !res.destroyed) res.write(': ping\n\n'); }, 15000);
+  startKeepAwake();
+  const runId = crypto.randomBytes(6).toString('hex');
+  send({ type: 'run_id', runId });
+  console.log(`▶ Order-ahead — ${brands.map(b => b.vendor).join(', ')} cut-off ${cutoff} dryRun=${dryRun}`);
+  const label = brands.length === 1 ? brands[0].vendor : `${brands.length} brands`;
+
+  const log = [];
+  const c = { products: 0, variants: 0, newAhead: 0, keptAhead: 0, cleared: 0, oosNoDate: 0, oosLater: 0, notInCfs: 0, failed: 0 };
+  const finish = (extra = {}) => {
+    clearInterval(ping); cancelled.delete(runId); stopKeepAwake();
+    console.log(`  ✓ Order-ahead ${label} done — ${JSON.stringify(c)}${extra.cancelled ? ' (stopped)' : ''}`);
+    send({ type: 'done', kind: 'ahead', dryRun, brand: label, cutoff, counts: c, log, ...extra });
+    if (!res.writableEnded) res.end();
+  };
+
+  try {
+    const locs = (await gql(client, LOCATIONS))?.locations?.edges?.map(e => e.node) || [];
+    const loc = locs.find(l => /^shop$/i.test(l.name)) || locs.find(l => /shop|warehouse|main/i.test(l.name)) || locs[0];
+    if (!loc) throw new Error('No Shopify location found — can\'t update quantities');
+
+    for (const brand of brands) {
+      if (cancelled.has(runId)) return finish({ cancelled: true });
+      send({ type: 'status', message: `${brand.vendor}: loading CFS feed…` });
+      let stock;
+      try { stock = buildBrandStock(await fetchBrandFeed(brand.id), brand); }
+      catch (e) { log.push({ handle: '-', sku: '-', status: 'error', message: `${brand.vendor}: CFS feed failed — ${e.message}` }); c.failed++; continue; }
+
+      const products = [];
+      let after = null;
+      do {
+        if (cancelled.has(runId)) return finish({ cancelled: true });
+        const d = await gql(client, PRODUCTS, { first: 20, after, q: `vendor:"${brand.vendor}" status:active`, loc: loc.id });
+        products.push(...d.products.nodes.filter(p => sameVendor(p.vendor, brand.vendor) && p.status === 'ACTIVE'));
+        send({ type: 'fetch', fetched: products.length, brand: brand.vendor });
+        after = d.products.pageInfo.hasNextPage ? d.products.pageInfo.endCursor : null;
+        if (after) await sleep(150);
+      } while (after);
+
+      let done = 0;
+      for (const p of products) {
+        if (cancelled.has(runId)) return finish({ cancelled: true });
+        done++; c.products++;
+        const set = [], del = [], inventory = [], rows = [];
+        const prodMf = mfMap(p.metafields?.nodes);
+        let anyAhead = false;
+        for (const v of p.variants.nodes) {
+          if (!v.sku) continue;
+          c.variants++;
+          const s = stock.get(v.sku.trim());
+          const mf = mfMap(v.metafields?.nodes);
+          if (!s) {
+            c.notInCfs++;
+            if (mf[OVERRIDE_KEY]) anyAhead = true;   // not ours to judge — left alone
+            continue;
+          }
+          const cur = v.inventoryItem?.inventoryLevel?.quantities?.find(q => q.name === 'available')?.quantity ?? null;
+          const setQty = q => {
+            if (cur === q) return '';
+            if (!v.inventoryItem?.inventoryLevel) { rows.push({ handle: p.handle, sku: v.sku, status: 'warning', message: `Not stocked at "${loc.name}" — quantity not changed (would be ${q})` }); return ''; }
+            inventory.push({ inventoryItemId: v.inventoryItem.id, locationId: loc.id, quantity: q, changeFromQuantity: cur ?? 0 });
+            return ` · quantity ${cur ?? '?'} → ${q}`;
+          };
+          const day = dueDay(s.dueDate);
+          if (qualifiesOrderAhead(s, cutoff)) {
+            anyAhead = true;
+            const isNew = mf[OVERRIDE_KEY] !== 'IN STOCK' || mf[CUTOFF_KEY] !== cutoff;
+            if (mf[OVERRIDE_KEY] !== 'IN STOCK') set.push({ ownerId: v.id, namespace: 'custom', key: OVERRIDE_KEY, value: 'IN STOCK', type: 'single_line_text_field' });
+            if (mf[CUTOFF_KEY] !== cutoff) set.push({ ownerId: v.id, namespace: 'custom', key: CUTOFF_KEY, value: cutoff, type: 'single_line_text_field' });
+            const q = setQty(OVERRIDE_QTY);
+            if (isNew || q) c.newAhead++; else c.keptAhead++;
+            rows.push({ handle: p.handle, sku: v.sku, status: isNew || q ? (dryRun ? 'dry_run' : 'updated') : 'unchanged',
+              message: `${isNew || q ? (dryRun ? 'Would allow ordering' : 'Can be ordered now') : 'Already orderable'} — OUT OF STOCK, due ${day} (before ${cutoff}): override IN STOCK${q}  [${s.deliveryTime || 'no delivery time'}]` });
+          } else if (mf[OVERRIDE_KEY]) {
+            c.cleared++;
+            del.push({ ownerId: v.id, namespace: 'custom', key: OVERRIDE_KEY }, { ownerId: v.id, namespace: 'custom', key: CUTOFF_KEY });
+            const why = s.stockStatus !== 'OUT OF STOCK' ? `CFS now ${s.stockStatus || '(blank)'}` : day ? `due ${day} is not before ${cutoff}` : 'no due date in CFS';
+            const q = setQty(s.qty);
+            rows.push({ handle: p.handle, sku: v.sku, status: dryRun ? 'dry_run' : 'updated', message: `${dryRun ? 'Would end' : 'Ended'} order-ahead — ${why}${q}` });
+          } else if (s.stockStatus === 'OUT OF STOCK') {
+            if (day) { c.oosLater++; rows.push({ handle: p.handle, sku: v.sku, status: 'skipped', message: `OUT OF STOCK, due ${day} — not before ${cutoff}, stays out of stock` }); }
+            else { c.oosNoDate++; rows.push({ handle: p.handle, sku: v.sku, status: 'skipped', message: `OUT OF STOCK with no due date ("${s.dueDate || ''}") — stays out of stock` }); }
+          }
+        }
+        // product level
+        if (anyAhead && prodMf[OVERRIDE_KEY] !== 'IN STOCK') set.push({ ownerId: p.id, namespace: 'custom', key: OVERRIDE_KEY, value: 'IN STOCK', type: 'single_line_text_field' });
+        if (!anyAhead && prodMf[OVERRIDE_KEY]) del.push({ ownerId: p.id, namespace: 'custom', key: OVERRIDE_KEY });
+
+        if (!dryRun && (set.length || del.length || inventory.length)) {
+          try {
+            for (let i = 0; i < set.length; i += 25) {
+              const r = await gql(client, METAFIELDS_SET, { metafields: set.slice(i, i + 25) });
+              const errs = r?.metafieldsSet?.userErrors || [];
+              if (errs.length) throw new Error(`metafields: ${errs.map(e => e.message).join(', ')}`);
+            }
+            if (del.length) {
+              const r = await gql(client, METAFIELDS_DELETE, { metafields: del });
+              const errs = r?.metafieldsDelete?.userErrors || [];
+              if (errs.length) throw new Error(`clearing: ${errs.map(e => e.message).join(', ')}`);
+            }
+            if (inventory.length) {
+              const r = await gql(client, INVENTORY_SET, { key: crypto.randomUUID(), input: { name: 'available', reason: 'correction', quantities: inventory } });
+              const errs = r?.inventorySetQuantities?.userErrors || [];
+              if (errs.length) throw new Error(`quantity: ${errs.map(e => e.message).join(', ')}`);
+            }
+          } catch (e) { c.failed++; rows.push({ handle: p.handle, sku: '-', status: 'error', message: e.message }); }
+          await sleep(120);
+        }
+        log.push(...rows.map(r => ({ ...r, brand: brand.vendor })));
+        if (done % 10 === 0 || done === products.length) send({ type: 'progress', done, total: products.length, brand: brand.vendor, counts: c });
+      }
+    }
+    finish();
+  } catch (e) {
+    log.push({ handle: '-', sku: '-', status: 'error', message: e.message });
+    finish({ error: e.message });
+  }
 });
 
 module.exports = router;

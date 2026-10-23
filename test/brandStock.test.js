@@ -54,6 +54,7 @@ axios.post = async (url, body) => {
   else if (/key: "product_code"/.test(q)) data = { products: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: codeProducts } };
   else if (/products\(/.test(q)) data = { products: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: products } };
   else if (/metafieldsSet/.test(q)) { writes.mf.push(...v.metafields); data = { metafieldsSet: { userErrors: [] } }; }
+  else if (/metafieldsDelete/.test(q)) { writes.del = (writes.del || []).concat(v.metafields); data = { metafieldsDelete: { userErrors: [] } }; }
   else if (/inventorySetQuantities/.test(q)) { writes.inv.push(...v.input.quantities); data = { inventorySetQuantities: { userErrors: [] } }; }
   else throw new Error('unhandled ' + q.slice(0, 60));
   return { data: { data } };
@@ -104,6 +105,38 @@ const sse = async body => {
     const t2 = await (await fetch(base + '/api/brands/codes-sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ brandId: 363, dryRun: false }) })).text();
     const k = writes.mf.map(m => `${m.ownerId}.${m.key}=${m.value}`).sort();
     assert.deepStrictEqual(k, ['P1.product_code=LMP-01', 'V1.variant_code=LMP-01', 'V22.variant_code=VAS-L']);
+    // ── Order-ahead (pre-Christmas) ──
+    const sseAt = async (path, body) => { const t = await (await fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).text();
+      return t.split('\n\n').filter(l => l.startsWith('data: ')).map(l => JSON.parse(l.slice(6))).pop(); };
+    writes.mf.length = 0; writes.inv.length = 0; writes.del = [];
+    r = await sseAt('/api/brands/order-ahead', { brandIds: [363], cutoff: '2026-12-12', dryRun: true });
+    r.log.forEach(l => console.log(' ', l.status, l.sku, l.message));
+    assert.strictEqual(writes.mf.length + writes.inv.length, 0, 'dry run writes nothing');
+    assert.strictEqual(r.counts.newAhead, 1, JSON.stringify(r.counts));
+    assert(r.log.some(l => l.sku === 'UD-2-22' && /OUT OF STOCK, due 2026-12-01 \(before 2026-12-12\): override IN STOCK · quantity 9 → 5/.test(l.message)));
+    r = await sseAt('/api/brands/order-ahead', { brandIds: [363], cutoff: '2026-12-12', dryRun: false });
+    const k2 = writes.mf.map(m => `${m.ownerId}.${m.key}=${m.value}`).sort();
+    assert.deepStrictEqual(k2, ['P2.stock_status_override=IN STOCK', 'V22.override_cutoff=2026-12-12', 'V22.stock_status_override=IN STOCK'], k2.join(' | '));
+    assert.deepStrictEqual(writes.inv.map(x => [x.inventoryItemId, x.quantity]), [['I22', 5]]);
+    // cut-off before the due date → not orderable, "due after cut-off"
+    r = await sseAt('/api/brands/order-ahead', { brandIds: [363], cutoff: '2026-11-15', dryRun: true });
+    assert.strictEqual(r.counts.oosLater, 1); assert.strictEqual(r.counts.newAhead, 0);
+
+    // Step 1 keeps an active override at 5 …
+    const v22 = products[1].variants.nodes[1];
+    v22.metafields = mf({ inoutstock: 'OUT OF STOCK', vnotificationtitle: '6-8 Weeks', duedate: '2026-12-01', stock_status_override: 'IN STOCK', override_cutoff: '2026-12-12' });
+    v22.inventoryItem = inv('I22', 5);
+    products[1].metafields = mf({ inoutstock: 'IN STOCK', duedate: '2026-12-01', stock_status_override: 'IN STOCK' });
+    writes.mf.length = 0; writes.inv.length = 0; writes.del = [];
+    r = await sse({ brandId: 363, dryRun: false });
+    assert(!writes.inv.some(x => x.inventoryItemId === 'I22'), 'quantity stays 5, not reset to 0');
+    assert.strictEqual(writes.del.length, 0);
+    // … and switches it off once it no longer qualifies (stored cut-off before the due date)
+    v22.metafields = mf({ inoutstock: 'OUT OF STOCK', vnotificationtitle: '6-8 Weeks', duedate: '2026-12-01', stock_status_override: 'IN STOCK', override_cutoff: '2026-11-15' });
+    r = await sse({ brandId: 363, dryRun: false });
+    assert.deepStrictEqual(writes.inv.filter(x => x.inventoryItemId === 'I22').map(x => x.quantity), [0]);
+    assert.deepStrictEqual(writes.del.map(d => `${d.ownerId}.${d.key}`).sort(), ['P2.stock_status_override', 'V22.override_cutoff', 'V22.stock_status_override']);
+    assert(r.log.some(l => l.sku === 'UD-2-22' && /order-ahead ended/.test(l.message)));
     console.log('BRAND STOCK TESTS PASSED');
   } catch (e) { console.error('BRAND STOCK TESTS FAILED', e); process.exitCode = 1; }
   server.close();
