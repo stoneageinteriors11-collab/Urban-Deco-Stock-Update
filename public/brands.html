@@ -87,15 +87,28 @@
     <div id="ruleBanner" class="banner hidden"></div>
     <div class="row">
       <label class="chk"><input type="checkbox" id="dryRun" checked> Dry run (show what would change, change nothing)</label>
-      <button class="btn" id="runBtn" onclick="run()" disabled>▶ Run stock update</button>
+      <button class="btn" id="runBtn" onclick="run('stock')" disabled>▶ Run stock update</button>
       <button class="btn danger hidden" id="stopBtn" onclick="stop()">■ Stop</button>
     </div>
     <div class="status" id="status">Pick a brand first.</div>
     <div class="bar"><div id="bar"></div></div>
   </div>
 
+  <div class="card">
+    <div class="card-title"><span class="num">3</span> Product codes</div>
+    <p class="help">Copies CFS codes onto this brand's Shopify products (all statuses), same as Urban Deco's Step 4:
+      <b>product_code</b> on the product and <b>variant_code</b> on each variant. Only missing or different codes are written.</p>
+    <div class="row">
+      <label class="chk"><input type="checkbox" id="dryRunCodes" checked> Dry run (show what would change, change nothing)</label>
+      <button class="btn" id="runCodesBtn" onclick="run('codes')" disabled>▶ Run product codes</button>
+      <button class="btn danger hidden" id="stopCodesBtn" onclick="stop()">■ Stop</button>
+    </div>
+    <div class="status" id="statusCodes">Pick a brand first.</div>
+    <div class="bar"><div id="barCodes"></div></div>
+  </div>
+
   <div class="card hidden" id="resultCard">
-    <div class="card-title"><span class="num">3</span> Result <span id="resultTitle" style="text-transform:none;letter-spacing:0;font-weight:400"></span></div>
+    <div class="card-title"><span class="num">✓</span> Result <span id="resultTitle" style="text-transform:none;letter-spacing:0;font-weight:400"></span></div>
     <div class="stats" id="stats"></div>
     <div class="row">
       <input type="text" id="search" placeholder="Search handle, SKU or message…" oninput="renderLog()">
@@ -134,22 +147,32 @@
     if (runId) return;
     selected = brands.find(b => b.id === id);
     document.querySelectorAll('.brand').forEach(el => el.classList.toggle('sel', el.id === 'b-' + id));
-    $('runBtn').disabled = false;
-    $('status').className = 'status';
-    $('status').textContent = `Selected: ${selected.vendor} (CFS brand ${selected.id})`;
+    $('runBtn').disabled = $('runCodesBtn').disabled = false;
+    $('status').className = $('statusCodes').className = 'status';
+    $('status').textContent = $('statusCodes').textContent = `Selected: ${selected.vendor} (CFS brand ${selected.id})`;
     const special = selected.rule !== 'as-is' || selected.note;
     $('ruleBanner').classList.toggle('hidden', !special);
     $('ruleBanner').textContent = `Rule for ${selected.vendor}: ${selected.ruleText}${selected.note ? ' · ' + selected.note : ''}`;
   }
 
-  async function run() {
-    if (!selected) return;
-    const dryRun = $('dryRun').checked;
-    if (!dryRun && !confirm(`LIVE stock update for ${selected.vendor}.\n\nThis writes delivery time, stock status, due date and quantity on Shopify for every Active ${selected.vendor} product found in CFS.\n\nContinue?`)) return;
-    $('runBtn').disabled = true; $('stopBtn').classList.remove('hidden');
-    $('status').className = 'status'; $('status').textContent = 'Starting…'; $('bar').style.width = '0';
+  const UI = {
+    stock: { url: '/api/brands/stock-sync', dry: 'dryRun', run: 'runBtn', stop: 'stopBtn', status: 'status', bar: 'bar', name: 'stock update',
+             warn: v => `LIVE stock update for ${v}.\n\nThis writes delivery time, stock status, due date and quantity on Shopify for every Active ${v} product found in CFS.\n\nContinue?` },
+    codes: { url: '/api/brands/codes-sync', dry: 'dryRunCodes', run: 'runCodesBtn', stop: 'stopCodesBtn', status: 'statusCodes', bar: 'barCodes', name: 'product codes',
+             warn: v => `LIVE product codes for ${v}.\n\nThis writes product_code and variant_code on Shopify for every ${v} product found in CFS (only missing or different codes).\n\nContinue?` },
+  };
+  let runningKind = null;
+
+  async function run(kind) {
+    if (!selected || runId) return;
+    const u = UI[kind];
+    const dryRun = $(u.dry).checked;
+    if (!dryRun && !confirm(u.warn(selected.vendor))) return;
+    runningKind = kind;
+    $('runBtn').disabled = $('runCodesBtn').disabled = true; $(u.stop).classList.remove('hidden');
+    $(u.status).className = 'status'; $(u.status).textContent = 'Starting…'; $(u.bar).style.width = '0';
     try {
-      const res = await fetch('/api/brands/stock-sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ brandId: selected.id, dryRun }) });
+      const res = await fetch(u.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ brandId: selected.id, dryRun }) });
       if (!res.ok) throw new Error((await res.json()).error || res.statusText);
       const reader = res.body.getReader(), dec = new TextDecoder();
       let buf = '';
@@ -162,42 +185,53 @@
           if (!p.startsWith('data: ')) continue;
           const ev = JSON.parse(p.slice(6));
           if (ev.type === 'run_id') runId = ev.runId;
-          else if (ev.type === 'status') $('status').textContent = ev.message;
-          else if (ev.type === 'fetch') $('status').textContent = `Loading Shopify products… ${ev.fetched}`;
+          else if (ev.type === 'status') $(u.status).textContent = ev.message;
+          else if (ev.type === 'fetch') $(u.status).textContent = `Loading Shopify products… ${ev.fetched}`;
           else if (ev.type === 'progress') {
-            $('bar').style.width = Math.round(ev.done / ev.total * 100) + '%';
-            $('status').textContent = `Checking ${ev.done} / ${ev.total} products…`;
-          } else if (ev.type === 'done') showResult(ev);
+            $(u.bar).style.width = Math.round(ev.done / ev.total * 100) + '%';
+            $(u.status).textContent = `Checking ${ev.done} / ${ev.total} products…`;
+          } else if (ev.type === 'done') { $(u.status).textContent = 'Preparing the result…'; showResult(ev, u); }
         }
       }
     } catch (e) {
-      $('status').className = 'status err'; $('status').textContent = 'Error: ' + e.message;
+      $(u.status).className = 'status err'; $(u.status).textContent = 'Error: ' + e.message;
     } finally {
-      runId = null; $('runBtn').disabled = !selected; $('stopBtn').classList.add('hidden');
+      runId = null; runningKind = null;
+      $('runBtn').disabled = $('runCodesBtn').disabled = !selected; $(u.stop).classList.add('hidden');
     }
   }
 
   async function stop() {
     if (!runId) return;
     await fetch('/api/brands/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId }) });
-    $('status').textContent = 'Stopping…';
+    if (runningKind) $(UI[runningKind].status).textContent = 'Stopping…';
   }
 
-  function showResult(r) {
+  function showResult(r, u) {
     lastResult = r; filter = 'all';
-    $('bar').style.width = '100%';
-    $('status').className = r.error ? 'status err' : 'status ok';
-    $('status').textContent = r.error ? 'Stopped with an error: ' + r.error
+    $(u.bar).style.width = '100%';
+    $(u.status).className = r.error ? 'status err' : 'status ok';
+    $(u.status).textContent = r.error ? 'Stopped with an error: ' + r.error
       : r.cancelled ? 'Stopped — partial result below.'
       : `${r.dryRun ? 'Dry run' : 'Live run'} finished for ${r.brand}.`;
-    $('resultTitle').textContent = `— ${r.brand} · ${r.dryRun ? 'DRY RUN (nothing changed)' : 'LIVE'}`;
+    $('resultTitle').textContent = `— ${r.brand} · ${r.kind === 'codes' ? 'Product codes' : 'Stock update'} · ${r.dryRun ? 'DRY RUN (nothing changed)' : 'LIVE'}`;
     $('resultCard').classList.remove('hidden');
     renderStats(); renderLog();
+    $('resultCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   function renderStats() {
     const c = lastResult.counts;
-    const tiles = [
+    const tiles = lastResult.kind === 'codes' ? [
+      ['all', '', c.products, 'Products'],
+      ['changes', 'upd', c.productCodes, lastResult.dryRun ? 'Product codes to set' : 'Product codes set'],
+      ['all', '', c.variants, 'Variants checked'],
+      ['changes', 'upd', c.updated, lastResult.dryRun ? 'Variant codes to set' : 'Variant codes set'],
+      ['unchanged', 'ok', c.unchanged, 'Already correct / no code'],
+      ['flag', 'flag', c.flagged, 'Flagged — check'],
+      ['not_in_cfs', 'nf', c.notInCfs, 'SKU not in CFS'],
+      ['error', 'nf', c.failed, 'Errors'],
+    ] : [
       ['all', '', c.products, 'Active products'],
       ['all', '', c.variants, 'Variants checked'],
       ['changes', 'upd', c.updated, lastResult.dryRun ? 'Would update' : 'Updated'],
@@ -234,7 +268,7 @@
     const csv = '﻿' + rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
-    a.download = `brand-stock_${(lastResult.brand || 'brand').replace(/\W+/g, '-')}_${lastResult.dryRun ? 'dry-run' : 'live'}_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `brand-${lastResult.kind || 'stock'}_${(lastResult.brand || 'brand').replace(/\W+/g, '-')}_${lastResult.dryRun ? 'dry-run' : 'live'}_${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
   }
 

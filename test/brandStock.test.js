@@ -35,12 +35,21 @@ const products = [
   { id: 'P4', handle: 'other', title: 'Other', vendor: 'J-Line Extra', status: 'ACTIVE', metafields: mf({}), variants: { nodes: [{ id: 'X', sku: 'UD-1', metafields: mf({}), inventoryItem: inv('IX', 0) }] } },
 ];
 const writes = { mf: [], inv: [] };
+feed[0].productCode = 'LMP-01'; feed[1].productCode = 'VAS'; feed[1].variants[0].productCode = 'VAS-S'; feed[1].variants[1].productCode = 'VAS-L';
+const codeProducts = [
+  { id: 'P1', handle: 'lamp', title: 'Lamp', vendor: 'J-Line', status: 'ACTIVE', metafield: null,
+    variants: { nodes: [{ id: 'V1', sku: 'UD-1', title: 'Default', metafield: null }] } },
+  { id: 'P2', handle: 'vase', title: 'Vase', vendor: 'J-Line', status: 'DRAFT', metafield: { value: 'VAS' },
+    variants: { nodes: [{ id: 'V21', sku: 'UD-2-21', metafield: { value: 'VAS-S' } }, { id: 'V22', sku: 'UD-2-22', metafield: { value: 'OLD' } },
+      { id: 'V2', sku: 'UD-2', metafield: { value: 'keep' } }, { id: 'V23', sku: 'UD-2-99', metafield: null }] } },
+];
 axios.get = async url => { assert(url.endsWith('brandId=363'), url); return { data: feed }; };
 axios.post = async (url, body) => {
   const q = body.query, v = body.variables;
   let data;
   if (/locations/.test(q)) data = { locations: { edges: [{ node: { id: 'L1', name: 'Shop' } }] } };
   else if (/productsCount/.test(q)) data = { productsCount: { count: 3 } };
+  else if (/key: "product_code"/.test(q)) data = { products: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: codeProducts } };
   else if (/products\(/.test(q)) data = { products: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: products } };
   else if (/metafieldsSet/.test(q)) { writes.mf.push(...v.metafields); data = { metafieldsSet: { userErrors: [] } }; }
   else if (/inventorySetQuantities/.test(q)) { writes.inv.push(...v.input.quantities); data = { inventorySetQuantities: { userErrors: [] } }; }
@@ -80,6 +89,18 @@ const sse = async body => {
     assert(keys.includes('V1.inoutstock=IN STOCK') && keys.includes('P1.inoutstock=IN STOCK'));
     assert(keys.includes('P2.inoutstock=IN STOCK'), 'product IN STOCK when any variant is');
     assert(keys.includes('V22.duedate=2026-12-01') && keys.includes('V22.vnotificationtitle=6-8 Weeks'));
+    // ── Step 2: product codes ──
+    writes.mf.length = 0;
+    r = await (async () => { const t = await (await fetch(base + '/api/brands/codes-sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ brandId: 363, dryRun: true }) })).text();
+      return t.split('\n\n').filter(l => l.startsWith('data: ')).map(l => JSON.parse(l.slice(6))).pop(); })();
+    r.log.forEach(l => console.log(' ', l.status, l.sku, l.message));
+    assert.strictEqual(writes.mf.length, 0, 'codes dry run writes nothing');
+    assert.deepStrictEqual(r.counts, { products: 2, productCodes: 1, variants: 5, updated: 2, unchanged: 2, notInCfs: 1, flagged: 0, failed: 0 });
+    assert(r.log.some(l => l.sku === 'UD-2-22' && /variant_code: "OLD" → "VAS-L" \(draft\)/.test(l.message)));
+    assert(r.log.some(l => l.sku === 'UD-2' && /left as "keep"/.test(l.message)), 'product with CFS variants: variant_code left alone');
+    const t2 = await (await fetch(base + '/api/brands/codes-sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ brandId: 363, dryRun: false }) })).text();
+    const k = writes.mf.map(m => `${m.ownerId}.${m.key}=${m.value}`).sort();
+    assert.deepStrictEqual(k, ['P1.product_code=LMP-01', 'V1.variant_code=LMP-01', 'V22.variant_code=VAS-L']);
     console.log('BRAND STOCK TESTS PASSED');
   } catch (e) { console.error('BRAND STOCK TESTS FAILED', e); process.exitCode = 1; }
   server.close();

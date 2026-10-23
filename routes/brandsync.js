@@ -4,6 +4,7 @@
  *   GET  /list             brands + their rule text
  *   GET  /:id/count        how many Shopify products have this vendor
  *   POST /stock-sync       { brandId, dryRun }  → live progress (SSE), then a log
+ *   POST /codes-sync       { brandId, dryRun }  → Step 2: product_code / variant_code (SSE)
  *   POST /cancel           { runId }            → Stop
  *
  * For every ACTIVE Shopify product of the brand, each variant's SKU is looked up in
@@ -19,13 +20,16 @@ const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
 require('dotenv').config();
-const { BRANDS, RULE_TEXT, getBrand, fetchBrandFeed, buildBrandStock } = require('../utils/brands');
+const { BRANDS, RULE_TEXT, getBrand, fetchBrandFeed, buildBrandStock, buildBrandCodes } = require('../utils/brands');
 
 const router = express.Router();
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const cancelled = new Set();
 
 // ── Keep Render awake while a brand run is going (same as Image Sync) ─────────
+// Render's free plan sleeps after ~15 min without incoming requests, so during a
+// run we ping our own public /health URL every 4 minutes. The run also carries on
+// on the server if the browser tab is closed.
 let awakeJobs = 0, awakeTimer = null;
 const selfPingUrl = () => {
   const base = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL;
@@ -112,7 +116,7 @@ router.post('/stock-sync', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('X-Accel-Buffering', 'no');
-    if (res.socket) res.socket.setNoDelay(true);
+  if (res.socket) res.socket.setNoDelay(true);
   res.flushHeaders();
   // If the browser disconnects, writes are skipped and the run carries on
   const send = o => { if (!res.writableEnded && !res.destroyed) res.write(`data: ${JSON.stringify(o)}\n\n`); };
@@ -125,9 +129,9 @@ router.post('/stock-sync', async (req, res) => {
   const log = [];
   const c = { products: 0, variants: 0, updated: 0, unchanged: 0, notInCfs: 0, flagged: 0, skippedDraft: 0, failed: 0 };
   const finish = (extra = {}) => {
-        clearInterval(ping); cancelled.delete(runId); stopKeepAwake();
+    clearInterval(ping); cancelled.delete(runId); stopKeepAwake();
     console.log(`  ✓ Other Brands ${brand.vendor} done — ${JSON.stringify(c)}${extra.cancelled ? ' (stopped)' : ''}`);
-    send({ type: 'done', dryRun, brand: brand.vendor, counts: c, log, ...extra });
+    send({ type: 'done', kind: 'stock', dryRun, brand: brand.vendor, counts: c, log, ...extra });
     if (!res.writableEnded) res.end();
   };
 
@@ -172,7 +176,6 @@ router.post('/stock-sync', async (req, res) => {
       if (p.status !== 'ACTIVE') {
         c.skippedDraft++;
         if (done % 10 === 0) send({ type: 'progress', done, total: products.length, counts: c });
-              if (done % 100 === 0) console.log(`  … ${brand.vendor}: ${done}/${products.length} products`);
         continue;
       }
       c.products++;
@@ -246,6 +249,130 @@ router.post('/stock-sync', async (req, res) => {
         log.push({ handle: p.handle, sku: '-', status: 'error', message: e.message });
       }
       if (done % 10 === 0 || done === products.length) send({ type: 'progress', done, total: products.length, counts: c });
+      if (done % 100 === 0) console.log(`  … ${brand.vendor}: ${done}/${products.length} products`);
+    }
+    finish();
+  } catch (e) {
+    log.push({ handle: '-', sku: '-', status: 'error', message: e.message });
+    finish({ error: e.message });
+  }
+});
+
+// ── Step 2: product codes ─────────────────────────────────────────────────────
+// Same rules as Urban Deco's Step 4, limited to one brand's products (all statuses):
+//   custom.product_code on the product, custom.variant_code on each variant.
+// Only missing or different codes are written; SKUs not in CFS are listed and left alone.
+const CODE_PRODUCTS = `
+  query p($first: Int!, $after: String, $q: String) {
+    products(first: $first, after: $after, query: $q) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        id handle title vendor status
+        metafield(namespace: "custom", key: "product_code") { value }
+        variants(first: 250) { nodes { id sku title metafield(namespace: "custom", key: "variant_code") { value } } }
+      }
+    }
+  }`;
+
+router.post('/codes-sync', async (req, res) => {
+  const brand = getBrand(req.body?.brandId);
+  const dryRun = req.body?.dryRun !== false && req.body?.dryRun !== 'false';
+  if (!brand) return res.status(400).json({ error: 'Pick a brand' });
+  let client;
+  try { client = graphqlClient(); } catch (e) { return res.status(400).json({ error: e.message }); }
+
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (res.socket) res.socket.setNoDelay(true);
+  res.flushHeaders();
+  const send = o => { if (!res.writableEnded && !res.destroyed) res.write(`data: ${JSON.stringify(o)}\n\n`); };
+  const ping = setInterval(() => { if (!res.writableEnded && !res.destroyed) res.write(': ping\n\n'); }, 15000);
+  startKeepAwake();
+  console.log(`▶ Other Brands codes — ${brand.vendor} (${brand.id}) dryRun=${dryRun}`);
+  const runId = crypto.randomBytes(6).toString('hex');
+  send({ type: 'run_id', runId });
+
+  const log = [];
+  const c = { products: 0, productCodes: 0, variants: 0, updated: 0, unchanged: 0, notInCfs: 0, flagged: 0, failed: 0 };
+  const finish = (extra = {}) => {
+    clearInterval(ping); cancelled.delete(runId); stopKeepAwake();
+    console.log(`  ✓ Other Brands codes ${brand.vendor} done — ${JSON.stringify(c)}${extra.cancelled ? ' (stopped)' : ''}`);
+    send({ type: 'done', kind: 'codes', dryRun, brand: brand.vendor, counts: c, log, ...extra });
+    if (!res.writableEnded) res.end();
+  };
+
+  try {
+    send({ type: 'status', message: `Loading CFS feed for ${brand.vendor} (brand ${brand.id})…` });
+    const codes = buildBrandCodes(await fetchBrandFeed(brand.id));
+    send({ type: 'status', message: `CFS: ${codes.size} SKUs with codes` });
+    const vendor = brand.vendor;
+
+    const products = [];
+    let after = null;
+    do {
+      if (cancelled.has(runId)) return finish({ cancelled: true });
+      const d = await gql(client, CODE_PRODUCTS, { first: 50, after, q: `vendor:"${vendor}"` });
+      products.push(...d.products.nodes.filter(p => sameVendor(p.vendor, vendor)));
+      send({ type: 'fetch', fetched: products.length });
+      after = d.products.pageInfo.hasNextPage ? d.products.pageInfo.endCursor : null;
+      if (after) await sleep(150);
+    } while (after);
+    send({ type: 'status', message: `Shopify: ${products.length} ${vendor} products` });
+    if (!products.length) log.push({ handle: '-', sku: '-', status: 'warning', message: `No Shopify products found with vendor "${vendor}"` });
+
+    let done = 0;
+    for (const p of products) {
+      if (cancelled.has(runId)) return finish({ cancelled: true });
+      done++; c.products++;
+      const metafields = [], rows = [];
+      const statusNote = p.status !== 'ACTIVE' ? ` (${p.status.toLowerCase()})` : '';
+      // product_code = CFS product code of the first variant found in CFS
+      const found = p.variants.nodes.map(v => ({ v, code: v.sku ? codes.get(v.sku.trim()) : null }));
+      const prodCode = found.find(x => x.code?.productCode)?.code.productCode || '';
+      const curProd = p.metafield?.value || '';
+      if (prodCode && curProd !== prodCode) {
+        metafields.push({ ownerId: p.id, namespace: 'custom', key: 'product_code', value: prodCode, type: 'single_line_text_field' });
+        c.productCodes++;
+        rows.push({ handle: p.handle, sku: '(product)', status: dryRun ? 'dry_run' : 'updated',
+          message: `${dryRun ? 'Would set' : 'Set'} product_code: "${curProd}" → "${prodCode}"${statusNote}` });
+      }
+      const distinct = new Set(found.map(x => x.code?.productCode).filter(Boolean));
+      if (distinct.size > 1) {
+        c.flagged++;
+        rows.push({ handle: p.handle, sku: '(product)', status: 'flag', message: `Variants belong to ${distinct.size} CFS products (${[...distinct].join(', ')}) — product_code set to the first one, please check` });
+      }
+      for (const { v, code } of found) {
+        if (!v.sku) continue;
+        c.variants++;
+        if (!code) { c.notInCfs++; rows.push({ handle: p.handle, sku: v.sku, status: 'not_in_cfs', message: `SKU not in the ${vendor} CFS feed — code not changed${statusNote}` }); continue; }
+        const cur = v.metafield?.value || '';
+        if (!code.variantCode) {
+          c.unchanged++;
+          rows.push({ handle: p.handle, sku: v.sku, status: 'unchanged', message: `No variant code in CFS for this SKU (product with CFS variants) — left as "${cur}"` });
+        } else if (cur === code.variantCode) {
+          c.unchanged++;
+          rows.push({ handle: p.handle, sku: v.sku, status: 'unchanged', message: `variant_code already "${cur}"` });
+        } else {
+          c.updated++;
+          metafields.push({ ownerId: v.id, namespace: 'custom', key: 'variant_code', value: code.variantCode, type: 'single_line_text_field' });
+          rows.push({ handle: p.handle, sku: v.sku, status: dryRun ? 'dry_run' : 'updated',
+            message: `${dryRun ? 'Would set' : 'Set'} variant_code: "${cur}" → "${code.variantCode}"${statusNote}` });
+        }
+      }
+      if (!dryRun && metafields.length) {
+        try {
+          for (let i = 0; i < metafields.length; i += 25) {
+            const r = await gql(client, METAFIELDS_SET, { metafields: metafields.slice(i, i + 25) });
+            const errs = r?.metafieldsSet?.userErrors || [];
+            if (errs.length) { c.failed++; rows.push({ handle: p.handle, sku: '-', status: 'error', message: `Codes: ${errs.map(e => e.message).join(', ')}` }); }
+          }
+        } catch (e) { c.failed++; rows.push({ handle: p.handle, sku: '-', status: 'error', message: e.message }); }
+        await sleep(100);
+      }
+      log.push(...rows);
+      if (done % 10 === 0 || done === products.length) send({ type: 'progress', done, total: products.length, counts: c });
+      if (done % 100 === 0) console.log(`  … ${brand.vendor} codes: ${done}/${products.length} products`);
     }
     finish();
   } catch (e) {

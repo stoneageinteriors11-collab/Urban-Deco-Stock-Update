@@ -86,4 +86,21 @@ function buildBrandStock(feed, brand) {
   return bySku;
 }
 
-module.exports = { BRANDS, RULE_TEXT, getBrand, fetchBrandFeed, applyRule, buildBrandStock };
+/**
+ * SKU → codes for one brand (same rules as Urban Deco's Step 4):
+ *   simple product (no CFS variants) UD-{p}     → product_code + variant_code = product code
+ *   product with CFS variants       UD-{p}     → product_code only (variant_code left alone)
+ *   CFS variant                     UD-{p}-{v} → product_code = product code, variant_code = variant code
+ */
+function buildBrandCodes(feed) {
+  const bySku = new Map();
+  for (const p of feed) {
+    const prodId = String(p.productId), code = clean(p.productCode);
+    const vars = Array.isArray(p.variants) ? p.variants : [];
+    bySku.set(`UD-${prodId}`, { productCode: code, variantCode: vars.length ? '' : code });
+    for (const v of vars) bySku.set(`UD-${prodId}-${v.variantId}`, { productCode: code, variantCode: clean(v.productCode) });
+  }
+  return bySku;
+}
+
+module.exports = { BRANDS, RULE_TEXT, getBrand, fetchBrandFeed, applyRule, buildBrandStock, buildBrandCodes };
