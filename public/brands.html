@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Other Brands — Stock Update</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --surface2: #222636; --border: #2e3248;
+    --accent: #6366f1; --accent-hover: #818cf8; --danger: #ef4444; --success: #22c55e;
+    --warning: #f59e0b; --info: #38bdf8; --text: #e2e8f0; --text-muted: #94a3b8; --radius: 10px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; padding: 24px 16px 80px; }
+  .container { max-width: 1200px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 24px; flex-wrap: wrap; }
+  header .logo { width: 42px; height: 42px; background: var(--accent); border-radius: 10px; display: grid; place-items: center; font-size: 22px; }
+  header h1 { font-size: 20px; }
+  header p { font-size: 13px; color: var(--text-muted); }
+  header a { margin-left: auto; color: var(--accent-hover); text-decoration: none; font-size: 13px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 18px; }
+  .card-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); margin-bottom: 14px; display: flex; gap: 10px; align-items: center; }
+  .card-title .num { background: var(--accent); color: #fff; border-radius: 6px; padding: 1px 8px; }
+  .help { color: var(--text-muted); font-size: 13px; margin-bottom: 12px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .btn { border: none; border-radius: 8px; padding: 9px 16px; font-size: 13px; font-weight: 600; cursor: pointer; color: #fff; background: var(--accent); }
+  .btn:hover:not(:disabled) { background: var(--accent-hover); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.secondary { background: var(--surface2); border: 1px solid var(--border); color: var(--text); }
+  .btn.danger { background: var(--danger); }
+  label.chk { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; font-size: 13px; }
+  .brands { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+  .brand { background: var(--surface2); border: 2px solid var(--border); border-radius: 8px; padding: 10px 12px; cursor: pointer; }
+  .brand:hover { border-color: var(--accent-hover); }
+  .brand.sel { border-color: var(--accent); background: rgba(99,102,241,.12); }
+  .brand b { display: block; font-size: 14px; }
+  .brand .id { color: var(--text-muted); font-size: 11px; }
+  .brand .rule { font-size: 11px; margin-top: 4px; color: var(--text-muted); }
+  .brand .rule.special { color: var(--warning); }
+  .brand .cnt { font-size: 12px; margin-top: 4px; }
+  .brand .cnt.zero { color: var(--danger); font-weight: 600; }
+  .status { font-size: 13px; color: var(--text-muted); margin-top: 10px; min-height: 20px; }
+  .status.err { color: var(--danger); } .status.ok { color: var(--success); }
+  .bar { height: 6px; background: var(--surface2); border-radius: 99px; overflow: hidden; margin-top: 8px; }
+  .bar div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; margin: 14px 0; }
+  .stat { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; cursor: pointer; }
+  .stat.on { border-color: var(--accent); }
+  .stat b { font-size: 20px; display: block; } .stat span { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; }
+  .stat.upd b { color: var(--info); } .stat.flag b { color: var(--warning); } .stat.nf b { color: var(--danger); } .stat.ok b { color: var(--success); }
+  input[type=text] { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 8px 10px; font: inherit; min-width: 260px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
+  th { text-align: left; color: var(--text-muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  td.msg { white-space: pre-wrap; }
+  .tag { font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 4px; text-transform: uppercase; white-space: nowrap; }
+  .t-dry_run, .t-updated { background: rgba(56,189,248,.15); color: var(--info); }
+  .t-unchanged { background: rgba(34,197,94,.12); color: var(--success); }
+  .t-flag, .t-warning { background: rgba(245,158,11,.15); color: var(--warning); }
+  .t-not_in_cfs, .t-error { background: rgba(239,68,68,.15); color: var(--danger); }
+  .logwrap { max-height: 560px; overflow: auto; }
+  .banner { border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 12px; background: rgba(245,158,11,.12); border: 1px solid rgba(245,158,11,.35); color: var(--warning); }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="logo">🏷️</div>
+    <div>
+      <h1>Other Brands</h1>
+      <p>Stock update from each brand's CFS feed (not Urban Deco)</p>
+    </div>
+    <a href="/">← Back to Urban Deco tool</a>
+  </header>
+
+  <div class="card">
+    <div class="card-title"><span class="num">1</span> Pick a brand</div>
+    <p class="help">The number under each brand is how many Shopify products have that vendor name. <b>0</b> means the vendor name on Shopify is different.</p>
+    <div class="brands" id="brands"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="num">2</span> Stock update</div>
+    <p class="help">For every <b>Active</b> Shopify product of this brand, copies from CFS: delivery time, stock status, on hand (→ quantity) and due date.
+      SKUs not found in the brand's CFS feed are skipped and listed — they're for the clean-up step later.</p>
+    <div id="ruleBanner" class="banner hidden"></div>
+    <div class="row">
+      <label class="chk"><input type="checkbox" id="dryRun" checked> Dry run (show what would change, change nothing)</label>
+      <button class="btn" id="runBtn" onclick="run()" disabled>▶ Run stock update</button>
+      <button class="btn danger hidden" id="stopBtn" onclick="stop()">■ Stop</button>
+    </div>
+    <div class="status" id="status">Pick a brand first.</div>
+    <div class="bar"><div id="bar"></div></div>
+  </div>
+
+  <div class="card hidden" id="resultCard">
+    <div class="card-title"><span class="num">3</span> Result <span id="resultTitle" style="text-transform:none;letter-spacing:0;font-weight:400"></span></div>
+    <div class="stats" id="stats"></div>
+    <div class="row">
+      <input type="text" id="search" placeholder="Search handle, SKU or message…" oninput="renderLog()">
+      <button class="btn secondary" onclick="downloadCsv()">⬇ Download log (CSV)</button>
+    </div>
+    <div class="logwrap">
+      <table><thead><tr><th>Status</th><th>Handle</th><th>SKU</th><th>Message</th></tr></thead><tbody id="logBody"></tbody></table>
+    </div>
+  </div>
+</div>
+
+<script>
+  let brands = [], selected = null, runId = null, lastResult = null, filter = 'all';
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  async function loadBrands() {
+    brands = (await (await fetch('/api/brands/list')).json()).brands;
+    $('brands').innerHTML = brands.map(b => `
+      <div class="brand" id="b-${b.id}" onclick="pick(${b.id})">
+        <b>${esc(b.vendor)}</b><span class="id">CFS brand ${b.id}</span>
+        <div class="rule ${b.rule !== 'as-is' ? 'special' : ''}">${esc(b.ruleText)}${b.note ? ' · ⚠ ' + esc(b.note) : ''}</div>
+        <div class="cnt" id="c-${b.id}">counting…</div>
+      </div>`).join('');
+    for (const b of brands) {
+      fetch(`/api/brands/${b.id}/count`).then(r => r.json()).then(d => {
+        const el = $('c-' + b.id);
+        if (d.error) { el.textContent = 'count failed'; return; }
+        el.textContent = `${d.count} Shopify products`;
+        el.classList.toggle('zero', d.count === 0);
+      }).catch(() => { $('c-' + b.id).textContent = 'count failed'; });
+    }
+  }
+
+  function pick(id) {
+    if (runId) return;
+    selected = brands.find(b => b.id === id);
+    document.querySelectorAll('.brand').forEach(el => el.classList.toggle('sel', el.id === 'b-' + id));
+    $('runBtn').disabled = false;
+    $('status').className = 'status';
+    $('status').textContent = `Selected: ${selected.vendor} (CFS brand ${selected.id})`;
+    const special = selected.rule !== 'as-is' || selected.note;
+    $('ruleBanner').classList.toggle('hidden', !special);
+    $('ruleBanner').textContent = `Rule for ${selected.vendor}: ${selected.ruleText}${selected.note ? ' · ' + selected.note : ''}`;
+  }
+
+  async function run() {
+    if (!selected) return;
+    const dryRun = $('dryRun').checked;
+    if (!dryRun && !confirm(`LIVE stock update for ${selected.vendor}.\n\nThis writes delivery time, stock status, due date and quantity on Shopify for every Active ${selected.vendor} product found in CFS.\n\nContinue?`)) return;
+    $('runBtn').disabled = true; $('stopBtn').classList.remove('hidden');
+    $('status').className = 'status'; $('status').textContent = 'Starting…'; $('bar').style.width = '0';
+    try {
+      const res = await fetch('/api/brands/stock-sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ brandId: selected.id, dryRun }) });
+      if (!res.ok) throw new Error((await res.json()).error || res.statusText);
+      const reader = res.body.getReader(), dec = new TextDecoder();
+      let buf = '';
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split('\n\n'); buf = parts.pop();
+        for (const p of parts) {
+          if (!p.startsWith('data: ')) continue;
+          const ev = JSON.parse(p.slice(6));
+          if (ev.type === 'run_id') runId = ev.runId;
+          else if (ev.type === 'status') $('status').textContent = ev.message;
+          else if (ev.type === 'fetch') $('status').textContent = `Loading Shopify products… ${ev.fetched}`;
+          else if (ev.type === 'progress') {
+            $('bar').style.width = Math.round(ev.done / ev.total * 100) + '%';
+            $('status').textContent = `Checking ${ev.done} / ${ev.total} products…`;
+          } else if (ev.type === 'done') showResult(ev);
+        }
+      }
+    } catch (e) {
+      $('status').className = 'status err'; $('status').textContent = 'Error: ' + e.message;
+    } finally {
+      runId = null; $('runBtn').disabled = !selected; $('stopBtn').classList.add('hidden');
+    }
+  }
+
+  async function stop() {
+    if (!runId) return;
+    await fetch('/api/brands/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId }) });
+    $('status').textContent = 'Stopping…';
+  }
+
+  function showResult(r) {
+    lastResult = r; filter = 'all';
+    $('bar').style.width = '100%';
+    $('status').className = r.error ? 'status err' : 'status ok';
+    $('status').textContent = r.error ? 'Stopped with an error: ' + r.error
+      : r.cancelled ? 'Stopped — partial result below.'
+      : `${r.dryRun ? 'Dry run' : 'Live run'} finished for ${r.brand}.`;
+    $('resultTitle').textContent = `— ${r.brand} · ${r.dryRun ? 'DRY RUN (nothing changed)' : 'LIVE'}`;
+    $('resultCard').classList.remove('hidden');
+    renderStats(); renderLog();
+  }
+
+  function renderStats() {
+    const c = lastResult.counts;
+    const tiles = [
+      ['all', '', c.products, 'Active products'],
+      ['all', '', c.variants, 'Variants checked'],
+      ['changes', 'upd', c.updated, lastResult.dryRun ? 'Would update' : 'Updated'],
+      ['unchanged', 'ok', c.unchanged, 'Already correct'],
+      ['flag', 'flag', c.flagged, 'Flagged — check'],
+      ['not_in_cfs', 'nf', c.notInCfs, 'SKU not in CFS'],
+      ['error', 'nf', c.failed, 'Errors'],
+      ['all', '', c.skippedDraft, 'Draft / archived (skipped)'],
+    ];
+    $('stats').innerHTML = tiles.map(([f, cls, n, label]) =>
+      `<div class="stat ${cls} ${filter === f && f !== 'all' ? 'on' : ''}" onclick="setFilter('${f}')"><b>${n}</b><span>${label}</span></div>`).join('');
+  }
+  function setFilter(f) { filter = filter === f ? 'all' : f; renderStats(); renderLog(); }
+
+  function visibleRows() {
+    const q = $('search').value.trim().toLowerCase();
+    return (lastResult?.log || []).filter(l => {
+      if (filter === 'changes' && !['dry_run', 'updated'].includes(l.status)) return false;
+      if (filter === 'error' && !['error', 'warning'].includes(l.status)) return false;
+      if (!['all', 'changes', 'error'].includes(filter) && l.status !== filter) return false;
+      return !q || `${l.handle} ${l.sku} ${l.message}`.toLowerCase().includes(q);
+    });
+  }
+  function renderLog() {
+    const rows = visibleRows();
+    const shown = rows.slice(0, 2000);
+    $('logBody').innerHTML = shown.map(l => `<tr><td><span class="tag t-${l.status}">${esc(l.status.replace(/_/g, ' '))}</span></td>
+      <td>${esc(l.handle)}</td><td>${esc(l.sku)}</td><td class="msg">${esc(l.message)}</td></tr>`).join('')
+      + (rows.length > shown.length ? `<tr><td colspan="4" class="msg">… ${rows.length - shown.length} more rows — use search or download the CSV</td></tr>` : '');
+  }
+
+  function downloadCsv() {
+    const rows = [['Status', 'Handle', 'SKU', 'Message'], ...visibleRows().map(l => [l.status, l.handle, l.sku, l.message])];
+    const csv = '﻿' + rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    a.download = `brand-stock_${(lastResult.brand || 'brand').replace(/\W+/g, '-')}_${lastResult.dryRun ? 'dry-run' : 'live'}_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+  }
+
+  loadBrands();
+</script>
+</body>
+</html>
