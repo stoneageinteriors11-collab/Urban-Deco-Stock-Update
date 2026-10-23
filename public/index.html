@@ -564,6 +564,7 @@
         <button class="fbtn"        data-filter="ok"           onclick="setFilter('ok',this)">OK</button>
         <button class="fbtn"        data-filter="draft"        onclick="setFilter('draft',this)">Draft / Archived</button>
       </div>
+      <div id="nothing-note" class="hidden" style="width:100%;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.3);color:#22c55e;border-radius:8px;padding:8px 12px;font-size:13px;margin:6px 0"></div>
       <div class="select-all-wrap" id="select-all-wrap">
         <input type="checkbox" id="select-all" onchange="toggleSelectAll(this.checked)" />
         <label for="select-all" id="select-all-label">Select all orphaned</label>
@@ -1222,6 +1223,35 @@ async function testConnection() {
       return matchFilter && matchSearch;
     });
     renderPage();
+    tidyActions();
+  }
+
+  // Hide "Select all" and the action buttons when the current tab has nothing they can act on,
+  // and say so plainly when there's nothing to clean up at all.
+  function tidyActions() {
+    const n = st => allResults.filter(r => r.matchStatus === st).length;
+    const orph = n('orphaned'), inact = n('cfs-inactive'), prod = n('cfs-product'), code = n('code-only');
+    const can = {
+      all:            { wrap: orph + inact + prod, del: orph + code, draft: inact, pub: 0 },
+      orphaned:       { wrap: orph,  del: orph,  draft: 0,     pub: 0 },
+      'cfs-inactive': { wrap: inact, del: 0,     draft: inact, pub: 0 },
+      'cfs-product':  { wrap: prod,  del: 0,     draft: 0,     pub: prod },
+      'code-only':    { wrap: code,  del: code,  draft: 0,     pub: 0 },
+    }[activeFilter] || { wrap: 0, del: 0, draft: 0, pub: 0 };
+    // only ever hide here — which buttons belong to which tab is decided in setFilter
+    if (!can.wrap)  document.getElementById('select-all-wrap').style.display = 'none';
+    if (!can.del)   document.getElementById('btn-delete').style.display = 'none';
+    if (!can.draft) document.getElementById('btn-set-draft').style.display = 'none';
+    if (!can.pub)   document.getElementById('btn-publish').style.display = 'none';
+
+    const note = document.getElementById('nothing-note');
+    if (!note) return;
+    const other = n('other-brand'), ok = n('ok'), draft = n('draft');
+    const nothing = allResults.length && !(orph + inact + prod + code);
+    note.classList.toggle('hidden', !nothing);
+    if (nothing) note.innerHTML = `✅ Nothing to clean up — all ${ok.toLocaleString()} active variants match CFS.`
+      + (draft ? ` <span style="color:var(--text-muted)">${draft.toLocaleString()} on draft/archived products were skipped.</span>` : '')
+      + (other ? ` <b style="color:#38bdf8">${other.toLocaleString()} found under another brand — check the vendor (Other brand tab).</b>` : '');
   }
 
   function renderPage() {
@@ -1260,7 +1290,7 @@ async function testConnection() {
         <td title="${variantLabel}">${variantLabel}</td>
         <td><code style="font-size:11px;color:var(--text-muted)">${r.variantSku}</code></td>
         <td>£${r.price || '—'}</td>
-        <td>${r.inventoryQty || '—'}</td>
+        <td>${r.inventoryQty === '' || r.inventoryQty == null ? '—' : r.inventoryQty}</td>
         <td><span class="badge ${badgeCls}" title="${(r.codeOnlyNote || r.otherBrandNote || '').replace(/"/g, '&quot;')}">${badgeTxt}</span>${
           (r.sharedSkuHandles || []).length ? `<span class="badge badge-shared" title="Same SKU also on: ${r.sharedSkuHandles.join(', ')}">Shared SKU ×${r.sharedSkuHandles.length + 1}</span>` : ''}</td>
       </tr>`;
