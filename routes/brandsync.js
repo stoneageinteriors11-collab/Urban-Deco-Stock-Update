@@ -25,6 +25,25 @@ const router = express.Router();
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const cancelled = new Set();
 
+// ── Keep Render awake while a brand run is going (same as Image Sync) ─────────
+let awakeJobs = 0, awakeTimer = null;
+const selfPingUrl = () => {
+  const base = process.env.RENDER_EXTERNAL_URL || process.env.APP_URL;
+  return base ? `${base.replace(/\/$/, '')}/health` : null;
+};
+function startKeepAwake() {
+  awakeJobs++;
+  if (awakeTimer || !selfPingUrl()) return;
+  const ping = () => axios.get(selfPingUrl(), { timeout: 20000 }).catch(e => console.warn('  ⚠ keep-awake ping failed:', e.message));
+  ping();
+  awakeTimer = setInterval(ping, 4 * 60 * 1000);
+  console.log('  ☕ Other Brands: keep-awake on');
+}
+function stopKeepAwake() {
+  awakeJobs = Math.max(0, awakeJobs - 1);
+  if (awakeJobs === 0 && awakeTimer) { clearInterval(awakeTimer); awakeTimer = null; console.log('  ☕ Other Brands: keep-awake off'); }
+}
+
 function graphqlClient() {
   const store = process.env.SHOPIFY_STORE;
   const token = process.env.SHOPIFY_ACCESS_TOKEN || process.env.SHOPIFY_API_TOKEN;
@@ -93,18 +112,23 @@ router.post('/stock-sync', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('X-Accel-Buffering', 'no');
+    if (res.socket) res.socket.setNoDelay(true);
   res.flushHeaders();
-  const send = o => res.write(`data: ${JSON.stringify(o)}\n\n`);
-  const ping = setInterval(() => res.write(': ping\n\n'), 15000);
+  // If the browser disconnects, writes are skipped and the run carries on
+  const send = o => { if (!res.writableEnded && !res.destroyed) res.write(`data: ${JSON.stringify(o)}\n\n`); };
+  const ping = setInterval(() => { if (!res.writableEnded && !res.destroyed) res.write(': ping\n\n'); }, 15000);
+  startKeepAwake();
+  console.log(`▶ Other Brands stock update — ${brand.vendor} (${brand.id}) dryRun=${dryRun}`);
   const runId = crypto.randomBytes(6).toString('hex');
   send({ type: 'run_id', runId });
 
   const log = [];
   const c = { products: 0, variants: 0, updated: 0, unchanged: 0, notInCfs: 0, flagged: 0, skippedDraft: 0, failed: 0 };
   const finish = (extra = {}) => {
-    clearInterval(ping); cancelled.delete(runId);
+        clearInterval(ping); cancelled.delete(runId); stopKeepAwake();
+    console.log(`  ✓ Other Brands ${brand.vendor} done — ${JSON.stringify(c)}${extra.cancelled ? ' (stopped)' : ''}`);
     send({ type: 'done', dryRun, brand: brand.vendor, counts: c, log, ...extra });
-    res.end();
+    if (!res.writableEnded) res.end();
   };
 
   try {
@@ -148,6 +172,7 @@ router.post('/stock-sync', async (req, res) => {
       if (p.status !== 'ACTIVE') {
         c.skippedDraft++;
         if (done % 10 === 0) send({ type: 'progress', done, total: products.length, counts: c });
+              if (done % 100 === 0) console.log(`  … ${brand.vendor}: ${done}/${products.length} products`);
         continue;
       }
       c.products++;
