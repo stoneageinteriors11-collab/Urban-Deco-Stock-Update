@@ -5,6 +5,7 @@
  *   GET  /:id/count        Shopify products + variants for this vendor, CFS products + SKUs
  *   POST /stock-sync       { brandId, dryRun }  → live progress (SSE), then a log
  *   POST /codes-sync       { brandId, dryRun }  → Step 2: product_code / variant_code (SSE)
+ *   POST /compare          { brandId }          → Step 4 clean-up: Compare & Results for one brand
  *   POST /cancel           { runId }            → Stop
  *
  * For every ACTIVE Shopify product of the brand, each variant's SKU is looked up in
@@ -412,6 +413,126 @@ router.post('/codes-sync', async (req, res) => {
     log.push({ handle: '-', sku: '-', status: 'error', message: e.message });
     finish({ error: e.message });
   }
+});
+
+// ── Step 4: Clean-up — Compare & Results for one brand ────────────────────────
+// Same comparison as Urban Deco's Step 3, but against this brand's CFS feed and only
+// Shopify products with this vendor. Extra safety: a SKU that isn't in this brand's
+// feed is also looked up in every other brand's feed (and Urban Deco's). If it's
+// there, the row becomes "other-brand" — shown for checking, never deleted.
+const { buildCompareData, fetchCfsProducts } = require('../utils/cfsApi');
+const { compareVariants, parseSku } = require('../utils/matchVariants');
+
+const COMPARE_PRODUCTS = `
+  query p($first: Int!, $after: String, $q: String) {
+    products(first: $first, after: $after, query: $q) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        handle title vendor status
+        metafield(namespace: "custom", key: "product_code") { value }
+        variants(first: 250) { nodes {
+          sku price inventoryQuantity barcode
+          selectedOptions { name value }
+          metafield(namespace: "custom", key: "variant_code") { value }
+        } }
+      }
+    }
+  }`;
+
+// prodId → "Brand name (id)" for every brand's feed; kept 30 minutes
+let otherIndex = null;
+async function crossBrandIndex() {
+  if (otherIndex && Date.now() - otherIndex.at < 30 * 60 * 1000) return otherIndex;
+  const byProd = new Map(), byVar = new Map(), failed = [];
+  const sources = [{ id: 215, vendor: 'Urban Deco' }, ...BRANDS];
+  const queue = [...sources];
+  const worker = async () => {
+    for (let b; (b = queue.shift());) {
+      try {
+        const feed = b.id === 215 ? await fetchCfsProducts() : await fetchBrandFeed(b.id);
+        const label = `${feed[0]?.brandName || b.vendor} (brand ${b.id})`;
+        for (const p of feed) {
+          byProd.set(String(p.productId), { brandId: b.id, label });
+          for (const v of (Array.isArray(p.variants) ? p.variants : [])) byVar.set(String(v.variantId), { brandId: b.id, label });
+        }
+      } catch (e) { failed.push(`${b.vendor} (${e.message})`); }
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  otherIndex = { at: Date.now(), byProd, byVar, failed };
+  return otherIndex;
+}
+
+router.post('/compare', async (req, res) => {
+  const brand = getBrand(req.body?.brandId);
+  if (!brand) return res.status(400).json({ success: false, error: 'Unknown brand' });
+  startKeepAwake();
+  try {
+    const client = graphqlClient();
+    console.log(`▶ Other Brands compare — ${brand.vendor} (${brand.id})`);
+    const feed = await fetchBrandFeed(brand.id);
+    const {
+      validProductSKUs, cfsProductIds, validVariantSKUs, cfsVariantAttrIds,
+      productCodesBySku, productCodesByProdId, cfsProductCodeToStatus,
+      variantCodesBySku, variantCodesByAttrId, cfsVarCodeSet,
+    } = buildCompareData(feed);
+
+    const shopifyVariants = [];
+    let after = null;
+    do {
+      const d = await gql(client, COMPARE_PRODUCTS, { first: 50, after, q: `vendor:"${brand.vendor}"` });
+      for (const p of d.products.nodes) {
+        if (!sameVendor(p.vendor, brand.vendor)) continue;
+        for (const v of p.variants.nodes) {
+          if (!v.sku) continue;
+          const opts = (v.selectedOptions || []).filter(o => o.value !== 'Default Title').map(o => o.value);
+          shopifyVariants.push({
+            handle: p.handle, title: p.title || '', variantSku: v.sku.trim(),
+            option1: opts[0] || '', option2: opts[1] || '', option3: opts[2] || '',
+            barcode: v.barcode || '', price: v.price || '', inventoryQty: v.inventoryQuantity ?? '',
+            status: (p.status || '').toLowerCase(),
+            shopifyVariantCode: v.metafield?.value || '', shopifyProductCode: p.metafield?.value || '',
+          });
+        }
+      }
+      after = d.products.pageInfo.hasNextPage ? d.products.pageInfo.endCursor : null;
+      if (after) await sleep(150);
+    } while (after);
+
+    const { results, summary } = compareVariants(
+      shopifyVariants, validVariantSKUs, validProductSKUs, cfsProductIds, cfsVariantAttrIds,
+      productCodesBySku, productCodesByProdId, variantCodesBySku, variantCodesByAttrId,
+      cfsVarCodeSet, cfsProductCodeToStatus,
+    );
+
+    // Safety: "not in this brand's CFS feed" — is it in another brand's feed?
+    let otherBrand = 0, crossNote = null;
+    const suspects = results.filter(r => r.matchStatus === 'orphaned' || r.matchStatus === 'code-only');
+    if (suspects.length) {
+      const idx = await crossBrandIndex();
+      if (idx.failed.length) crossNote = `Couldn't load: ${idx.failed.join(', ')} — those brands weren't checked`;
+      for (const r of suspects) {
+        const { prodId, varId } = parseSku(r.variantSku);
+        const hit = (prodId && idx.byProd.get(prodId)) || (varId && idx.byVar.get(varId));
+        if (hit && hit.brandId !== brand.id) {
+          r.matchStatus = 'other-brand';
+          r.otherBrandNote = `SKU found in CFS under ${hit.label}, not ${brand.vendor} — check the vendor on Shopify. Never deleted here.`;
+          otherBrand++;
+        }
+      }
+      summary.orphaned = results.filter(r => r.matchStatus === 'orphaned').length;
+      summary.codeOnly = results.filter(r => r.matchStatus === 'code-only').length;
+    }
+    summary.otherBrand = otherBrand;
+    console.log(`  ✓ Other Brands compare ${brand.vendor}: ${JSON.stringify(summary)}`);
+    res.json({
+      success: true, brand: { id: brand.id, vendor: brand.vendor }, results, summary, crossNote,
+      cfsProductIds: [...cfsProductIds.entries()], cfsVariantAttrIds: [...cfsVariantAttrIds],
+    });
+  } catch (e) {
+    console.error('[brands/compare]', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  } finally { stopKeepAwake(); }
 });
 
 module.exports = router;

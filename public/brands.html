@@ -110,6 +110,16 @@
     <div class="bar"><div id="barCodes"></div></div>
   </div>
 
+  <div class="card">
+    <div class="card-title"><span class="num">4</span> Clean-up</div>
+    <p class="help">Same as Urban Deco's Step 3, for this brand only: delete or draft variants that aren't in CFS, promote CFS product matches,
+      remove the photos of deleted variants (backup zip first) and Undo. It opens in the main tool's Step 3 screen.
+      Extra safety: anything not in this brand's feed is also checked against every other brand's feed — if it's found there, it's flagged, never deleted.</p>
+    <div class="row">
+      <button class="btn" id="cleanupBtn" onclick="openCleanup()" disabled>🧹 Open clean-up</button>
+    </div>
+  </div>
+
   <div class="card hidden" id="resultCard">
     <div class="card-title"><span class="num">✓</span> Result <span id="resultTitle" style="text-transform:none;letter-spacing:0;font-weight:400"></span></div>
     <div class="stats" id="stats"></div>
@@ -159,6 +169,8 @@
     selected = brands.find(b => b.id === id);
     document.querySelectorAll('.brand').forEach(el => el.classList.toggle('sel', el.id === 'b-' + id));
     $('runBtn').disabled = $('runCodesBtn').disabled = false;
+    $('cleanupBtn').disabled = false;
+    $('cleanupBtn').textContent = `🧹 Open clean-up for ${selected.vendor} →`;
     $('status').className = $('statusCodes').className = 'status';
     $('status').textContent = $('statusCodes').textContent = `Selected: ${selected.vendor} (CFS brand ${selected.id})`;
     const special = selected.rule !== 'as-is' || selected.note;
@@ -211,6 +223,8 @@
       $('runBtn').disabled = $('runCodesBtn').disabled = !selected; $(u.stop).classList.add('hidden');
     }
   }
+
+  function openCleanup() { if (selected) location.href = `/?brand=${selected.id}`; }
 
   async function stop() {
     if (!runId) return;

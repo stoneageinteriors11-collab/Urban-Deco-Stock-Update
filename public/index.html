@@ -172,6 +172,7 @@
     .tile.cfs-inactive-count .num { color: var(--warning); }
     .tile.cfs-product-count  .num { color: #a78bfa; }
     .tile.code-only-count    .num { color: #fb923c; }
+    .tile.other-brand-count  .num { color: #38bdf8; }
 
     /* ── Table toolbar ── */
     .table-toolbar {
@@ -220,6 +221,10 @@
     .badge-cfs-inactive { background: rgba(245,158,11,.15);  color: var(--warning); }
     .badge-cfs-product  { background: rgba(167,139,250,.15); color: #a78bfa; }
     .badge-code-only    { background: rgba(251,146,60,.15);  color: #fb923c; }
+    .badge-other-brand  { background: rgba(56,189,248,.15);  color: #38bdf8; cursor: help; }
+    .brand-banner { background: rgba(99,102,241,.12); border: 1px solid rgba(99,102,241,.45); border-radius: 10px; padding: 12px 16px; margin-bottom: 18px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .brand-banner a { color: var(--accent-hover); margin-left: auto; text-decoration: none; font-size: 13px; }
+    body.brand-mode .ud-only { display: none !important; }
     .badge-shared       { background: rgba(251,146,60,.10);  color: #fb923c; margin-left: 4px; cursor: help; }
 
     /* ── Pagination ── */
@@ -311,8 +316,8 @@
       <h1>Variant Sync Tool</h1>
       <p>Urban Deco (Shopify) ↔ Choice Furniture Superstore — orphaned variant cleanup</p>
     </div>
-    <a href="/brands.html" style="margin-left:auto;background:var(--surface2);border:1px solid var(--border);color:var(--text);text-decoration:none;padding:8px 14px;border-radius:8px;font-size:13px;font-weight:600">🏷️ Other Brands</a>
-    <a href="/image-sync.html" style="background:var(--accent);color:#fff;text-decoration:none;padding:8px 14px;border-radius:8px;font-size:13px;font-weight:600">🖼️ Step 7 — Image Sync</a>
+    <a class="ud-only" href="/brands.html" style="margin-left:auto;background:var(--surface2);border:1px solid var(--border);color:var(--text);text-decoration:none;padding:8px 14px;border-radius:8px;font-size:13px;font-weight:600">🏷️ Other Brands</a>
+    <a class="ud-only" href="/image-sync.html" style="background:var(--accent);color:#fff;text-decoration:none;padding:8px 14px;border-radius:8px;font-size:13px;font-weight:600">🖼️ Step 7 — Image Sync</a>
   </header>
 
   <!-- ── Step 1: Shopify Connection ── -->
@@ -352,7 +357,7 @@
   </div>
 
   <!-- ── Step 2: Upload Files ── -->
-  <div class="card">
+  <div class="card ud-only">
     <div class="card-title">Step 2 — Upload Files</div>
 
     <!-- Mode tabs -->
@@ -455,9 +460,11 @@
 
   </div>
 
+  <div class="brand-banner hidden" id="brand-banner"></div>
+
   <!-- ── Step 3: Compare ── -->
   <div class="card">
-    <div class="card-title">Step 3 — Compare & Results</div>
+    <div class="card-title" id="step3-title">Step 3 — Compare & Results</div>
     <div class="actions-row" style="margin-bottom:20px;">
       <button class="btn btn-primary" id="btn-compare" onclick="runCompare()">
         🔍 Run Comparison
@@ -537,6 +544,10 @@
         <div class="num" id="tile-code-only">0</div>
         <div class="lbl">Check: SKU not in CFS (only old saved code matches)</div>
       </div>
+      <div class="tile other-brand-count brand-only hidden" title="Not in this brand's CFS feed, but found in another brand's feed. Usually the vendor on Shopify is wrong. Never deleted here.">
+        <div class="num" id="tile-other-brand">0</div>
+        <div class="lbl">Found under another brand (check vendor)</div>
+      </div>
     </div>
 
     <!-- Table toolbar -->
@@ -548,6 +559,7 @@
         <button class="fbtn"        data-filter="cfs-inactive" onclick="setFilter('cfs-inactive',this)">CFS Inactive</button>
         <button class="fbtn"        data-filter="cfs-product"  onclick="setFilter('cfs-product',this)">CFS Product Match</button>
         <button class="fbtn"        data-filter="code-only"    onclick="setFilter('code-only',this)">Check: SKU not in CFS</button>
+        <button class="fbtn brand-only hidden" data-filter="other-brand" onclick="setFilter('other-brand',this)">Other brand</button>
         <button class="fbtn"        data-filter="shared"       onclick="setFilter('shared',this)">Shared SKU</button>
         <button class="fbtn"        data-filter="ok"           onclick="setFilter('ok',this)">OK</button>
         <button class="fbtn"        data-filter="draft"        onclick="setFilter('draft',this)">Draft / Archived</button>
@@ -588,7 +600,7 @@
   </div>
 
   <!-- ── Step 4: Sync CFS Codes to Shopify Metafields ── -->
-  <div class="card" id="sync-card">
+  <div class="card ud-only" id="sync-card">
     <div class="card-title">Step 4 — Sync CFS Codes to Shopify Metafields</div>
 
     <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;line-height:1.6">
@@ -616,7 +628,7 @@
   </div>
 
   <!-- ── Step 5: Stock Sync ── -->
-  <div class="card" id="stock-sync-card">
+  <div class="card ud-only" id="stock-sync-card">
     <div class="card-title">Step 5 — Stock Sync (Delivery Time, Inventory &amp; Metafields)</div>
 
     <p style="font-size:13px;color:var(--text-muted);margin-bottom:18px;line-height:1.6">
@@ -755,7 +767,7 @@
   </div>
 
   <!-- ── Step 6: Calendar Sync ── -->
-  <div class="card" id="calendar-sync-card">
+  <div class="card ud-only" id="calendar-sync-card">
     <div class="card-title">Step 6 — Calendar Sync (Next Day Delivery)</div>
 
     <p style="font-size:13px;color:var(--text-muted);margin-bottom:18px;line-height:1.6">
@@ -1026,6 +1038,30 @@ async function testConnection() {
     }
   }
 
+  // ── Brand mode: /?brand=<CFS brand id> → Step 3 runs for that brand (Other Brands → Clean-up) ──
+  let BRAND = null;
+  (async () => {
+    const id = new URLSearchParams(location.search).get('brand');
+    if (!id) return;
+    try {
+      const b = ((await (await fetch('/api/brands/list')).json()).brands || []).find(x => String(x.id) === String(id));
+      if (!b) { alert('Unknown brand ' + id); return; }
+      BRAND = b;
+      document.body.classList.add('brand-mode');
+      document.title = `Clean-up — ${b.vendor}`;
+      document.querySelectorAll('.brand-only').forEach(el => el.classList.remove('hidden'));
+      const ban = document.getElementById('brand-banner');
+      ban.classList.remove('hidden');
+      ban.innerHTML = `<div><b>Clean-up for ${b.vendor}</b> (CFS brand ${b.id})<br><span style="font-size:12px;color:var(--text-muted)">
+        Compares only ${b.vendor} products on Shopify with the ${b.vendor} CFS feed. Same buttons and rules as Urban Deco's Step 3 —
+        dry run first, backup zip before photos are removed, Undo for drafts, SKUs, status and photos.</span></div>
+        <a href="/brands.html">← Back to Other Brands</a>`;
+      document.getElementById('step3-title').textContent = `Clean-up — Compare & Results · ${b.vendor}`;
+      const es = document.querySelector('#empty-state p');
+      if (es) es.innerHTML = `Click <strong>Run Comparison</strong> to compare ${b.vendor} products with the CFS feed.`;
+    } catch (e) { alert('Could not load the brand: ' + e.message); }
+  })();
+
   checkConnectionStatus();
 
   // ── Run comparison ─────────────────────────────────────────────────────────
@@ -1042,7 +1078,7 @@ async function testConnection() {
     const shopFile1 = document.getElementById('input-shop1').files[0];
     const shopFile2 = document.getElementById('input-shop2').files[0];
 
-    if (!isApiMode && !shopFile1) {
+    if (!BRAND && !isApiMode && !shopFile1) {
       alert('Please upload at least one Shopify export file (or switch to API Mode in Step 2).');
       return;
     }
@@ -1054,7 +1090,10 @@ async function testConnection() {
     document.getElementById('btn-download-log').classList.add('hidden');
 
     let fetchPromise;
-    if (isApiMode) {
+    if (BRAND) {
+      fetchPromise = fetch('/api/brands/compare', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ brandId: BRAND.id }), signal: compareController.signal });
+    } else if (isApiMode) {
       fetchPromise = fetch('/api/stock/compare-api', { method: 'POST', signal: compareController.signal });
     } else {
       const form = new FormData();
@@ -1083,6 +1122,8 @@ async function testConnection() {
       document.getElementById('tile-cfs-inactive').textContent  = (data.summary.cfsInactive || 0).toLocaleString();
       document.getElementById('tile-cfs-product').textContent   = (data.summary.cfsProduct  || 0).toLocaleString();
       document.getElementById('tile-code-only').textContent     = (data.summary.codeOnly    || 0).toLocaleString();
+      document.getElementById('tile-other-brand').textContent   = (data.summary.otherBrand  || 0).toLocaleString();
+      if (data.crossNote) alert('Other-brand check: ' + data.crossNote);
       document.getElementById('summary-tiles').classList.remove('hidden');
       document.getElementById('table-toolbar').classList.remove('hidden');
       document.getElementById('results-table').classList.remove('hidden');
@@ -1194,18 +1235,21 @@ async function testConnection() {
       const isCfsInactive = r.matchStatus === 'cfs-inactive';
       const isCfsProduct  = r.matchStatus === 'cfs-product';
       const isCodeOnly    = r.matchStatus === 'code-only';
+      const isOtherBrand  = r.matchStatus === 'other-brand';
       const isSelectable  = isOrphaned || isCfsInactive || isCfsProduct || isCodeOnly;
       const checked       = selectedSKUs.has(r.variantSku) ? 'checked' : '';
       const badgeCls      = isOrphaned    ? 'badge-orphaned'
                           : isCfsInactive ? 'badge-cfs-inactive'
                           : isCfsProduct  ? 'badge-cfs-product'
                           : isCodeOnly    ? 'badge-code-only'
+                          : isOtherBrand  ? 'badge-other-brand'
                           : isDraft       ? 'badge-draft'
                           : 'badge-ok';
       const badgeTxt      = isOrphaned    ? 'Orphaned'
                           : isCfsInactive ? 'CFS Inactive'
                           : isCfsProduct  ? 'CFS Product'
                           : isCodeOnly    ? 'Check: SKU not in CFS'
+                          : isOtherBrand  ? 'Other brand'
                           : isDraft       ? 'Draft'
                           : 'OK';
       const variantLabel  = [r.option1, r.option2, r.option3].filter(Boolean).join(' / ') || 'Default';
@@ -1217,7 +1261,7 @@ async function testConnection() {
         <td><code style="font-size:11px;color:var(--text-muted)">${r.variantSku}</code></td>
         <td>£${r.price || '—'}</td>
         <td>${r.inventoryQty || '—'}</td>
-        <td><span class="badge ${badgeCls}" title="${(r.codeOnlyNote || '').replace(/"/g, '&quot;')}">${badgeTxt}</span>${
+        <td><span class="badge ${badgeCls}" title="${(r.codeOnlyNote || r.otherBrandNote || '').replace(/"/g, '&quot;')}">${badgeTxt}</span>${
           (r.sharedSkuHandles || []).length ? `<span class="badge badge-shared" title="Same SKU also on: ${r.sharedSkuHandles.join(', ')}">Shared SKU ×${r.sharedSkuHandles.length + 1}</span>` : ''}</td>
       </tr>`;
     }).join('');
@@ -1337,7 +1381,7 @@ async function testConnection() {
     photoStatus(`Checking photos of ${need.length} product(s) (CFS image feed + picture check)… ${skipTxt} skipped`, 0, 0);
     const needSet = new Set(need);
     const last = await readStream('/api/shopify/delete-variants-image-plan',
-      { variants: variantsToDelete.filter(v => needSet.has(v.handle)), cfsProductIds, cfsVariantAttrIds },
+      { variants: variantsToDelete.filter(v => needSet.has(v.handle)), cfsProductIds, cfsVariantAttrIds, brandId: BRAND?.id || null },
       ev => { if (ev.type === 'progress') photoStatus(ev.message, ev.done, ev.total); if (ev.type === 'warn') photoStatus(ev.message); },
       'btn-photo-stop');
     if (last?.type === 'stopped') throw new Error(last.message);
@@ -1404,7 +1448,7 @@ async function testConnection() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ variants: variantsToDelete, dryRun, cfsProductIds, cfsVariantAttrIds,
-          imagePlanId: photoPlan.imagePlanId, backupId }),
+          imagePlanId: photoPlan.imagePlanId, backupId, brandId: BRAND?.id || null }),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
@@ -1436,6 +1480,7 @@ async function testConnection() {
     document.getElementById('tile-cfs-inactive').textContent  = allResults.filter(r=>r.matchStatus==='cfs-inactive').length.toLocaleString();
     document.getElementById('tile-cfs-product').textContent   = allResults.filter(r=>r.matchStatus==='cfs-product').length.toLocaleString();
     document.getElementById('tile-code-only').textContent     = allResults.filter(r=>r.matchStatus==='code-only').length.toLocaleString();
+    document.getElementById('tile-other-brand').textContent   = allResults.filter(r=>r.matchStatus==='other-brand').length.toLocaleString();
   }
 
   // ── Set selected CFS-inactive variants to Draft on Shopify ───────────────
@@ -1459,7 +1504,7 @@ async function testConnection() {
       const res  = await fetch('/api/shopify/set-draft', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ variants: variantsToUpdate, dryRun }),
+        body: JSON.stringify({ variants: variantsToUpdate, dryRun, brandId: BRAND?.id || null }),
       });
       const data = await res.json();
       if (!dryRun) await saveUndoFile(data.undoId);
@@ -1526,7 +1571,7 @@ async function testConnection() {
         // variants already carry cfsProductStatus from the compare response
         // + comparison status of EVERY variant on these products (and products sharing a selected SKU),
         //   so the server can tell whether each product's own variant is still in CFS
-        body: JSON.stringify({ variants: variantsToPublish, related: relatedRowsFor(variantsToPublish), dryRun }),
+        body: JSON.stringify({ variants: variantsToPublish, related: relatedRowsFor(variantsToPublish), dryRun, brandId: BRAND?.id || null }),
       });
       const data = await res.json();
       if (!dryRun) await saveUndoFile(data.undoId);

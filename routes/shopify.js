@@ -9,14 +9,20 @@ const { pickCfsProductByColour, titleFitsCfsName } = require('../utils/colourMat
 const undo = require('../utils/undoLog');
 const { findOwnVariants } = require('../utils/ownVariant');
 
-// CFS product names (stock feed), cached 30 min — used to tell "Default"-option variants apart
-let cfsNamesCache = null;
-async function getCfsNames() {
-  if (cfsNamesCache && Date.now() - cfsNamesCache.at < 30 * 60 * 1000) return cfsNamesCache.map;
+// CFS product names (stock feed), cached 30 min per brand — used to tell "Default"-option
+// variants apart and to check colours. brandId empty = Urban Deco (215); Other Brands
+// pages pass their brandId so the names come from that brand's feed.
+const cfsNamesCache = new Map();   // brandKey → { at, map }
+async function getCfsNames(brandId) {
+  const key = brandId ? String(brandId) : '215';
+  const hit = cfsNamesCache.get(key);
+  if (hit && Date.now() - hit.at < 30 * 60 * 1000) return hit.map;
   const map = new Map();
-  try { for (const p of await fetchCfsProducts()) map.set(String(p.productId), p.productName || null); }
-  catch (e) { console.warn('  ⚠ CFS product names unavailable:', e.message); return map; }
-  cfsNamesCache = { at: Date.now(), map };
+  try {
+    const feed = key === '215' ? await fetchCfsProducts() : await require('../utils/brands').fetchBrandFeed(key);
+    for (const p of feed) map.set(String(p.productId), p.productName || null);
+  } catch (e) { console.warn(`  ⚠ CFS product names unavailable (brand ${key}):`, e.message); return map; }
+  cfsNamesCache.set(key, { at: Date.now(), map });
   return map;
 }
 
@@ -307,7 +313,7 @@ function decideDeletion(allVariants, orphanedSKUs, productIdSet, variantAttrIdSe
 // feed + picture check from Image Sync). Returns an imagePlanId that
 // delete-variants-bulk uses for its dry-run log and live run.
 router.post('/delete-variants-image-plan', async (req, res) => {
-  const { variants = [], cfsProductIds = [], cfsVariantAttrIds = [] } = req.body || {};
+  const { variants = [], cfsProductIds = [], cfsVariantAttrIds = [], brandId = null } = req.body || {};
   let client;
   try { client = graphqlClient(); } catch (err) { return res.status(400).json({ error: err.message }); }
   const sse = imageSync.openSse(res);
@@ -319,7 +325,7 @@ router.post('/delete-variants-image-plan', async (req, res) => {
     const variantAttrIdSet = new Set(cfsVariantAttrIds);
     const byHandle = new Map();
     for (const v of variants) { if (!byHandle.has(v.handle)) byHandle.set(v.handle, new Set()); byHandle.get(v.handle).add(v.variantSku); }
-    const cfsNames = await getCfsNames();
+    const cfsNames = await getCfsNames(brandId);
     const items = [];
     let n = 0;
     for (const [handle, orphanedSKUs] of byHandle) {
@@ -406,7 +412,7 @@ async function detachPlannedPhotos(product, handle, plan, backupId, log, undoRun
 //   4. 350ms pause between product operations to stay inside Shopify's rate limit.
 //
 router.post('/delete-variants-bulk', async (req, res) => {
-  const { variants = [], dryRun = true, cfsProductIds = [], cfsVariantAttrIds = [], imagePlanId = null, backupId = null } = req.body;
+  const { variants = [], dryRun = true, cfsProductIds = [], cfsVariantAttrIds = [], imagePlanId = null, backupId = null, brandId = null } = req.body;
   // Photo plan from /delete-variants-image-plan (which photos belong only to deleted variants)
   const imagePlan = imagePlanId ? imageSync.loadRemovalPlan(imagePlanId) : null;
   if (imagePlanId && !imagePlan) return res.status(400).json({ error: 'Photo check not found (server may have restarted) — run it again' });
@@ -495,7 +501,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
               const deleting = allOrphaned
                 ? allVariants.filter(v => { const { prodId, varId } = parseSku(v.sku); return !(prodId && productIdSet.has(prodId)) && !(varId && variantAttrIdSet.has(varId)); })
                 : deletedNodes;
-              const own = ownDraftCheck(product, handle, new Set(deleting.map(v => v.sku)), await getCfsNames());
+              const own = ownDraftCheck(product, handle, new Set(deleting.map(v => v.sku)), await getCfsNames(brandId));
               if (own.draft) { action = 'set product to DRAFT (own variant not in CFS)'; ownReason = own.reason; }
               else ownNote = own.note;
             }
@@ -554,7 +560,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
 
       const allVariants     = product.variants.edges.map(e => e.node);
       const allImages       = product.images.edges.map(e => e.node);
-      const cfsNames        = await getCfsNames();
+      const cfsNames        = await getCfsNames(brandId);
       // Own-variant rule (live): draft the whole product instead of deleting its own variant
       const draftBecauseOwn = async (reason) => {
         const result = await gql(client, SET_PRODUCT_DRAFT_MUTATION, { productId: product.id });
@@ -921,7 +927,7 @@ const UPDATE_VARIANT_SKU_MUTATION = `
 `;
 
 router.post('/publish-products', async (req, res) => {
-  const { variants = [], related = [], dryRun = true } = req.body;
+  const { variants = [], related = [], dryRun = true, brandId = null } = req.body;
 
   if (!variants.length) {
     return res.status(400).json({ error: 'No variants provided.' });
@@ -964,7 +970,7 @@ router.post('/publish-products', async (req, res) => {
   //      unclear                                           → FLAG, change nothing
   //    Products sharing a selected SKU are checked too (e.g. the Grey product that
   //    also carries the Brown variant).
-  const cfsNames = await getCfsNames();
+  const cfsNames = await getCfsNames(brandId);
   const statusBySku = new Map();   // `${handle}|${sku}` → comparison row
   for (const r of related) statusBySku.set(`${r.handle}|${r.variantSku}`, r);
   for (const v of variants) statusBySku.set(`${v.handle}|${v.variantSku}`, { ...v, matchStatus: v.matchStatus || 'cfs-product' });
