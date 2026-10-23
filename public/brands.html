@@ -38,7 +38,10 @@
   .brand .rule { font-size: 11px; margin-top: 4px; color: var(--text-muted); }
   .brand .rule.special { color: var(--warning); }
   .brand .cnt { font-size: 12px; margin-top: 4px; }
-  .brand .cnt.zero { color: var(--danger); font-weight: 600; }
+  .brand .cnt .zero { color: var(--danger); font-weight: 600; }
+  .brand .cnt .muted { color: var(--text-muted); font-size: 11px; }
+  .brand .cnt .cfs { color: var(--info); margin-top: 2px; }
+  .brand .cnt .sku { font-weight: 700; }
   .status { font-size: 13px; color: var(--text-muted); margin-top: 10px; min-height: 20px; }
   .status.err { color: var(--danger); } .status.ok { color: var(--success); }
   .bar { height: 6px; background: var(--surface2); border-radius: 99px; overflow: hidden; margin-top: 8px; }
@@ -76,7 +79,7 @@
 
   <div class="card">
     <div class="card-title"><span class="num">1</span> Pick a brand</div>
-    <p class="help">The number under each brand is how many Shopify products have that vendor name. <b>0</b> means the vendor name on Shopify is different.</p>
+    <p class="help">Each brand shows its Shopify products and variants (by vendor name) and the CFS feed's products and SKUs. <b>0</b> Shopify products means the vendor name on Shopify is different.</p>
     <div class="brands" id="brands"></div>
   </div>
 
@@ -133,14 +136,22 @@
         <div class="rule ${b.rule !== 'as-is' ? 'special' : ''}">${esc(b.ruleText)}${b.note ? ' · ⚠ ' + esc(b.note) : ''}</div>
         <div class="cnt" id="c-${b.id}">counting…</div>
       </div>`).join('');
-    for (const b of brands) {
-      fetch(`/api/brands/${b.id}/count`).then(r => r.json()).then(d => {
-        const el = $('c-' + b.id);
-        if (d.error) { el.textContent = 'count failed'; return; }
-        el.textContent = `${d.count} Shopify products`;
-        el.classList.toggle('zero', d.count === 0);
-      }).catch(() => { $('c-' + b.id).textContent = 'count failed'; });
-    }
+    // 3 at a time so Shopify isn't flooded
+    const queue = [...brands];
+    const worker = async () => { for (let b; (b = queue.shift());) await loadCount(b); };
+    await Promise.all([worker(), worker(), worker()]);
+  }
+
+  async function loadCount(b) {
+    const el = $('c-' + b.id);
+    try {
+      const d = await (await fetch(`/api/brands/${b.id}/count`)).json();
+      if (d.error) { el.textContent = 'count failed: ' + d.error; return; }
+      const n = x => x == null ? '?' : Number(x).toLocaleString();
+      el.innerHTML = `<div class="${d.count === 0 ? 'zero' : ''}">${n(d.count)} Shopify products <span class="muted">(${n(d.active)} active)</span></div>
+        <div>${n(d.variants)} Shopify variants</div>
+        <div class="cfs">${d.cfsError ? 'CFS feed failed to load' : `CFS: ${n(d.cfsProducts)} products · <span class="sku">${n(d.cfsSkus)} SKUs</span>`}</div>`;
+    } catch (e) { el.textContent = 'count failed'; }
   }
 
   function pick(id) {

@@ -2,7 +2,7 @@
  * Other Brands — Step 1: stock update   (mounted at /api/brands)
  *
  *   GET  /list             brands + their rule text
- *   GET  /:id/count        how many Shopify products have this vendor
+ *   GET  /:id/count        Shopify products + variants for this vendor, CFS products + SKUs
  *   POST /stock-sync       { brandId, dryRun }  → live progress (SSE), then a log
  *   POST /codes-sync       { brandId, dryRun }  → Step 2: product_code / variant_code (SSE)
  *   POST /cancel           { runId }            → Stop
@@ -68,7 +68,6 @@ async function gql(client, query, variables = {}, attempt = 1) {
 }
 
 const LOCATIONS = `query { locations(first: 10) { edges { node { id name } } } }`;
-const COUNT = `query c($q: String!) { productsCount(query: $q) { count } }`;
 const PRODUCTS = `
   query p($first: Int!, $after: String, $q: String, $loc: ID!) {
     products(first: $first, after: $after, query: $q) {
@@ -95,12 +94,46 @@ router.get('/list', (req, res) => {
   res.json({ brands: BRANDS.map(b => ({ ...b, ruleText: RULE_TEXT[b.rule] })) });
 });
 
+// Counts shown on each brand card:
+//   Shopify — products and variants with this exact vendor name
+//   CFS     — products in the brand's feed and SKUs (a product without variants = 1 SKU,
+//             a product with variants = 1 SKU per variant)
+// CFS counts are kept for 30 minutes so reloading the page doesn't refetch every feed.
+const COUNT_PRODUCTS = `query c($q: String!, $after: String) { products(first: 250, after: $after, query: $q) {
+  pageInfo { hasNextPage endCursor } nodes { vendor status variantsCount { count } } } }`;
+const cfsCountCache = new Map();   // brandId → { at, products, skus }
+async function cfsCounts(brand) {
+  const hit = cfsCountCache.get(brand.id);
+  if (hit && Date.now() - hit.at < 30 * 60 * 1000) return hit;
+  const feed = await fetchBrandFeed(brand.id);
+  const out = { at: Date.now(), products: feed.length,
+    skus: feed.reduce((n, p) => n + (Array.isArray(p.variants) && p.variants.length ? p.variants.length : 1), 0) };
+  cfsCountCache.set(brand.id, out);
+  return out;
+}
+
 router.get('/:id/count', async (req, res) => {
   const brand = getBrand(req.params.id);
   if (!brand) return res.status(404).json({ error: 'Unknown brand' });
   try {
-    const d = await gql(graphqlClient(), COUNT, { q: `vendor:"${brand.vendor}"` });
-    res.json({ id: brand.id, vendor: brand.vendor, count: d?.productsCount?.count ?? 0 });
+    const client = graphqlClient();
+    const shop = (async () => {
+      let products = 0, active = 0, variants = 0, after = null;
+      do {
+        const d = await gql(client, COUNT_PRODUCTS, { q: `vendor:"${brand.vendor}"`, after });
+        for (const p of d.products.nodes) {
+          if (!sameVendor(p.vendor, brand.vendor)) continue;
+          products++; if (p.status === 'ACTIVE') active++;
+          variants += p.variantsCount?.count || 0;
+        }
+        after = d.products.pageInfo.hasNextPage ? d.products.pageInfo.endCursor : null;
+      } while (after);
+      return { products, active, variants };
+    })();
+    const cfs = cfsCounts(brand).catch(e => ({ error: e.message }));
+    const [s, c] = await Promise.all([shop, cfs]);
+    res.json({ id: brand.id, vendor: brand.vendor, count: s.products, active: s.active, variants: s.variants,
+      cfsProducts: c.products ?? null, cfsSkus: c.skus ?? null, cfsError: c.error || null });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

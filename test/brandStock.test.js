@@ -48,7 +48,9 @@ axios.post = async (url, body) => {
   const q = body.query, v = body.variables;
   let data;
   if (/locations/.test(q)) data = { locations: { edges: [{ node: { id: 'L1', name: 'Shop' } }] } };
-  else if (/productsCount/.test(q)) data = { productsCount: { count: 3 } };
+  else if (/variantsCount/.test(q)) data = { products: { pageInfo: { hasNextPage: false }, nodes: [
+    { vendor: 'J-Line', status: 'ACTIVE', variantsCount: { count: 1 } }, { vendor: 'J-Line', status: 'DRAFT', variantsCount: { count: 3 } },
+    { vendor: 'J-Line Extra', status: 'ACTIVE', variantsCount: { count: 9 } }] } };
   else if (/key: "product_code"/.test(q)) data = { products: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: codeProducts } };
   else if (/products\(/.test(q)) data = { products: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: products } };
   else if (/metafieldsSet/.test(q)) { writes.mf.push(...v.metafields); data = { metafieldsSet: { userErrors: [] } }; }
@@ -70,7 +72,8 @@ const sse = async body => {
 (async () => {
   try {
     assert.strictEqual((await (await fetch(base + '/api/brands/list')).json()).brands.length, 14);
-    assert.strictEqual((await (await fetch(base + '/api/brands/363/count')).json()).count, 3);
+    const cnt = await (await fetch(base + '/api/brands/363/count')).json();
+    assert.deepStrictEqual([cnt.count, cnt.active, cnt.variants, cnt.cfsProducts, cnt.cfsSkus], [2, 1, 4, 2, 3], JSON.stringify(cnt));
 
     let r = await sse({ brandId: 363, dryRun: true });
     console.log(r.counts); r.log.forEach(l => console.log(' ', l.status, l.sku, l.message));
