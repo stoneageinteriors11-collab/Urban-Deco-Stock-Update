@@ -452,8 +452,8 @@ async function crossBrandIndex() {
         const feed = b.id === 215 ? await fetchCfsProducts() : await fetchBrandFeed(b.id);
         const label = `${feed[0]?.brandName || b.vendor} (brand ${b.id})`;
         for (const p of feed) {
-          byProd.set(String(p.productId), { brandId: b.id, label });
-          for (const v of (Array.isArray(p.variants) ? p.variants : [])) byVar.set(String(v.variantId), { brandId: b.id, label });
+          byProd.set(String(p.productId), { brandId: b.id, label, vendor: b.vendor });
+          for (const v of (Array.isArray(p.variants) ? p.variants : [])) byVar.set(String(v.variantId), { brandId: b.id, label, vendor: b.vendor });
         }
       } catch (e) { failed.push(`${b.vendor} (${e.message})`); }
     }
@@ -517,6 +517,7 @@ router.post('/compare', async (req, res) => {
         if (hit && hit.brandId !== brand.id) {
           r.matchStatus = 'other-brand';
           r.otherBrandNote = `SKU found in CFS under ${hit.label}, not ${brand.vendor} — check the vendor on Shopify. Never deleted here.`;
+          r.otherBrandVendor = hit.vendor;
           otherBrand++;
         }
       }

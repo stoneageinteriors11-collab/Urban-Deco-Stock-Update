@@ -704,7 +704,8 @@ router.post('/delete-variants-bulk', async (req, res) => {
 //   POST /api/shopify/undo/upload            { file: <contents of an undo file> }
 //   POST /api/shopify/undo/:id               { dryRun, force, entries?: [index,…] }
 // ════════════════════════════════════════════════════════════════════════════
-const Q_UNDO_PRODUCT = `query P($id: ID!) { product(id: $id) { id title status variants(first: 250) { nodes { id sku } } } }`;
+const Q_UNDO_PRODUCT = `query P($id: ID!) { product(id: $id) { id title status vendor variants(first: 250) { nodes { id sku } } } }`;
+const Q_PRODUCT_VENDOR = `query V($h: String!) { productByHandle(handle: $h) { id title vendor } }`;
 const M_SET_STATUS = `mutation S($product: ProductUpdateInput!) { productUpdate(product: $product) { product { id status } userErrors { field message } } }`;
 
 router.get('/undo/runs', (req, res) => {
@@ -780,6 +781,15 @@ router.post('/undo/:id', async (req, res) => {
         if (errs.length) throw new Error(errs.map(x => x.message).join(', '));
         v.sku = e.before;
         log.push({ ...base, sku: e.before, status: 'undone', message: `SKU put back: ${e.after} → ${e.before} · ${name}` });
+      } else if (e.type === 'vendor') {
+        if (p.vendor === e.before) { log.push({ ...base, status: 'info', message: `Vendor is already "${e.before}" · ${name}` }); doneIdx.push(i); continue; }
+        if (p.vendor !== e.after && !force) { log.push({ ...base, status: 'conflict', message: `Vendor was changed after the run (now "${p.vendor}") — skipped; tick "Overwrite" to undo anyway · ${name}` }); skipped++; continue; }
+        if (dryRun) { log.push({ ...base, status: 'dry_run', message: `Would put vendor back: "${p.vendor}" → "${e.before}" · ${name}` }); continue; }
+        const r = await gql(client, M_SET_STATUS, { product: { id: p.id, vendor: e.before } });
+        const errs = r?.productUpdate?.userErrors || [];
+        if (errs.length) throw new Error(errs.map(x => x.message).join(', '));
+        p.vendor = e.before;
+        log.push({ ...base, status: 'undone', message: `Vendor put back: "${e.after}" → "${e.before}" · ${name}` });
       } else if (e.type === 'photos') {
         if (dryRun) {
           for (const ph of e.photos) log.push({ ...base, status: 'dry_run', message: `Would re-attach photo · ${name}`, imageUrl: ph.url, imageVerdict: 'keep' });
@@ -940,7 +950,7 @@ router.post('/fix-skus', async (req, res) => {
   let client;
   try { client = graphqlClient(); } catch (err) { return res.status(400).json({ error: err.message }); }
   const { cleanSku } = require('../utils/matchVariants');
-  const log = [];
+  const log = [], decisionList = [];
   let fixed = 0, skipped = 0, failed = 0;
   const undoRun = dryRun ? null : undo.startRun('fix-skus', 'Fix Selected SKUs');
   const byHandle = new Map();
@@ -952,16 +962,34 @@ router.post('/fix-skus', async (req, res) => {
       const product = (await gql(client, PRODUCT_BY_HANDLE_QUERY, { handle }))?.productByHandle;
       if (!product) { for (const r of rows) { log.push({ sku: r.variantSku, handle, status: 'not_found', message: `Product "${handle}" not found` }); failed++; } continue; }
       const nodes = product.variants.edges.map(e => e.node);
-      const updates = [];
+      const updates = [], dupDeletes = [];
       for (const r of rows) {
         const node = nodes.find(n => n.sku === r.variantSku);
         const target = r.fixedSku || cleanSku(r.variantSku);
         if (!node) { log.push({ sku: r.variantSku, handle, status: 'not_found', message: `SKU "${r.variantSku}" not found on "${product.title}"` }); failed++; continue; }
         if (target === node.sku) { log.push({ sku: r.variantSku, handle, status: 'skipped', message: 'Already clean — nothing to fix' }); skipped++; continue; }
         if (nodes.some(n => n !== node && n.sku === target) || updates.some(u => u.sku === target)) {
-          log.push({ sku: r.variantSku, handle, status: 'flagged', message: `Not fixed — another variant on "${product.title}" already has SKU ${target}. Please check.` }); skipped++; continue;
+          if (r.action === 'delete-duplicate') { dupDeletes.push({ node, target }); continue; }
+          log.push({ sku: r.variantSku, handle, status: 'flagged', message: `Not fixed — another variant on "${product.title}" already has SKU ${target}. Please check.` }); skipped++;
+          decisionList.push({ origin: 'fix-skus', handle, title: product.title, variantSku: r.variantSku, fixedSku: target,
+            reason: `"${variantLabel(node)}" has SKU "${r.variantSku}", but another variant already has the clean SKU ${target}`,
+            options: [{ value: 'delete-duplicate', label: `Delete the typo variant "${variantLabel(node)}" (${r.variantSku}) — keep the one with ${target}` },
+                      { value: 'skip', label: 'Skip — leave as it is' }] });
+          continue;
         }
         updates.push({ id: node.id, sku: target, before: node.sku, label: variantLabel(node) });
+      }
+      if (dupDeletes.length) {
+        if (dryRun) for (const d of dupDeletes) log.push({ sku: d.node.sku, handle, status: 'dry_run', message: `Would delete the typo variant "${variantLabel(d.node)}" (${d.node.sku}) — ${d.target} already exists · ${product.title}` });
+        else {
+          const r = await gql(client, DELETE_VARIANTS_MUTATION, { productId: product.id, variantsIds: dupDeletes.map(d => d.node.id) });
+          const errs = r?.productVariantsBulkDelete?.userErrors || [];
+          if (errs.length) for (const d of dupDeletes) { log.push({ sku: d.node.sku, handle, status: 'error', message: `Delete failed: ${errs.map(e => e.message).join(', ')}` }); failed++; }
+          else {
+            rec(undoRun, { type: 'variants-deleted', productId: product.id, handle, title: product.title, skus: dupDeletes.map(d => d.node.sku) });
+            for (const d of dupDeletes) { fixed++; log.push({ sku: d.node.sku, handle, status: 'deleted', message: `Deleted the typo variant "${variantLabel(d.node)}" (${d.node.sku}) — ${d.target} already exists · ${product.title}` }); }
+          }
+        }
       }
       if (!updates.length) continue;
       if (dryRun) {
@@ -983,13 +1011,47 @@ router.post('/fix-skus', async (req, res) => {
   }
   console.log(`  ✓ Fix SKUs done — fixed: ${fixed}, skipped: ${skipped}, failed: ${failed}`);
   const undoId = undoRun ? undo.save(undoRun) : null;
-  res.json({ success: true, dryRun, fixed, skipped, failed, total: variants.length, log, undoId });
+  res.json({ success: true, dryRun, fixed, skipped, failed, total: variants.length, log, undoId, decisions: decisionList });
+});
+
+// ── POST /api/shopify/set-vendor ─────────────────────────────────────────────
+// Body: { items: [{ handle, vendor }], dryRun }
+// For products found under another brand's CFS feed (Clean-up → "Other brand" tab):
+// sets the Shopify vendor to that brand. Saved for Undo.
+router.post('/set-vendor', async (req, res) => {
+  const { items = [], dryRun = true } = req.body || {};
+  if (!items.length) return res.status(400).json({ error: 'Nothing selected.' });
+  let client;
+  try { client = graphqlClient(); } catch (err) { return res.status(400).json({ error: err.message }); }
+  const log = [];
+  let changed = 0, failed = 0;
+  const undoRun = dryRun ? null : undo.startRun('set-vendor', 'Change vendor');
+  for (const it of items) {
+    try {
+      const p = (await gql(client, Q_PRODUCT_VENDOR, { h: it.handle }))?.productByHandle;
+      if (!p) { log.push({ sku: '-', handle: it.handle, status: 'not_found', message: `Product "${it.handle}" not found` }); failed++; continue; }
+      if (p.vendor === it.vendor) { log.push({ sku: '-', handle: it.handle, status: 'skipped', message: `Vendor is already "${it.vendor}" · ${p.title}` }); continue; }
+      if (dryRun) { log.push({ sku: '-', handle: it.handle, status: 'dry_run', message: `Would change vendor "${p.vendor}" → "${it.vendor}" · ${p.title}` }); continue; }
+      const r = await gql(client, M_SET_STATUS, { product: { id: p.id, vendor: it.vendor } });
+      const errs = r?.productUpdate?.userErrors || [];
+      if (errs.length) { log.push({ sku: '-', handle: it.handle, status: 'error', message: `Vendor change failed: ${errs.map(e => e.message).join(', ')}` }); failed++; continue; }
+      rec(undoRun, { type: 'vendor', productId: p.id, handle: it.handle, title: p.title, before: p.vendor, after: it.vendor });
+      changed++;
+      log.push({ sku: '-', handle: it.handle, status: 'updated', message: `Vendor changed "${p.vendor}" → "${it.vendor}" · ${p.title}` });
+      await sleep(250);
+    } catch (e) { log.push({ sku: '-', handle: it.handle, status: 'error', message: e.message }); failed++; }
+  }
+  const undoId = undoRun ? undo.save(undoRun) : null;
+  res.json({ success: true, dryRun, changed, failed, log, undoId });
 });
 
 router.post('/publish-products', async (req, res) => {
-  const { variants = [], related = [], dryRun = true, brandId = null } = req.body;
+  // decisions: { [handle]: { keep: [variantId] } | { draft: true } | { skip: true } } — the user's
+  // choices for products flagged by an earlier run ("Needs your decision"); onlyHandles limits the
+  // run to those products.
+  const { variants = [], related = [], dryRun = true, brandId = null, decisions = {}, onlyHandles = null } = req.body;
 
-  if (!variants.length) {
+  if (!variants.length && !(Array.isArray(onlyHandles) && onlyHandles.length)) {
     return res.status(400).json({ error: 'No variants provided.' });
   }
 
@@ -1016,7 +1078,7 @@ router.post('/publish-products', async (req, res) => {
 
   console.log(`▶ Promoting ${byHandle.size} CFS-product-match products (dryRun=${dryRun})`);
   const imageSyncHandles = new Set();   // products whose photos Image Sync should update afterwards
-  const undoRun = dryRun ? null : undo.startRun('publish', 'Publish Selected as Main Product');
+  const undoRun = dryRun ? null : undo.startRun('publish', onlyHandles ? 'Flagged products — your decisions' : 'Publish Selected as Main Product');
 
   // ── Before changing anything: decide what happens to each product (same for
   //    dry run and live run). Based on the variant the product IS (its "own"
@@ -1037,10 +1099,19 @@ router.post('/publish-products', async (req, res) => {
   for (const v of variants) statusBySku.set(`${v.handle}|${v.variantSku}`, { ...v, matchStatus: v.matchStatus || 'cfs-product' });
   const selectedSkus = new Set(variants.map(v => v.variantSku));
   const sharedAdded = new Map();   // handle → SKU it shares with a selected product
-  for (const v of variants) for (const h of (v.sharedSkuHandles || [])) {
-    if (!byHandle.has(h) && !sharedAdded.has(h)) sharedAdded.set(h, v.variantSku);
+  if (Array.isArray(onlyHandles) && onlyHandles.length) {
+    // Applying decisions: only the decided products, nothing else
+    const only = new Set(onlyHandles);
+    for (const h of [...byHandle.keys()]) if (!only.has(h)) byHandle.delete(h);
+    for (const h of only) if (!byHandle.has(h)) byHandle.set(h, []);
+  } else {
+    for (const v of variants) for (const h of (v.sharedSkuHandles || [])) {
+      if (!byHandle.has(h) && !sharedAdded.has(h)) sharedAdded.set(h, v.variantSku);
+    }
+    for (const h of sharedAdded.keys()) byHandle.set(h, []);
   }
-  for (const h of sharedAdded.keys()) byHandle.set(h, []);
+  const decisionList = [];   // flagged products → "Needs your decision" on the page
+  let decisionKeep = new Set();   // the user's choice for the product being planned (from "Needs your decision")
 
   const productCache = new Map();   // handle → product
   const plans = new Map();          // handle → plan
@@ -1057,11 +1128,25 @@ router.post('/publish-products', async (req, res) => {
   }
 
   function planPromotion(product, handle) {
+    const d = decisions[handle] || {};
+    decisionKeep = new Set(d.keep || []);
+    if (d.skip) return { action: 'none', reason: 'skipped (your decision)' };
+    if (d.draft) return { action: 'draft', reason: 'your decision — whole product goes to DRAFT, variants and photos kept' };
+    const plan = planPromotionAuto(product, handle);
+    if (plan.action === 'flag' && decisionKeep.size) plan.reason += ' (your choice could not be applied)';
+    return plan;
+  }
+
+  function planPromotionAuto(product, handle) {
     const all = product.variants.edges.map(e => e.node);
     const stat = n => statusBySku.get(`${handle}|${n.sku}`) || null;
     const picked = all.filter(n => selectedSkus.has(n.sku));
     if ((product.status || 'ACTIVE') !== 'ACTIVE' && !picked.length) return { action: 'none', reason: `already ${product.status}` };
-    const own = findOwnVariants({ title: product.title, handle }, all, cfsNames);
+    let own = findOwnVariants({ title: product.title, handle }, all, cfsNames);
+    if (!own.ok && decisionKeep.size) {
+      const chosen = all.filter(n => decisionKeep.has(n.id));
+      if (chosen.length) own = { ok: true, ownIds: chosen.map(n => n.id), label: chosen.map(variantLabel).join(', '), reason: 'your choice' };
+    }
 
     if (!own.ok) {
       // Can't tell from the title. Old rule only when EVERY variant is a CFS product match:
@@ -1072,7 +1157,7 @@ router.post('/publish-products', async (req, res) => {
         if (!d.ok) return { action: 'flag', reason: d.reason };
         return tidyPlan(product, all, stat, all.filter(n => parseSku(n.sku).prodId === d.prodId), d.prodId, d.reason);
       }
-      return { action: 'flag', reason: `can't tell which variant this product is (${own.reason})` };
+      return { action: 'flag', reason: `can't tell which variant this product is (${own.reason})`, candidates: all, ask: 'own' };
     }
 
     const ownNodes = all.filter(n => own.ownIds.includes(n.id));
@@ -1122,6 +1207,8 @@ router.post('/publish-products', async (req, res) => {
   //   code and name pointing at different variants, or neither deciding → flag, change nothing
   function normCode(c) { return String(c || '').trim().toUpperCase(); }
   function chooseOne(nodes, prodId, stat) {
+    const mine = nodes.filter(n => decisionKeep.has(n.id));
+    if (mine.length === 1) return { ok: true, keep: mine[0], reason: 'your choice' };
     const code = normCode(cfsCodes.get(String(prodId)));
     const name = cfsNames.get(String(prodId)) || '';
     const byCode = code ? nodes.filter(n => normCode(stat(n)?.shopifyVariantCode) === code) : [];
@@ -1130,18 +1217,18 @@ router.post('/publish-products', async (req, res) => {
     const byName = name ? nodes.filter((n, i) => diff[i].length && diff[i].every(w => nameWords.has(w))) : [];
     const list = nodes.map(variantLabel).join(', ');
     if (byCode.length === 1) {
-      if (byName.length === 1 && byName[0] !== byCode[0]) return { ok: false, reason: `variants ${list} point at CFS product UD-${prodId}: product code ${code} says "${variantLabel(byCode[0])}" but the CFS name "${name}" says "${variantLabel(byName[0])}" — please check` };
+      if (byName.length === 1 && byName[0] !== byCode[0]) return { ok: false, candidates: nodes, reason: `variants ${list} point at CFS product UD-${prodId}: product code ${code} says "${variantLabel(byCode[0])}" but the CFS name "${name}" says "${variantLabel(byName[0])}" — please check` };
       return { ok: true, keep: byCode[0], reason: `product code ${code} matches "${variantLabel(byCode[0])}"` };
     }
     if (byName.length === 1) return { ok: true, keep: byName[0], reason: `CFS name "${name}" matches "${variantLabel(byName[0])}"` };
-    return { ok: false, reason: `${nodes.length} variants (${list}) point at the same CFS product UD-${prodId}${name ? ` ("${name}"${code ? `, code ${code}` : ''})` : ''}, which has no variants in CFS, and neither the product code nor the name says which one it is — please check` };
+    return { ok: false, candidates: nodes, reason: `${nodes.length} variants (${list}) point at the same CFS product UD-${prodId}${name ? ` ("${name}"${code ? `, code ${code}` : ''})` : ''}, which has no variants in CFS, and neither the product code nor the name says which one it is — please check` };
   }
 
   function tidyPlan(product, all, stat, ownKeep, ownProdId, reason) {
     const deleteNodes = [], deleteWhy = {}, notes = [];
     if (ownKeep.length > 1) {
       const c = chooseOne(ownKeep, ownProdId, stat);
-      if (!c.ok) return { action: 'flag', reason: c.reason };
+      if (!c.ok) return { action: 'flag', reason: c.reason, candidates: c.candidates, ask: 'keep' };
       for (const n of ownKeep) if (n !== c.keep) { deleteNodes.push(n); deleteWhy[n.id] = `CFS product UD-${ownProdId} is now only "${variantLabel(c.keep)}" — ${c.reason}`; }
       notes.push(`kept "${variantLabel(c.keep)}" — ${c.reason}`);
       ownKeep = [c.keep];
@@ -1165,7 +1252,7 @@ router.post('/publish-products', async (req, res) => {
     for (const [newSku, rs] of groups) if (rs.length > 1) {
       const prodId = newSku.replace(/^UD-/, '');
       const c = chooseOne(rs.map(r => r.node), prodId, stat);
-      if (!c.ok) return { action: 'flag', reason: c.reason };
+      if (!c.ok) return { action: 'flag', reason: c.reason, candidates: c.candidates, ask: 'keep' };
       for (const r of rs) if (r.node !== c.keep) { deleteNodes.push(r.node); deleteWhy[r.node.id] = `CFS product UD-${prodId} is now only "${variantLabel(c.keep)}" — ${c.reason}`; }
       renames = renames.filter(r => !(r.newSku === newSku && r.node !== c.keep));
       notes.push(`kept "${variantLabel(c.keep)}" for UD-${prodId} — ${c.reason}`);
@@ -1205,6 +1292,12 @@ router.post('/publish-products', async (req, res) => {
       if (plan.action === 'flag') {
         for (const r of rowsFor()) log.push({ ...r, handle, status: 'flagged', message: `NOT changed — ${plan.reason} · ${product.title}${extra}` });
         flagged++;
+        const options = [];
+        for (const n of (plan.candidates || [])) options.push({ value: `keep:${n.id}`,
+          label: plan.ask === 'own' ? `This product is "${variantLabel(n)}" (${n.sku}) — then apply the normal rules` : `Keep "${variantLabel(n)}" (${n.sku}), delete the other(s) here` });
+        options.push({ value: 'draft', label: 'Set the whole product to Draft (variants & photos kept)' });
+        options.push({ value: 'skip', label: 'Skip — leave as it is' });
+        decisionList.push({ origin: 'publish', handle, title: product.title, reason: plan.reason, options });
         continue;
       }
 
@@ -1314,7 +1407,7 @@ router.post('/publish-products', async (req, res) => {
   console.log(`  ✓ Done — deleted variants: ${deleted}, published: ${published}, drafted: ${drafted}, failed: ${failed}`);
   const undoId = undoRun ? undo.save(undoRun) : null;
   res.json({ success: true, dryRun, deleted, published, drafted, failed, flagged, total: variants.length, log, undoId,
-    imageSyncHandles: [...imageSyncHandles] });
+    imageSyncHandles: [...imageSyncHandles], decisions: decisionList });
 });
 
 

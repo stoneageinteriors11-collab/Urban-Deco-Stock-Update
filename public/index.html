@@ -222,6 +222,12 @@
     .badge-cfs-inactive { background: rgba(245,158,11,.15);  color: var(--warning); }
     .badge-cfs-product  { background: rgba(167,139,250,.15); color: #a78bfa; }
     .badge-code-only    { background: rgba(251,146,60,.15);  color: #fb923c; }
+    #decision-panel { margin: 14px 0; border: 1px solid rgba(245,158,11,.45); background: rgba(245,158,11,.07); border-radius: 10px; padding: 14px 16px; }
+    #decision-panel h4 { color: #f59e0b; font-size: 14px; margin-bottom: 4px; }
+    #decision-panel .dec { border-top: 1px solid rgba(245,158,11,.2); padding: 10px 0; display: grid; grid-template-columns: 1fr minmax(260px, 420px); gap: 10px; align-items: center; }
+    #decision-panel .dec .why { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+    #decision-panel select { width: 100%; background: var(--surface2, #222636); color: var(--text, #e2e8f0); border: 1px solid var(--border, #2e3248); border-radius: 8px; padding: 7px 8px; font: inherit; font-size: 12px; }
+    @media (max-width: 700px) { #decision-panel .dec { grid-template-columns: 1fr; } }
     .badge-sku-typo     { background: rgba(244,114,182,.15); color: #f472b6; cursor: help; }
     .badge-other-brand  { background: rgba(56,189,248,.15);  color: #38bdf8; cursor: help; }
     .brand-banner { background: rgba(99,102,241,.12); border: 1px solid rgba(99,102,241,.45); border-radius: 10px; padding: 12px 16px; margin-bottom: 18px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
@@ -483,6 +489,9 @@
       <button class="btn btn-purple hidden" id="btn-fix-sku" onclick="fixSelectedSkus()">
         🔧 Fix Selected SKUs
       </button>
+      <button class="btn btn-purple hidden" id="btn-vendor" onclick="setVendorSelected()">
+        🏷️ Change Vendor of Selected
+      </button>
       <button class="btn btn-purple hidden" id="btn-publish" onclick="publishSelected()">
         📗 Publish Selected as Main Product
       </button>
@@ -607,6 +616,7 @@
     <div class="pagination hidden" id="pagination"></div>
 
     <!-- Log Panel -->
+    <div id="decision-panel" class="hidden"></div>
     <div id="log-panel"></div>
   </div>
 
@@ -1185,6 +1195,7 @@ async function testConnection() {
       btnPublish.style.display = 'none';
       wrapEl.style.display     = 'none';
       document.getElementById('btn-fix-sku').style.display = 'none';
+      document.getElementById('btn-vendor').style.display = 'none';
     };
 
     hideAll();
@@ -1207,6 +1218,10 @@ async function testConnection() {
       wrapEl.style.display = '';
       btnDel.style.display = '';
       btnDel.textContent   = '🗑 Draft / Remove Selected';
+    } else if (f === 'other-brand') {
+      labelEl.textContent  = 'Select all found under another brand';
+      wrapEl.style.display = '';
+      document.getElementById('btn-vendor').style.display = '';
     } else if (f === 'sku-typo') {
       labelEl.textContent  = 'Select all SKU typos';
       wrapEl.style.display = '';
@@ -1254,8 +1269,10 @@ async function testConnection() {
       'cfs-product':  { wrap: prod,  del: 0,     draft: 0,     pub: prod },
       'code-only':    { wrap: code,  del: code,  draft: 0,     pub: 0 },
       'sku-typo':     { wrap: typo,  del: 0,     draft: 0,     pub: 0, fix: typo },
+      'other-brand':  { wrap: n('other-brand'), del: 0, draft: 0, pub: 0, vendor: n('other-brand') },
     }[activeFilter] || { wrap: 0, del: 0, draft: 0, pub: 0 };
     if (!can.fix)   document.getElementById('btn-fix-sku').style.display = 'none';
+    if (!can.vendor) document.getElementById('btn-vendor').style.display = 'none';
     // only ever hide here — which buttons belong to which tab is decided in setFilter
     if (!can.wrap)  document.getElementById('select-all-wrap').style.display = 'none';
     if (!can.del)   document.getElementById('btn-delete').style.display = 'none';
@@ -1285,7 +1302,7 @@ async function testConnection() {
       const isCodeOnly    = r.matchStatus === 'code-only';
       const isOtherBrand  = r.matchStatus === 'other-brand';
       const isSkuTypo     = r.matchStatus === 'sku-typo';
-      const isSelectable  = isOrphaned || isCfsInactive || isCfsProduct || isCodeOnly || isSkuTypo;
+      const isSelectable  = isOrphaned || isCfsInactive || isCfsProduct || isCodeOnly || isSkuTypo || (isOtherBrand && activeFilter === 'other-brand');
       const checked       = selectedSKUs.has(r.variantSku) ? 'checked' : '';
       const badgeCls      = isOrphaned    ? 'badge-orphaned'
                           : isCfsInactive ? 'badge-cfs-inactive'
@@ -1358,6 +1375,8 @@ async function testConnection() {
       selectable = allResults.filter(r => r.matchStatus === 'code-only');
     } else if (activeFilter === 'sku-typo') {
       selectable = allResults.filter(r => r.matchStatus === 'sku-typo');
+    } else if (activeFilter === 'other-brand') {
+      selectable = allResults.filter(r => r.matchStatus === 'other-brand');
     } else {
       // 'all' — select all actionable types
       selectable = allResults.filter(r => ['orphaned','cfs-inactive','cfs-product'].includes(r.matchStatus));
@@ -1537,6 +1556,94 @@ async function testConnection() {
     document.getElementById('tile-sku-typo').textContent      = allResults.filter(r=>r.matchStatus==='sku-typo').length.toLocaleString();
   }
 
+  // ── "Needs your decision": flagged products from the last run ────────────
+  let decisionState = null;   // { items, ctx }
+  function renderDecisions(items, ctx) {
+    const box = document.getElementById('decision-panel');
+    if (!items.length) { box.classList.add('hidden'); box.innerHTML = ''; decisionState = null; return; }
+    decisionState = { items, ctx };
+    const esc = t => String(t ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    box.innerHTML = `<h4>⚑ Needs your decision — ${items.length} flagged product${items.length > 1 ? 's' : ''}</h4>
+      <div style="font-size:12px;color:var(--text-muted)">Nothing was changed on these. Choose what to do with each, then Apply.
+        "Dry Run" (top of the page) is respected — run it as a dry run first, then live. Live runs are saved for Undo.</div>
+      ${items.map((d, i) => `<div class="dec">
+        <div><b>${esc(d.title)}</b> <span style="color:var(--text-muted);font-size:12px">${esc(d.handle)}</span>
+          <div class="why">${esc(d.reason)}</div></div>
+        <select id="dec-${i}">${d.options.map(o => `<option value="${esc(o.value)}" ${o.value === 'skip' ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}</select>
+      </div>`).join('')}
+      <div style="margin-top:10px;display:flex;gap:10px;align-items:center">
+        <button class="btn btn-primary" id="btn-apply-decisions" onclick="applyDecisions()">✔ Apply decisions</button>
+        <button class="btn btn-outline" onclick="renderDecisions([], {})">Close</button>
+      </div>`;
+    box.classList.remove('hidden');
+    box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  async function applyDecisions() {
+    if (!decisionState) return;
+    const { items, ctx } = decisionState;
+    const picks = items.map((d, i) => ({ d, v: document.getElementById('dec-' + i).value })).filter(x => x.v !== 'skip');
+    if (!picks.length) { alert('Everything is set to Skip — nothing to apply.'); return; }
+    const dryRun = document.getElementById('dry-run-toggle').checked;
+    if (!dryRun && !confirm(`Apply ${picks.length} decision(s) LIVE on Shopify?\n\n` + picks.map(x => `• ${x.d.title}: ${x.d.options.find(o => o.value === x.v).label}`).join('\n') + '\n\nSaved for Undo (deleted variants can\'t come back).')) return;
+    const btn = document.getElementById('btn-apply-decisions'); btn.disabled = true;
+    try {
+      const log = [], next = [];
+      const pub = picks.filter(x => x.d.origin === 'publish');
+      if (pub.length) {
+        const decisions = {};
+        for (const x of pub) decisions[x.d.handle] = x.v === 'draft' ? { draft: true } : { keep: [x.v.slice(5)] };
+        const handles = Object.keys(decisions);
+        const data = await (await fetch('/api/shopify/publish-products', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ variants: (ctx.rows || []).filter(r => handles.includes(r.handle)), related: ctx.related || [],
+            decisions, onlyHandles: handles, dryRun, brandId: BRAND?.id || null }) })).json();
+        if (data.error) throw new Error(data.error);
+        if (!dryRun) await saveUndoFile(data.undoId);
+        log.push(...data.log); next.push(...(data.decisions || []));
+        showImageSyncHandoff(data.imageSyncHandles || [], dryRun);
+      }
+      const dup = picks.filter(x => x.d.origin === 'fix-skus');
+      if (dup.length) {
+        const data = await (await fetch('/api/shopify/fix-skus', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ variants: dup.map(x => ({ handle: x.d.handle, variantSku: x.d.variantSku, fixedSku: x.d.fixedSku, action: x.v })), dryRun }) })).json();
+        if (data.error) throw new Error(data.error);
+        if (!dryRun) await saveUndoFile(data.undoId);
+        log.push(...data.log);
+      }
+      showLog(log, dryRun);
+      if (dryRun) { btn.disabled = false; alert('Dry run done — see the log below. Untick Dry Run and click Apply decisions again to make the changes.'); return; }
+      renderDecisions(next, ctx);
+      alert('Decisions applied. Run the comparison again to refresh the list.');
+    } catch (e) { alert('Error: ' + e.message); btn.disabled = false; }
+  }
+
+  // ── Change vendor (Other brand tab) ──────────────────────────────────────
+  async function setVendorSelected() {
+    const rows = allResults.filter(r => selectedSKUs.has(r.variantSku) && r.matchStatus === 'other-brand');
+    if (!rows.length) { alert('Select rows on the Other brand tab first.'); return; }
+    const byHandle = new Map();
+    for (const r of rows) { if (!byHandle.has(r.handle)) byHandle.set(r.handle, new Set()); byHandle.get(r.handle).add(r.otherBrandVendor); }
+    const mixed = [...byHandle].filter(([, v]) => v.size > 1).map(([h]) => h);
+    const items = [...byHandle].filter(([, v]) => v.size === 1).map(([handle, v]) => ({ handle, vendor: [...v][0] }));
+    if (!items.length) { alert('These products have variants from different brands — please fix them by hand:\n' + mixed.join('\n')); return; }
+    const dryRun = document.getElementById('dry-run-toggle').checked;
+    const msg = (dryRun ? 'DRY RUN — ' : '') + `Change the vendor of ${items.length} product(s)?\n\n` + items.slice(0, 15).map(i => `• ${i.handle} → ${i.vendor}`).join('\n')
+      + (items.length > 15 ? `\n… and ${items.length - 15} more` : '') + (mixed.length ? `\n\nSkipped (variants from different brands): ${mixed.join(', ')}` : '');
+    if (!confirm(msg)) return;
+    try {
+      const data = await (await fetch('/api/shopify/set-vendor', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items, dryRun }) })).json();
+      if (data.error) throw new Error(data.error);
+      if (!dryRun) await saveUndoFile(data.undoId);
+      showLog(data.log, dryRun);
+      if (!dryRun) {
+        const moved = new Set(data.log.filter(l => l.status === 'updated').map(l => l.handle));
+        allResults = allResults.filter(r => !moved.has(r.handle));
+        selectedSKUs.clear(); refreshTiles(); applyFilter2();
+        alert(`Vendor changed on ${data.changed} product(s). They now belong to that brand's clean-up.`);
+      }
+    } catch (e) { alert('Error: ' + e.message); }
+  }
+
   // ── Fix SKU typos (SKU typo tab) ─────────────────────────────────────────
   async function fixSelectedSkus() {
     const rows = allResults.filter(r => selectedSKUs.has(r.variantSku) && r.matchStatus === 'sku-typo');
@@ -1554,6 +1661,7 @@ async function testConnection() {
       if (data.error) throw new Error(data.error);
       if (!dryRun) await saveUndoFile(data.undoId);
       showLog(data.log, dryRun);
+      renderDecisions(data.decisions || [], {});
       if (!dryRun) {
         const done = new Set(data.log.filter(l => l.status === 'updated').map(l => l.sku));
         for (const r of rows) if (done.has(r.fixedSku)) { selectedSKUs.delete(r.variantSku); r.variantSku = r.fixedSku; r.matchStatus = 'ok'; delete r.codeOnlyNote; }
@@ -1658,6 +1766,7 @@ async function testConnection() {
       if (!dryRun) await saveUndoFile(data.undoId);
       showLog(data.log, dryRun);
       showImageSyncHandoff(data.imageSyncHandles || [], dryRun);
+      renderDecisions(data.decisions || [], { rows: variantsToPublish, related: relatedRowsFor(variantsToPublish) });
 
       if (!dryRun && (data.published > 0 || data.drafted > 0)) {
         // Remove promoted rows from local state (variant was deleted from Shopify)

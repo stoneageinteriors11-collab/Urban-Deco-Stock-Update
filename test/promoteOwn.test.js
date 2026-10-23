@@ -28,15 +28,18 @@ axios.post = async (url, body) => {
   switch (op) {
     case 'productByHandle': {
       const p = products[v.handle || v.h];
-      data = { productByHandle: p ? { id: p.id, title: p.title, status: p.status, images: { edges: [] },
+      data = { productByHandle: p ? { id: p.id, title: p.title, status: p.status, vendor: p.vendor || 'Urban Deco', images: { edges: [] },
         variants: { edges: p.variants.map(n => ({ node: { ...n, image: null } })) } } : null }; break;
     }
     case 'productVariantsBulkDelete': { const p = byId(v.productId); p.variants = p.variants.filter(n => !v.variantsIds.includes(n.id)); data = { productVariantsBulkDelete: { userErrors: [] } }; break; }
     case 'productVariantsBulkUpdate': { const p = byId(v.productId); for (const u of v.variants) p.variants.find(n => n.id === u.id).sku = u.sku; data = { productVariantsBulkUpdate: { userErrors: [] } }; break; }
     case 'productUpdate': {
       const p = byId(v.productId || v.product?.id || v.input?.id);
-      p.status = v.product?.status || (/DRAFT/.test(q) ? 'DRAFT' : 'ACTIVE'); data = { productUpdate: { product: { id: p.id }, userErrors: [] } }; break;
+      if (v.product?.vendor) p.vendor = v.product.vendor;
+      else p.status = v.product?.status || (/DRAFT/.test(q) ? 'DRAFT' : 'ACTIVE');
+      data = { productUpdate: { product: { id: p.id }, userErrors: [] } }; break;
     }
+    case 'product': { const p = byId(v.id); data = { product: p ? { id: p.id, title: p.title, status: p.status, vendor: p.vendor || 'Urban Deco', variants: { nodes: p.variants } } : null }; break; }
     default: throw new Error('mock: unhandled ' + op);
   }
   return { data: { data } };
@@ -124,6 +127,16 @@ const rows = (brownStatus) => [H_B, H_G].flatMap(h => [
     rd = await call('/api/shopify/publish-products', { variants: pz.sel, related: pz.rel, dryRun: false });
     assert(rd.flagged >= 1 && /product code P75 says "Green \/ 5ft King Size" but the CFS name/.test(rd.log[0].message), JSON.stringify(rd.log));
     assert.strictEqual(products[H_P].variants.length, 3);
+    // D4. "Needs your decision": the flag comes with options; choosing 4ft applies only to that product
+    const dec = rd.decisions.find(x => x.handle === H_P);
+    assert(dec && dec.options.some(o => o.value === 'keep:gid://shopify/ProductVariant/91') && dec.options.some(o => o.value === 'draft'), JSON.stringify(rd.decisions));
+    rd = await call('/api/shopify/publish-products', { variants: pz.sel, related: pz.rel, decisions: { [H_P]: { keep: ['gid://shopify/ProductVariant/91'] } }, onlyHandles: [H_P], dryRun: false });
+    assert.deepStrictEqual(products[H_P].variants.map(n => n.sku), ['UD-1244789', 'UD-1244790-17221694'], JSON.stringify(rd.log));
+    assert(rd.log.some(l => /your choice/.test(l.message)));
+    // D5. decision "draft"
+    reset(); pz = posey(['P76', 'P75']);
+    rd = await call('/api/shopify/publish-products', { variants: [], related: pz.rel, decisions: { [H_P]: { draft: true } }, onlyHandles: [H_P], dryRun: false });
+    assert(products[H_P].status === 'DRAFT' && products[H_P].variants.length === 3, JSON.stringify(rd.log));
 
     // E. Fix Selected SKUs
     reset(); products[H_B].variants[1].sku = 'UD-1239265- 17200080';
@@ -134,6 +147,15 @@ const rows = (brownStatus) => [H_B, H_G].flatMap(h => [
     products[H_B].variants[0].sku = 'UD-1239265- 17200080';   // clean SKU already used on this product → not fixed
     fx = await call('/api/shopify/fix-skus', { variants: [{ handle: H_B, variantSku: 'UD-1239265- 17200080' }], dryRun: false });
     assert(fx.fixed === 0 && /already has SKU/.test(fx.log[0].message));
+    assert(fx.decisions[0].options.some(o => o.value === 'delete-duplicate'));
+    fx = await call('/api/shopify/fix-skus', { variants: [{ handle: H_B, variantSku: 'UD-1239265- 17200080', action: 'delete-duplicate' }], dryRun: false });
+    assert(fx.fixed === 1 && products[H_B].variants.length === 1 && products[H_B].variants[0].sku === 'UD-1239265-17200080', JSON.stringify(fx.log));
+
+    // F. Change vendor (Other brand tab) + Undo
+    let vd = await call('/api/shopify/set-vendor', { items: [{ handle: H_G, vendor: 'Beehive' }], dryRun: false });
+    assert(vd.changed === 1 && products[H_G].vendor === 'Beehive' && vd.undoId);
+    const uv = await call(`/api/shopify/undo/${vd.undoId}`, { dryRun: false });
+    assert(uv.undone === 1 && products[H_G].vendor === 'Urban Deco', JSON.stringify(uv.log));
     console.log('PROMOTE OWN-VARIANT TESTS PASSED');
   } catch (e) { console.error('PROMOTE OWN-VARIANT TESTS FAILED', e); process.exitCode = 1; }
   server.close();

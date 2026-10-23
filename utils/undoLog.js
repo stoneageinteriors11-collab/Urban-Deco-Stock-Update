@@ -7,6 +7,7 @@
  *   status    — product status            before → after   (undo: put status back)
  *   sku       — variant SKU                before → after   (undo: put SKU back)
  *   photos    — photos detached from a product              (undo: re-attach + old order)
+ *   vendor    — product vendor             before → after   (undo: put vendor back)
  *   variants-deleted — listed for information only: Shopify can't bring back a
  *                      deleted variant, so this part can NOT be undone.
  *
