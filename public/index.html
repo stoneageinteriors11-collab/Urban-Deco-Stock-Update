@@ -173,6 +173,7 @@
     .tile.cfs-product-count  .num { color: #a78bfa; }
     .tile.code-only-count    .num { color: #fb923c; }
     .tile.other-brand-count  .num { color: #38bdf8; }
+    .tile.sku-typo-count     .num { color: #f472b6; }
 
     /* ── Table toolbar ── */
     .table-toolbar {
@@ -221,6 +222,7 @@
     .badge-cfs-inactive { background: rgba(245,158,11,.15);  color: var(--warning); }
     .badge-cfs-product  { background: rgba(167,139,250,.15); color: #a78bfa; }
     .badge-code-only    { background: rgba(251,146,60,.15);  color: #fb923c; }
+    .badge-sku-typo     { background: rgba(244,114,182,.15); color: #f472b6; cursor: help; }
     .badge-other-brand  { background: rgba(56,189,248,.15);  color: #38bdf8; cursor: help; }
     .brand-banner { background: rgba(99,102,241,.12); border: 1px solid rgba(99,102,241,.45); border-radius: 10px; padding: 12px 16px; margin-bottom: 18px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
     .brand-banner a { color: var(--accent-hover); margin-left: auto; text-decoration: none; font-size: 13px; }
@@ -478,6 +480,9 @@
       <button class="btn btn-amber hidden" id="btn-set-draft" onclick="setSelectedDraft()">
         📄 Set Selected to Draft
       </button>
+      <button class="btn btn-purple hidden" id="btn-fix-sku" onclick="fixSelectedSkus()">
+        🔧 Fix Selected SKUs
+      </button>
       <button class="btn btn-purple hidden" id="btn-publish" onclick="publishSelected()">
         📗 Publish Selected as Main Product
       </button>
@@ -544,6 +549,10 @@
         <div class="num" id="tile-code-only">0</div>
         <div class="lbl">Check: SKU not in CFS (only old saved code matches)</div>
       </div>
+      <div class="tile sku-typo-count" title="The SKU only matches CFS once spaces or stray characters are removed (e.g. 'UD-1244787- 17221688'). Use Fix Selected SKUs on the SKU typo tab.">
+        <div class="num" id="tile-sku-typo">0</div>
+        <div class="lbl">SKU typo (fix the SKU)</div>
+      </div>
       <div class="tile other-brand-count brand-only hidden" title="Not in this brand's CFS feed, but found in another brand's feed. Usually the vendor on Shopify is wrong. Never deleted here.">
         <div class="num" id="tile-other-brand">0</div>
         <div class="lbl">Found under another brand (check vendor)</div>
@@ -559,6 +568,7 @@
         <button class="fbtn"        data-filter="cfs-inactive" onclick="setFilter('cfs-inactive',this)">CFS Inactive</button>
         <button class="fbtn"        data-filter="cfs-product"  onclick="setFilter('cfs-product',this)">CFS Product Match</button>
         <button class="fbtn"        data-filter="code-only"    onclick="setFilter('code-only',this)">Check: SKU not in CFS</button>
+        <button class="fbtn"        data-filter="sku-typo"     onclick="setFilter('sku-typo',this)">SKU typo</button>
         <button class="fbtn brand-only hidden" data-filter="other-brand" onclick="setFilter('other-brand',this)">Other brand</button>
         <button class="fbtn"        data-filter="shared"       onclick="setFilter('shared',this)">Shared SKU</button>
         <button class="fbtn"        data-filter="ok"           onclick="setFilter('ok',this)">OK</button>
@@ -1124,6 +1134,7 @@ async function testConnection() {
       document.getElementById('tile-cfs-product').textContent   = (data.summary.cfsProduct  || 0).toLocaleString();
       document.getElementById('tile-code-only').textContent     = (data.summary.codeOnly    || 0).toLocaleString();
       document.getElementById('tile-other-brand').textContent   = (data.summary.otherBrand  || 0).toLocaleString();
+      document.getElementById('tile-sku-typo').textContent      = (data.summary.skuTypo     || 0).toLocaleString();
       if (data.crossNote) alert('Other-brand check: ' + data.crossNote);
       document.getElementById('summary-tiles').classList.remove('hidden');
       document.getElementById('table-toolbar').classList.remove('hidden');
@@ -1173,6 +1184,7 @@ async function testConnection() {
       btnDraft.style.display   = 'none';
       btnPublish.style.display = 'none';
       wrapEl.style.display     = 'none';
+      document.getElementById('btn-fix-sku').style.display = 'none';
     };
 
     hideAll();
@@ -1195,6 +1207,10 @@ async function testConnection() {
       wrapEl.style.display = '';
       btnDel.style.display = '';
       btnDel.textContent   = '🗑 Draft / Remove Selected';
+    } else if (f === 'sku-typo') {
+      labelEl.textContent  = 'Select all SKU typos';
+      wrapEl.style.display = '';
+      document.getElementById('btn-fix-sku').style.display = '';
     } else if (f === 'all') {
       labelEl.textContent    = 'Select all orphaned & CFS Inactive';
       wrapEl.style.display   = '';
@@ -1230,14 +1246,16 @@ async function testConnection() {
   // and say so plainly when there's nothing to clean up at all.
   function tidyActions() {
     const n = st => allResults.filter(r => r.matchStatus === st).length;
-    const orph = n('orphaned'), inact = n('cfs-inactive'), prod = n('cfs-product'), code = n('code-only');
+    const orph = n('orphaned'), inact = n('cfs-inactive'), prod = n('cfs-product'), code = n('code-only'), typo = n('sku-typo');
     const can = {
       all:            { wrap: orph + inact + prod, del: orph + code, draft: inact, pub: 0 },
       orphaned:       { wrap: orph,  del: orph,  draft: 0,     pub: 0 },
       'cfs-inactive': { wrap: inact, del: 0,     draft: inact, pub: 0 },
       'cfs-product':  { wrap: prod,  del: 0,     draft: 0,     pub: prod },
       'code-only':    { wrap: code,  del: code,  draft: 0,     pub: 0 },
+      'sku-typo':     { wrap: typo,  del: 0,     draft: 0,     pub: 0, fix: typo },
     }[activeFilter] || { wrap: 0, del: 0, draft: 0, pub: 0 };
+    if (!can.fix)   document.getElementById('btn-fix-sku').style.display = 'none';
     // only ever hide here — which buttons belong to which tab is decided in setFilter
     if (!can.wrap)  document.getElementById('select-all-wrap').style.display = 'none';
     if (!can.del)   document.getElementById('btn-delete').style.display = 'none';
@@ -1247,7 +1265,7 @@ async function testConnection() {
     const note = document.getElementById('nothing-note');
     if (!note) return;
     const other = n('other-brand'), ok = n('ok'), draft = n('draft');
-    const nothing = allResults.length && !(orph + inact + prod + code);
+    const nothing = allResults.length && !(orph + inact + prod + code + typo);
     note.classList.toggle('hidden', !nothing);
     if (nothing) note.innerHTML = `✅ Nothing to clean up — all ${ok.toLocaleString()} active variants match CFS.`
       + (draft ? ` <span style="color:var(--text-muted)">${draft.toLocaleString()} on draft/archived products were skipped.</span>` : '')
@@ -1266,13 +1284,15 @@ async function testConnection() {
       const isCfsProduct  = r.matchStatus === 'cfs-product';
       const isCodeOnly    = r.matchStatus === 'code-only';
       const isOtherBrand  = r.matchStatus === 'other-brand';
-      const isSelectable  = isOrphaned || isCfsInactive || isCfsProduct || isCodeOnly;
+      const isSkuTypo     = r.matchStatus === 'sku-typo';
+      const isSelectable  = isOrphaned || isCfsInactive || isCfsProduct || isCodeOnly || isSkuTypo;
       const checked       = selectedSKUs.has(r.variantSku) ? 'checked' : '';
       const badgeCls      = isOrphaned    ? 'badge-orphaned'
                           : isCfsInactive ? 'badge-cfs-inactive'
                           : isCfsProduct  ? 'badge-cfs-product'
                           : isCodeOnly    ? 'badge-code-only'
                           : isOtherBrand  ? 'badge-other-brand'
+                          : isSkuTypo     ? 'badge-sku-typo'
                           : isDraft       ? 'badge-draft'
                           : 'badge-ok';
       const badgeTxt      = isOrphaned    ? 'Orphaned'
@@ -1280,6 +1300,7 @@ async function testConnection() {
                           : isCfsProduct  ? 'CFS Product'
                           : isCodeOnly    ? 'Check: SKU not in CFS'
                           : isOtherBrand  ? 'Other brand'
+                          : isSkuTypo     ? 'SKU typo'
                           : isDraft       ? 'Draft'
                           : 'OK';
       const variantLabel  = [r.option1, r.option2, r.option3].filter(Boolean).join(' / ') || 'Default';
@@ -1335,6 +1356,8 @@ async function testConnection() {
       selectable = allResults.filter(r => r.matchStatus === 'cfs-product');
     } else if (activeFilter === 'code-only') {
       selectable = allResults.filter(r => r.matchStatus === 'code-only');
+    } else if (activeFilter === 'sku-typo') {
+      selectable = allResults.filter(r => r.matchStatus === 'sku-typo');
     } else {
       // 'all' — select all actionable types
       selectable = allResults.filter(r => ['orphaned','cfs-inactive','cfs-product'].includes(r.matchStatus));
@@ -1511,6 +1534,34 @@ async function testConnection() {
     document.getElementById('tile-cfs-product').textContent   = allResults.filter(r=>r.matchStatus==='cfs-product').length.toLocaleString();
     document.getElementById('tile-code-only').textContent     = allResults.filter(r=>r.matchStatus==='code-only').length.toLocaleString();
     document.getElementById('tile-other-brand').textContent   = allResults.filter(r=>r.matchStatus==='other-brand').length.toLocaleString();
+    document.getElementById('tile-sku-typo').textContent      = allResults.filter(r=>r.matchStatus==='sku-typo').length.toLocaleString();
+  }
+
+  // ── Fix SKU typos (SKU typo tab) ─────────────────────────────────────────
+  async function fixSelectedSkus() {
+    const rows = allResults.filter(r => selectedSKUs.has(r.variantSku) && r.matchStatus === 'sku-typo');
+    if (!rows.length) { alert('Select SKU typo rows first.'); return; }
+    const dryRun = document.getElementById('dry-run-toggle').checked;
+    const msg = dryRun
+      ? `DRY RUN: show how ${rows.length} SKU(s) would be fixed (no changes).`
+      : `Fix ${rows.length} SKU(s) on Shopify?\n\nEach SKU is rewritten to its clean form, e.g.\n  "${rows[0].variantSku}" → "${rows[0].fixedSku}"\n\nSaved for Undo. Continue?`;
+    if (!confirm(msg)) return;
+    const btn = document.getElementById('btn-fix-sku');
+    btn.disabled = true;
+    try {
+      const data = await (await fetch('/api/shopify/fix-skus', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ variants: rows.map(r => ({ handle: r.handle, variantSku: r.variantSku, fixedSku: r.fixedSku })), dryRun }) })).json();
+      if (data.error) throw new Error(data.error);
+      if (!dryRun) await saveUndoFile(data.undoId);
+      showLog(data.log, dryRun);
+      if (!dryRun) {
+        const done = new Set(data.log.filter(l => l.status === 'updated').map(l => l.sku));
+        for (const r of rows) if (done.has(r.fixedSku)) { selectedSKUs.delete(r.variantSku); r.variantSku = r.fixedSku; r.matchStatus = 'ok'; delete r.codeOnlyNote; }
+        refreshTiles(); applyFilter2();
+        alert(`Done! Fixed: ${data.fixed} | Skipped: ${data.skipped} | Failed: ${data.failed}\n\nRun the comparison again to refresh everything.`);
+      }
+    } catch (e) { alert('Error: ' + e.message); }
+    finally { btn.disabled = false; }
   }
 
   // ── Set selected CFS-inactive variants to Draft on Shopify ───────────────
@@ -1565,7 +1616,7 @@ async function testConnection() {
   function relatedRowsFor(rows) {
     const handles = new Set(rows.flatMap(r => [r.handle, ...(r.sharedSkuHandles || [])]));
     return allResults.filter(r => handles.has(r.handle))
-      .map(r => ({ handle: r.handle, variantSku: r.variantSku, matchStatus: r.matchStatus, cfsProductStatus: r.cfsProductStatus }));
+      .map(r => ({ handle: r.handle, variantSku: r.variantSku, matchStatus: r.matchStatus, cfsProductStatus: r.cfsProductStatus, shopifyVariantCode: r.shopifyVariantCode || '' }));
   }
 
   // ── Publish selected CFS-product-match variants as Active on Shopify ────────

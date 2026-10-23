@@ -82,4 +82,4 @@ function findOwnVariants(product, variants, cfsNameByProdId = new Map()) {
   return { ok: false, reason: "the title doesn't name any of the variants" };
 }
 
-module.exports = { findOwnVariants, words };
+module.exports = { findOwnVariants, words, distinguishing };

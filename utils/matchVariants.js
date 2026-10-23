@@ -95,6 +95,12 @@ function compareVariants(
       const cfsStatus = validProductSKUs.get(sku); // 'active' | 'inactive'
       matchStatus = cfsStatus === 'inactive' ? 'cfs-inactive' : 'ok';
 
+    } else if (cleanSku(sku) !== sku && (validVariantSKUs.has(cleanSku(sku)) || validProductSKUs.has(cleanSku(sku)))) {
+      // SKU typo — only matches CFS once spaces / stray characters are removed
+      // (e.g. "UD-1244787- 17221688" → "UD-1244787-17221688"). Fixed with "Fix Selected SKUs".
+      matchStatus = 'sku-typo';
+      codeOnlyNote = `SKU "${sku}" has a typo — CFS has "${cleanSku(sku)}"`;
+
     } else {
       // Step 2c — split SKU into raw IDs and check CFS feed columns directly.
       const { prodId, varId } = parseSku(sku);
@@ -153,7 +159,7 @@ function compareVariants(
     // Combined display value (variant code preferred; falls back to product code)
     const productCode = variantCode || productCodeOnly || '';
 
-    results.push({ ...v, matchStatus, productCode, variantCode, productCodeOnly, ...(cfsProductStatus !== undefined && { cfsProductStatus }),
+    results.push({ ...v, ...(matchStatus === 'sku-typo' && { fixedSku: cleanSku(sku) }), matchStatus, productCode, variantCode, productCodeOnly, ...(cfsProductStatus !== undefined && { cfsProductStatus }),
       ...(codeOnlyNote && { codeOnlyNote }) });
   }
 
@@ -175,9 +181,17 @@ function compareVariants(
   const cfsInactive = results.filter(r => r.matchStatus === 'cfs-inactive').length;
   const cfsProduct  = results.filter(r => r.matchStatus === 'cfs-product').length;
   const codeOnly    = results.filter(r => r.matchStatus === 'code-only').length;
+  const skuTypo     = results.filter(r => r.matchStatus === 'sku-typo').length;
   const sharedSku   = results.filter(r => r.sharedSkuHandles.length).length;
 
-  return { results, summary: { total: results.length, orphaned, ok, draft, cfsInactive, cfsProduct, codeOnly, sharedSku } };
+  return { results, summary: { total: results.length, orphaned, ok, draft, cfsInactive, cfsProduct, codeOnly, skuTypo, sharedSku } };
 }
 
-module.exports = { compareVariants, parseSku };
+// Clean form of a SKU: no spaces/invisible characters, upper-case UD prefix, single dashes,
+// no stray dash or dot at the ends. "UD-1244787- 17221688" → "UD-1244787-17221688"
+function cleanSku(sku) {
+  return String(sku || '').replace(/[\s\u200B-\u200D\uFEFF]+/g, '').replace(/^ud-/i, 'UD-')
+    .replace(/-{2,}/g, '-').replace(/^[-.]+|[-.]+$/g, '');
+}
+
+module.exports = { compareVariants, parseSku, cleanSku };

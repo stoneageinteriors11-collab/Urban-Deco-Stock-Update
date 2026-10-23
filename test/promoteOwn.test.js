@@ -44,7 +44,8 @@ axios.post = async (url, body) => {
 axios.get = async (url) => {
   if (url.includes('productVariantStockJsonCFS')) return { data: [
     { productId: 1239265, productName: 'London Recliner Sofa 3 Seater Grey Leather' },
-    { productId: 1239270, productName: 'London Recliner Sofa 3 Seater Brown Leather' }] };
+    { productId: 1239270, productName: 'London Recliner Sofa 3 Seater Brown Leather' },
+    { productId: 1244789, productName: 'Posey Emerald Green Fabric Ottoman Bed - 4ft 6in Double', productCode: 'P75' }] };
   throw new Error('404');
 };
 
@@ -95,6 +96,44 @@ const rows = (brownStatus) => [H_B, H_G].flatMap(h => [
     reset(); products[H_B].title = 'London Recliner Sofa - 3 Seater - Brown and Grey Leather';
     const r = await call('/api/shopify/publish-products', { variants: rows('orphaned').filter(x => x.handle === H_B && x.variantSku === BROWN), related: rows('orphaned').filter(x => x.handle === H_B), dryRun: false });
     assert(r.flagged >= 1 && products[H_B].variants.length === 2 && products[H_B].status === 'ACTIVE', JSON.stringify(r.log));
+    // D. CFS turned two Green sizes into ONE product "… Emerald Green … – 4ft 6in Double" (no variants)
+    const H_P = 'posey-green';
+    const posey = (codes) => {
+      const mv = (id, sku, colour, size, code) => ({ id: `gid://shopify/ProductVariant/${id}`, sku, title: `${colour} / ${size}`, code,
+        selectedOptions: [{ name: 'Color', value: colour }, { name: 'Size', value: size }] });
+      products[H_P] = { id: 'gid://shopify/Product/9', handle: H_P, title: 'Posey Emerald Green Fabric Ottoman Bed - Sizes Available', status: 'ACTIVE', variants: [
+        mv(91, 'UD-1244789-17221692', 'Green', '4ft 6in Double', codes[0]), mv(92, 'UD-1244789-17221693', 'Green', '5ft King Size', codes[1]),
+        mv(93, 'UD-1244790-17221694', 'Blue', '4ft 6in Double', 'P77')] };
+      const rel = products[H_P].variants.map(n => ({ handle: H_P, variantSku: n.sku, shopifyVariantCode: n.code,
+        matchStatus: n.sku.startsWith('UD-1244789') ? 'cfs-product' : 'ok', cfsProductStatus: 'active' }));
+      return { rel, sel: rel.filter(r => r.matchStatus === 'cfs-product') };
+    };
+    // D1. code + name agree (4ft = P75) → keep 4ft as UD-1244789, delete 5ft, Blue untouched
+    reset(); let pz = posey(['P75', 'P76']);
+    let rd = await call('/api/shopify/publish-products', { variants: pz.sel, related: pz.rel, dryRun: true });
+    const ml = rd.log.map(l => l.message).join('\n'); console.log(ml);
+    assert(/Would update SKU "UD-1244789-17221692" → "UD-1244789"/.test(ml) && /Would delete variant "Green \/ 5ft King Size" \(CFS product UD-1244789 is now only "Green \/ 4ft 6in Double" — product code P75/.test(ml), ml);
+    await call('/api/shopify/publish-products', { variants: pz.sel, related: pz.rel, dryRun: false });
+    assert.deepStrictEqual(products[H_P].variants.map(n => n.sku), ['UD-1244789', 'UD-1244790-17221694']);
+    // D2. no saved codes → the CFS name decides
+    reset(); pz = posey(['', '']);
+    await call('/api/shopify/publish-products', { variants: pz.sel, related: pz.rel, dryRun: false });
+    assert.deepStrictEqual(products[H_P].variants.map(n => n.sku), ['UD-1244789', 'UD-1244790-17221694'], 'name picks 4ft 6in');
+    // D3. code says 5ft but name says 4ft → flag, nothing changed
+    reset(); pz = posey(['P76', 'P75']);
+    rd = await call('/api/shopify/publish-products', { variants: pz.sel, related: pz.rel, dryRun: false });
+    assert(rd.flagged >= 1 && /product code P75 says "Green \/ 5ft King Size" but the CFS name/.test(rd.log[0].message), JSON.stringify(rd.log));
+    assert.strictEqual(products[H_P].variants.length, 3);
+
+    // E. Fix Selected SKUs
+    reset(); products[H_B].variants[1].sku = 'UD-1239265- 17200080';
+    let fx = await call('/api/shopify/fix-skus', { variants: [{ handle: H_B, variantSku: 'UD-1239265- 17200080', fixedSku: 'UD-1239265-17200080' }], dryRun: true });
+    assert(/Would fix SKU "UD-1239265- 17200080" → "UD-1239265-17200080"/.test(fx.log[0].message) && products[H_B].variants[1].sku === 'UD-1239265- 17200080');
+    fx = await call('/api/shopify/fix-skus', { variants: [{ handle: H_B, variantSku: 'UD-1239265- 17200080', fixedSku: 'UD-1239265-17200080' }], dryRun: false });
+    assert(fx.fixed === 1 && products[H_B].variants[1].sku === 'UD-1239265-17200080' && fx.undoId);
+    products[H_B].variants[0].sku = 'UD-1239265- 17200080';   // clean SKU already used on this product → not fixed
+    fx = await call('/api/shopify/fix-skus', { variants: [{ handle: H_B, variantSku: 'UD-1239265- 17200080' }], dryRun: false });
+    assert(fx.fixed === 0 && /already has SKU/.test(fx.log[0].message));
     console.log('PROMOTE OWN-VARIANT TESTS PASSED');
   } catch (e) { console.error('PROMOTE OWN-VARIANT TESTS FAILED', e); process.exitCode = 1; }
   server.close();
