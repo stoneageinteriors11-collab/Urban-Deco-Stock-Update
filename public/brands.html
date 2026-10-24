@@ -123,7 +123,7 @@
 
   <div class="card">
     <div class="card-title"><span class="num">5</span> Order-ahead (pre-Christmas)</div>
-    <p class="help">Lets customers order products that CFS has <b>OUT OF STOCK</b> but with stock <b>due before the cut-off date</b>:
+    <p class="help">Lets customers order products that CFS has <b>OUT OF STOCK</b> but with stock <b>due from today up to the cut-off date</b> (a due date that has already passed doesn't count):
       sets <b>stock_status_override = IN STOCK</b> and quantity <b>5</b>. The real stock status, due date and delivery time stay as CFS has them,
       so the store can say "order now — expected 17 Nov". When stock arrives, or the due date moves past the cut-off, it's switched off again —
       by this step or by the normal stock update. Active products only.</p>
@@ -267,7 +267,7 @@
     $(u.status).textContent = r.error ? 'Stopped with an error: ' + r.error
       : r.cancelled ? 'Stopped — partial result below.'
       : `${r.dryRun ? 'Dry run' : 'Live run'} finished for ${r.brand}.`;
-    $('resultTitle').textContent = `— ${r.brand} · ${r.kind === 'codes' ? 'Product codes' : 'Stock update'} · ${r.dryRun ? 'DRY RUN (nothing changed)' : 'LIVE'}`;
+    $('resultTitle').textContent = `— ${r.brand} · ${r.kind === 'codes' ? 'Product codes' : r.kind === 'ahead' ? `Order-ahead (today ${r.today}, cut-off ${r.cutoff})` : 'Stock update'} · ${r.dryRun ? 'DRY RUN (nothing changed)' : 'LIVE'}`;
     $('resultCard').classList.remove('hidden');
     renderStats(); renderLog();
     $('resultCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -280,7 +280,9 @@
       ['all', '', c.variants, 'Variants checked'],
       ['changes', 'upd', c.newAhead, lastResult.dryRun ? `Would allow ordering (due before ${lastResult.cutoff})` : `Now orderable (due before ${lastResult.cutoff})`],
       ['unchanged', 'ok', c.keptAhead, 'Already orderable'],
-      ['changes', 'flag', c.cleared, lastResult.dryRun ? 'Would switch back' : 'Switched back'],
+      ['changes', 'flag', c.cleared, lastResult.dryRun ? 'Would switch off (all reasons)' : 'Switched off (all reasons)'],
+      ['passed', 'nf', c.clearedPassed || 0, lastResult.dryRun ? 'Would switch off – due date passed' : 'Switched off – due date passed'],
+      ['skipped', '', c.oosPassed || 0, 'Out of stock, due date passed (not turned on)'],
       ['skipped', '', c.oosLater, 'Out of stock, due after cut-off'],
       ['skipped', '', c.oosNoDate, 'Out of stock, no due date'],
       ['error', 'nf', c.failed, 'Errors'],
@@ -313,7 +315,8 @@
     return (lastResult?.log || []).filter(l => {
       if (filter === 'changes' && !['dry_run', 'updated'].includes(l.status)) return false;
       if (filter === 'error' && !['error', 'warning'].includes(l.status)) return false;
-      if (!['all', 'changes', 'error'].includes(filter) && l.status !== filter) return false;
+      if (filter === 'passed' && l.reason !== 'passed') return false;
+      if (!['all', 'changes', 'error', 'passed'].includes(filter) && l.status !== filter) return false;
       return !q || `${l.handle} ${l.sku} ${l.message}`.toLowerCase().includes(q);
     });
   }

@@ -96,14 +96,31 @@ const METAFIELDS_DELETE = `mutation d($metafields: [MetafieldIdentifierInput!]!)
 // keeps these at 5 — and clears them once they no longer qualify (stock arrived, due date
 // moved past the cut-off, or no due date any more).
 const OVERRIDE_KEY = 'stock_status_override', CUTOFF_KEY = 'override_cutoff', OVERRIDE_QTY = 5;
+// Due date → calendar day "YYYY-MM-DD" from the first 10 characters, so a time zone in
+// "2026-11-17 00:00:00 +0100" can't shift the day. "NA", blank or an impossible date → null.
 function dueDay(due) {
-  const m = String(due || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
-  return m ? `${m[1]}-${m[2]}-${m[3]}` : null;      // "NA", blank, odd formats → no date
+  const m = String(due || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  if (d.getUTCFullYear() !== +m[1] || d.getUTCMonth() !== +m[2] - 1 || d.getUTCDate() !== +m[3]) return null;
+  return `${m[1]}-${m[2]}-${m[3]}`;
 }
-function qualifiesOrderAhead(s, cutoff) {
-  const day = dueDay(s?.dueDate);
-  return !!(s && cutoff && s.stockStatus === 'OUT OF STOCK' && day && day < cutoff);
+// Today's calendar date in the UK (Europe/London), "YYYY-MM-DD"
+function ukToday(now = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/London', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
 }
+// Order-ahead ON only when: CFS OUT OF STOCK, a real due date, due today or later (UK),
+// and due before the cut-off. Returns { ok, why } — why = reason it's off (for the log).
+function orderAheadCheck(s, cutoff, today = ukToday()) {
+  if (!s) return { ok: false, why: 'not in CFS', code: 'other' };
+  if (s.stockStatus !== 'OUT OF STOCK') return { ok: false, why: `CFS now ${s.stockStatus || '(blank)'} — back in stock`, code: 'instock' };
+  const day = dueDay(s.dueDate);
+  if (!day) return { ok: false, why: `no valid due date in CFS ("${s.dueDate || ''}")`, code: 'nodate' };
+  if (day < today) return { ok: false, why: `due date passed (${day}, today ${today})`, code: 'passed' };
+  if (!cutoff || !(day < cutoff)) return { ok: false, why: `due ${day} is not before ${cutoff || 'the cut-off'}`, code: 'later' };
+  return { ok: true, day };
+}
+const qualifiesOrderAhead = (s, cutoff, today) => orderAheadCheck(s, cutoff, today).ok;
 
 const INVENTORY_SET = `mutation s($input: InventorySetQuantitiesInput!, $key: String!) {
   inventorySetQuantities(input: $input) @idempotent(key: $key) { userErrors { field message } } }`;
@@ -260,10 +277,13 @@ router.post('/stock-sync', async (req, res) => {
           // Order-ahead override (separate step) still valid? → keep quantity 5; otherwise clear it
           let targetQty = s.qty;
           if (mf[OVERRIDE_KEY]) {
-            if (qualifiesOrderAhead(s, mf[CUTOFF_KEY])) { targetQty = OVERRIDE_QTY; c.orderAhead = (c.orderAhead || 0) + 1; ahead.push(v.id); }
+            const chk = orderAheadCheck(s, mf[CUTOFF_KEY]);
+            if (chk.ok) { targetQty = OVERRIDE_QTY; c.orderAhead = (c.orderAhead || 0) + 1; ahead.push(v.id); }
             else {
               toDelete.push({ ownerId: v.id, namespace: 'custom', key: OVERRIDE_KEY }, { ownerId: v.id, namespace: 'custom', key: CUTOFF_KEY });
-              changes.push(`order-ahead ended (${s.stockStatus === 'IN STOCK' ? 'back in stock' : 'due date no longer before ' + (mf[CUTOFF_KEY] || 'the cut-off')})`);
+              c.aheadEnded = (c.aheadEnded || 0) + 1;
+              if (chk.code === 'passed') c.aheadPassed = (c.aheadPassed || 0) + 1;
+              changes.push(`order-ahead switched off — ${chk.why}`);
             }
           }
           const cur = v.inventoryItem?.inventoryLevel?.quantities?.find(q => q.name === 'available')?.quantity ?? null;
@@ -576,7 +596,7 @@ router.post('/compare', async (req, res) => {
 // ── Order-ahead step (pre-Christmas) ──────────────────────────────────────────
 // Body: { brandIds: [ids] (one brand or all 14), cutoff: 'YYYY-MM-DD', dryRun }
 // Per variant (Active products, SKU in the brand's CFS feed):
-//   OUT OF STOCK + due date before the cut-off → stock_status_override "IN STOCK",
+//   OUT OF STOCK + real due date, today or later (UK) and before the cut-off → stock_status_override "IN STOCK",
 //       override_cutoff = cut-off, quantity 5 (J-Line / Richmond included)
 //   has an override but no longer qualifies     → override cleared, quantity back to the normal rule
 // Product-level stock_status_override = "IN STOCK" while any variant has it.
@@ -604,11 +624,12 @@ router.post('/order-ahead', async (req, res) => {
   const label = brands.length === 1 ? brands[0].vendor : `${brands.length} brands`;
 
   const log = [];
-  const c = { products: 0, variants: 0, newAhead: 0, keptAhead: 0, cleared: 0, oosNoDate: 0, oosLater: 0, notInCfs: 0, failed: 0 };
+  const today = ukToday();
+  const c = { products: 0, variants: 0, newAhead: 0, keptAhead: 0, cleared: 0, clearedPassed: 0, oosNoDate: 0, oosPassed: 0, oosLater: 0, notInCfs: 0, failed: 0 };
   const finish = (extra = {}) => {
     clearInterval(ping); cancelled.delete(runId); stopKeepAwake();
     console.log(`  ✓ Order-ahead ${label} done — ${JSON.stringify(c)}${extra.cancelled ? ' (stopped)' : ''}`);
-    send({ type: 'done', kind: 'ahead', dryRun, brand: label, cutoff, counts: c, log, ...extra });
+    send({ type: 'done', kind: 'ahead', dryRun, brand: label, cutoff, today, counts: c, log, ...extra });
     if (!res.writableEnded) res.end();
   };
 
@@ -660,7 +681,8 @@ router.post('/order-ahead', async (req, res) => {
             return ` · quantity ${cur ?? '?'} → ${q}`;
           };
           const day = dueDay(s.dueDate);
-          if (qualifiesOrderAhead(s, cutoff)) {
+          const chk = orderAheadCheck(s, cutoff, today);
+          if (chk.ok) {
             anyAhead = true;
             const isNew = mf[OVERRIDE_KEY] !== 'IN STOCK' || mf[CUTOFF_KEY] !== cutoff;
             if (mf[OVERRIDE_KEY] !== 'IN STOCK') set.push({ ownerId: v.id, namespace: 'custom', key: OVERRIDE_KEY, value: 'IN STOCK', type: 'single_line_text_field' });
@@ -671,13 +693,15 @@ router.post('/order-ahead', async (req, res) => {
               message: `${isNew || q ? (dryRun ? 'Would allow ordering' : 'Can be ordered now') : 'Already orderable'} — OUT OF STOCK, due ${day} (before ${cutoff}): override IN STOCK${q}  [${s.deliveryTime || 'no delivery time'}]` });
           } else if (mf[OVERRIDE_KEY]) {
             c.cleared++;
+            if (chk.code === 'passed') c.clearedPassed++;
             del.push({ ownerId: v.id, namespace: 'custom', key: OVERRIDE_KEY }, { ownerId: v.id, namespace: 'custom', key: CUTOFF_KEY });
-            const why = s.stockStatus !== 'OUT OF STOCK' ? `CFS now ${s.stockStatus || '(blank)'}` : day ? `due ${day} is not before ${cutoff}` : 'no due date in CFS';
             const q = setQty(s.qty);
-            rows.push({ handle: p.handle, sku: v.sku, status: dryRun ? 'dry_run' : 'updated', message: `${dryRun ? 'Would end' : 'Ended'} order-ahead — ${why}${q}` });
+            rows.push({ handle: p.handle, sku: v.sku, status: dryRun ? 'dry_run' : 'updated', reason: chk.code,
+              message: `${dryRun ? 'Would switch off' : 'Switched off'} order-ahead${chk.code === 'passed' ? ' – due date passed' : ''} — ${chk.why}${q}` });
           } else if (s.stockStatus === 'OUT OF STOCK') {
-            if (day) { c.oosLater++; rows.push({ handle: p.handle, sku: v.sku, status: 'skipped', message: `OUT OF STOCK, due ${day} — not before ${cutoff}, stays out of stock` }); }
-            else { c.oosNoDate++; rows.push({ handle: p.handle, sku: v.sku, status: 'skipped', message: `OUT OF STOCK with no due date ("${s.dueDate || ''}") — stays out of stock` }); }
+            if (chk.code === 'passed') { c.oosPassed++; rows.push({ handle: p.handle, sku: v.sku, status: 'skipped', message: `OUT OF STOCK, due date passed (${day}, today ${today}) — stays out of stock` }); }
+            else if (day) { c.oosLater++; rows.push({ handle: p.handle, sku: v.sku, status: 'skipped', message: `OUT OF STOCK, due ${day} — not before ${cutoff}, stays out of stock` }); }
+            else { c.oosNoDate++; rows.push({ handle: p.handle, sku: v.sku, status: 'skipped', message: `OUT OF STOCK with no valid due date ("${s.dueDate || ''}") — stays out of stock` }); }
           }
         }
         // product level
@@ -716,3 +740,4 @@ router.post('/order-ahead', async (req, res) => {
 });
 
 module.exports = router;
+module.exports._orderAhead = { dueDay, ukToday, orderAheadCheck };

@@ -136,7 +136,30 @@ const sse = async body => {
     r = await sse({ brandId: 363, dryRun: false });
     assert.deepStrictEqual(writes.inv.filter(x => x.inventoryItemId === 'I22').map(x => x.quantity), [0]);
     assert.deepStrictEqual(writes.del.map(d => `${d.ownerId}.${d.key}`).sort(), ['P2.stock_status_override', 'V22.override_cutoff', 'V22.stock_status_override']);
-    assert(r.log.some(l => l.sku === 'UD-2-22' && /order-ahead ended/.test(l.message)));
+    assert(r.log.some(l => l.sku === 'UD-2-22' && /order-ahead switched off/.test(l.message)));
+
+    // Due date already passed (Rhianna case): never turned on; an active one is switched off
+    const { _orderAhead: oa } = require('../routes/brandsync');
+    assert.strictEqual(oa.dueDay('2026-10-21 00:00:00 +0100'), '2026-10-21');
+    assert.strictEqual(oa.dueDay('2026-02-30'), null, 'impossible date = no date');
+    assert.strictEqual(oa.orderAheadCheck({ stockStatus: 'OUT OF STOCK', dueDate: '2026-10-21 00:00:00 +0100' }, '2026-12-12', '2026-10-24').code, 'passed');
+    assert.strictEqual(oa.orderAheadCheck({ stockStatus: 'OUT OF STOCK', dueDate: '2026-10-24' }, '2026-12-12', '2026-10-24').ok, true, 'due today still counts');
+    const past = (() => { const d = new Date(Date.now() - 3 * 864e5); return d.toISOString().slice(0, 10) + ' 00:00:00 +0100'; })();
+    const oldDue = feed[1].dueDate; feed[1].dueDate = past;
+    v22.metafields = mf({ inoutstock: 'OUT OF STOCK', duedate: past, stock_status_override: 'IN STOCK', override_cutoff: '2099-12-12' });
+    writes.mf.length = 0; writes.inv.length = 0; writes.del = [];
+    r = await sseAt('/api/brands/order-ahead', { brandIds: [363], cutoff: '2099-12-12', dryRun: true });
+    assert.strictEqual(r.counts.clearedPassed, 1, JSON.stringify(r.counts));
+    const sw = r.log.find(l => l.sku === 'UD-2-22');
+    assert(sw.reason === 'passed' && /Would switch off order-ahead – due date passed — due date passed \(/.test(sw.message) && /quantity 5 → 0/.test(sw.message), sw.message);
+    assert.strictEqual(writes.mf.length + writes.inv.length + writes.del.length, 0, 'dry run writes nothing');
+    v22.metafields = mf({ inoutstock: 'OUT OF STOCK', duedate: past });   // no override yet → must not be turned on
+    r = await sseAt('/api/brands/order-ahead', { brandIds: [363], cutoff: '2099-12-12', dryRun: true });
+    assert(r.counts.newAhead === 0 && r.counts.oosPassed === 1, JSON.stringify(r.counts));
+    v22.metafields = mf({ inoutstock: 'OUT OF STOCK', duedate: past, stock_status_override: 'IN STOCK', override_cutoff: '2099-12-12' });
+    r = await sse({ brandId: 363, dryRun: false });   // Step 1 also switches it off
+    assert(r.counts.aheadPassed === 1 && writes.del.some(d => d.ownerId === 'V22' && d.key === 'stock_status_override'), JSON.stringify(r.counts));
+    feed[1].dueDate = oldDue;
     console.log('BRAND STOCK TESTS PASSED');
   } catch (e) { console.error('BRAND STOCK TESTS FAILED', e); process.exitCode = 1; }
   server.close();
