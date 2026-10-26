@@ -525,7 +525,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
           if (ownReason) {
             msg = `Would set "${productTitle}" to DRAFT — ${ownReason}`;
           } else if (action.startsWith('set product to DRAFT')) {
-            msg = `Would set "${productTitle}" to DRAFT — all variants orphaned, deleting "${label}" (no CFS match)`;
+            msg = `Would set "${productTitle}" to DRAFT — all variants orphaned (no CFS match); variant "${label}" is kept, nothing deleted`;
           } else if (action.startsWith('keep all')) {
             msg = `Would keep "${label}" — all variants found in CFS feeds: ${productTitle}`;
           } else if (remainingNodes.length > 0) {
