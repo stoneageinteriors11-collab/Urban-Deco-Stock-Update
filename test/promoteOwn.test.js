@@ -36,10 +36,11 @@ axios.post = async (url, body) => {
     case 'productUpdate': {
       const p = byId(v.productId || v.product?.id || v.input?.id);
       if (v.product?.vendor) p.vendor = v.product.vendor;
+      else if (v.product?.title) { p.title = v.product.title; if (v.product.handle) { products[v.product.handle] = p; if (v.product.handle !== p.handle) delete products[p.handle]; p.handle = v.product.handle; } }
       else p.status = v.product?.status || (/DRAFT/.test(q) ? 'DRAFT' : 'ACTIVE');
-      data = { productUpdate: { product: { id: p.id }, userErrors: [] } }; break;
+      data = { productUpdate: { product: { id: p.id, title: p.title, handle: p.handle }, userErrors: [] } }; break;
     }
-    case 'product': { const p = byId(v.id); data = { product: p ? { id: p.id, title: p.title, status: p.status, vendor: p.vendor || 'Urban Deco', variants: { nodes: p.variants } } : null }; break; }
+    case 'product': { const p = byId(v.id); data = { product: p ? { id: p.id, title: p.title, handle: p.handle, status: p.status, vendor: p.vendor || 'Urban Deco', variants: { nodes: p.variants } } : null }; break; }
     default: throw new Error('mock: unhandled ' + op);
   }
   return { data: { data } };
@@ -156,6 +157,42 @@ const rows = (brownStatus) => [H_B, H_G].flatMap(h => [
     assert(vd.changed === 1 && products[H_G].vendor === 'Beehive' && vd.undoId);
     const uv = await call(`/api/shopify/undo/${vd.undoId}`, { dryRun: false });
     assert(uv.undone === 1 && products[H_G].vendor === 'Urban Deco', JSON.stringify(uv.log));
+    // G. Own variant gone, others only sold here (Vernal) → ask; keep as Grey → delete White + rename
+    const H_V = 'vernal-coffee-table-white-sintered-stone';
+    const vernal = () => { products[H_V] = { id: 'gid://shopify/Product/77', handle: H_V, title: 'Vernal Coffee Table - White Sintered Stone', status: 'ACTIVE', variants: [
+      { id: 'gid://shopify/ProductVariant/771', sku: 'UD-650809', title: 'White', selectedOptions: [{ name: 'Color', value: 'White' }] },
+      { id: 'gid://shopify/ProductVariant/772', sku: 'UD-650824', title: 'Grey', selectedOptions: [{ name: 'Color', value: 'Grey' }] }] }; };
+    const delBody = extra => ({ variants: [{ handle: H_V, variantSku: 'UD-650809', title: 'Vernal' }], cfsProductIds: [['650824', 'active']], cfsVariantAttrIds: [],
+      skuHomes: { 'UD-650809': [H_V], 'UD-650824': [H_V] }, ...extra });
+    reset(); vernal();
+    let dv = await call('/api/shopify/delete-variants-bulk', delBody({ dryRun: true }));
+    assert(dv.log.some(l => l.status === 'flagged' && /"Grey" is only sold on this product/.test(l.message)), JSON.stringify(dv.log));
+    const dvo = dv.decisions[0].options.map(o => o.value + ' | ' + o.label);
+    console.log(dvo.join('\n'));
+    assert(/keepas:gid:\/\/shopify\/ProductVariant\/772 \| Keep as the "Grey" product — delete "White", title → "Vernal Coffee Table - Grey Sintered Stone", URL → \/vernal-coffee-table-grey-sintered-stone/.test(dvo[0]), dvo[0]);
+    dv = await call('/api/shopify/delete-variants-bulk', delBody({ dryRun: false }));
+    assert(products[H_V].variants.length === 2 && products[H_V].status === 'ACTIVE', 'no decision → nothing changed live');
+    dv = await call('/api/shopify/delete-variants-bulk', delBody({ dryRun: true, decisions: { [H_V]: { keepAs: 'gid://shopify/ProductVariant/772' } } }));
+    assert(dv.log.some(l => /would rename the title "Vernal Coffee Table - White Sintered Stone" → "Vernal Coffee Table - Grey Sintered Stone", URL \/vernal-coffee-table-white-sintered-stone → \/vernal-coffee-table-grey-sintered-stone/.test(l.message)), JSON.stringify(dv.log));
+    dv = await call('/api/shopify/delete-variants-bulk', delBody({ dryRun: false, decisions: { [H_V]: { keepAs: 'gid://shopify/ProductVariant/772' } } }));
+    const pv = products['vernal-coffee-table-grey-sintered-stone'];
+    assert(pv && pv.title === 'Vernal Coffee Table - Grey Sintered Stone' && pv.variants.map(n => n.sku).join() === 'UD-650824', JSON.stringify(dv.log));
+    assert(dv.log.some(l => /Title renamed .* \(old URL redirects\) — you can change the title manually later/.test(l.message)));
+    const uu = await call(`/api/shopify/undo/${dv.undoId}`, { dryRun: false });
+    assert(products[H_V] && products[H_V].title === 'Vernal Coffee Table - White Sintered Stone', 'Undo puts title + URL back: ' + JSON.stringify(uu.log));
+    // G2. Same, but Grey also sold on its own product (Carrera case) → Draft as before
+    reset(); vernal();
+    dv = await call('/api/shopify/delete-variants-bulk', { ...delBody({ dryRun: false }), skuHomes: { 'UD-650809': [H_V], 'UD-650824': [H_V, 'vernal-grey'] } });
+    assert(products[H_V].status === 'DRAFT' && products[H_V].variants.length === 2, JSON.stringify(dv.log));
+    // G3. Publish: own variant not in CFS, other only sold here → ask with keep-as options
+    reset(); vernal();
+    const rel = [{ handle: H_V, variantSku: 'UD-650809', matchStatus: 'orphaned' }, { handle: H_V, variantSku: 'UD-650824', matchStatus: 'cfs-product', cfsProductStatus: 'active' }];
+    let pb = await call('/api/shopify/publish-products', { variants: [rel[1]], related: rel, dryRun: true, skuHomes: { 'UD-650809': [H_V], 'UD-650824': [H_V] } });
+    assert(pb.decisions[0].options.some(o => o.value === 'keepas:gid://shopify/ProductVariant/772'), JSON.stringify(pb.decisions));
+    pb = await call('/api/shopify/publish-products', { variants: [rel[1]], related: rel, dryRun: false, skuHomes: { 'UD-650809': [H_V], 'UD-650824': [H_V] },
+      decisions: { [H_V]: { keepAs: 'gid://shopify/ProductVariant/772' } }, onlyHandles: [H_V] });
+    const pv2 = products['vernal-coffee-table-grey-sintered-stone'];
+    assert(pv2 && pv2.variants.map(n => n.sku).join() === 'UD-650824' && pv2.status === 'ACTIVE', JSON.stringify(pb.log));
     console.log('PROMOTE OWN-VARIANT TESTS PASSED');
   } catch (e) { console.error('PROMOTE OWN-VARIANT TESTS FAILED', e); process.exitCode = 1; }
   server.close();

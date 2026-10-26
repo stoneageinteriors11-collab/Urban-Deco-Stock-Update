@@ -29,18 +29,80 @@ async function getCfsInfo(brandId) {
 async function getCfsNames(brandId) { return (await getCfsInfo(brandId)).map; }
 
 // Is the variant being removed this product's OWN variant? (see utils/ownVariant.js)
-//   own variant(s) all being removed → draft the whole product instead
-//   otherwise → delete just the other variant(s)
-function ownDraftCheck(product, handle, deletingSkus, cfsNames) {
+//   own variant(s) being removed and
+//     A. the product's other variants are also sold on another active product (Carrera:
+//        separate White / Beige / Black products) → draft the whole product
+//     B. this is the only product selling them (Vernal: White product with a Grey variant,
+//        no Grey product) → ask: keep it as the Grey product (rename) / Draft / Skip
+//   otherwise → delete just the missing variant(s)
+// skuHomes = { sku: [handles of ACTIVE products that have this SKU] } from the page.
+// Without it (older page) the old rule applies: draft.
+function ownDraftCheck(product, handle, deletingSkus, cfsNames, skuHomes = null) {
   const variants = product.variants.edges.map(e => e.node);
   const r = findOwnVariants({ title: product.title, handle }, variants, cfsNames);
   if (!r.ok) return { draft: false, note: `couldn't tell which variant this product is (${r.reason}) — only the missing variant(s) are deleted` };
   const own = variants.filter(v => r.ownIds.includes(v.id));
   const ownSkus = own.map(v => v.sku);
   if (own.every(v => deletingSkus.has(v.sku))) {
-    return { draft: true, reason: `this product is "${r.label}" (${ownSkus.join(', ')}) and that is not in CFS — whole product goes to DRAFT, variants and photos kept` };
+    const base = `this product is "${r.label}" (${ownSkus.join(', ')}) and that is not in CFS`;
+    const remaining = variants.filter(v => !deletingSkus.has(v.sku));
+    if (skuHomes && remaining.length) {
+      const homeless = remaining.filter(v => !(skuHomes[v.sku] || []).some(h => h !== handle));
+      if (homeless.length) {
+        return { draft: false, ask: true, own: r, remaining, homeless,
+          reason: `${base}, but ${homeless.map(v => `"${variantLabel(v)}"`).join(', ')} ${homeless.length > 1 ? 'are' : 'is'} only sold on this product — choose what to do` };
+      }
+      return { draft: true, reason: `${base} — the other colours are sold on their own products, so this product goes to DRAFT, variants and photos kept` };
+    }
+    return { draft: true, reason: `${base} — whole product goes to DRAFT, variants and photos kept` };
   }
   return { draft: false, note: `this product is "${r.label}" (${ownSkus.join(', ')}), still in CFS — only the other variant(s) are deleted` };
+}
+
+// "Keep as the Grey product": swap the own option value (e.g. White) for the kept variant's
+// value (Grey) in the title and the handle. "Vernal Coffee Table - White Sintered Stone"
+// → "Vernal Coffee Table - Grey Sintered Stone", vernal-…-white-… → vernal-…-grey-…
+// If the word isn't found, nothing is renamed and the log says to rename it by hand.
+const slugify = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+const escRe = t => String(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function renamePlan(product, handle, own, keepNode) {
+  const pairs = (own?.constraints || []).map(c => ({ from: c.value, to: (keepNode.selectedOptions || []).find(o => o.name === c.name)?.value }))
+    .filter(x => x.from && x.to && x.from !== x.to);
+  if (!pairs.length) return { ok: false, note: `title "${product.title}" kept — couldn't work out the new name, please rename it by hand` };
+  let title = product.title, newHandle = handle;
+  for (const { from, to } of pairs) {
+    const re = new RegExp(`(^|[^A-Za-z0-9])${escRe(from)}(?=$|[^A-Za-z0-9])`, 'i');
+    if (!re.test(title)) return { ok: false, note: `"${from}" isn't in the title "${product.title}" — title kept, please rename it by hand` };
+    title = title.replace(re, (m, pre) => pre + to);
+    const hre = new RegExp(`(^|-)${escRe(slugify(from))}(?=-|$)`);
+    if (hre.test(newHandle)) newHandle = newHandle.replace(hre, (m, pre) => pre + slugify(to));
+  }
+  return { ok: true, title, handle: newHandle, changedHandle: newHandle !== handle };
+}
+const PRODUCT_RENAME_MUTATION = `mutation R($product: ProductUpdateInput!) { productUpdate(product: $product) { product { id title handle } userErrors { field message } } }`;
+async function applyRename(client, product, handle, plan, undoRun) {
+  if (!plan?.ok) return { ok: false, message: plan?.note || 'not renamed' };
+  const input = { id: product.id, title: plan.title };
+  if (plan.changedHandle) { input.handle = plan.handle; input.redirectNewHandle = true; }
+  const r = await gql(client, PRODUCT_RENAME_MUTATION, { product: input });
+  const errs = r?.productUpdate?.userErrors || [];
+  if (errs.length) return { ok: false, message: `rename failed: ${errs.map(e => e.message).join(', ')}` };
+  rec(undoRun, { type: 'title', productId: product.id, handle, title: product.title,
+    before: { title: product.title, handle }, after: { title: plan.title, handle: r.productUpdate.product.handle } });
+  return { ok: true, message: `Title renamed "${product.title}" → "${plan.title}"${plan.changedHandle ? `, URL /${handle} → /${r.productUpdate.product.handle} (old URL redirects)` : ''} — you can change the title manually later in Shopify` };
+}
+// Options for "Needs your decision" when a product's own variant is gone but its other
+// variants are only sold here (case B)
+function keepAsOptions(product, handle, own, homeless) {
+  const opts = homeless.map(v => {
+    const rn = renamePlan(product, handle, own, v);
+    return { value: `keepas:${v.id}`, label: rn.ok
+      ? `Keep as the "${variantLabel(v)}" product — delete "${own.label}", title → "${rn.title}"${rn.changedHandle ? `, URL → /${rn.handle}` : ''}`
+      : `Keep as the "${variantLabel(v)}" product — delete "${own.label}" (${rn.note})` };
+  });
+  opts.push({ value: 'draft', label: 'Set the whole product to Draft (variants & photos kept)' });
+  opts.push({ value: 'skip', label: 'Skip — leave as it is' });
+  return opts;
 }
 // Adds an entry to a live run's undo record (no-op on dry runs)
 const rec = (run, entry) => { if (run) undo.add(run, entry); };
@@ -290,7 +352,7 @@ function productRefSku(variantSku) {
 //   all orphaned, none in CFS feeds   → product set to DRAFT (photos untouched)
 //   all orphaned, all in CFS feeds    → keep everything
 //   all orphaned, mixed               → delete only the ones not in CFS feeds
-function decideDeletion(allVariants, orphanedSKUs, productIdSet, variantAttrIdSet, product = null, handle = '', cfsNames = new Map()) {
+function decideDeletion(allVariants, orphanedSKUs, productIdSet, variantAttrIdSet, product = null, handle = '', cfsNames = new Map(), skuHomes = null, decision = null) {
   const inCfs = v => { const { prodId, varId } = parseSku(v.sku); return (prodId && productIdSet.has(prodId)) || (varId && variantAttrIdSet.has(varId)); };
   const orphaned = allVariants.filter(v => orphanedSKUs.has(v.sku));
   if (!orphaned.length) return { mode: 'none', toDelete: [] };
@@ -303,8 +365,11 @@ function decideDeletion(allVariants, orphanedSKUs, productIdSet, variantAttrIdSe
     result = { mode: 'mixed', toDelete: unmatched };
   }
   if (product) {
-    const own = ownDraftCheck(product, handle, new Set(result.toDelete.map(v => v.sku)), cfsNames);
+    const own = ownDraftCheck(product, handle, new Set(result.toDelete.map(v => v.sku)), cfsNames, skuHomes);
     if (own.draft) return { mode: 'draft-own', toDelete: [], reason: own.reason };
+    if (own.ask && decision?.keepAs) return { mode: 'keepas', toDelete: result.toDelete, own };
+    if (own.ask && decision?.draft) return { mode: 'draft-own', toDelete: [], reason: 'your decision' };
+    if (own.ask) return { mode: 'ask-own', toDelete: [], reason: own.reason, own };
   }
   return result;
 }
@@ -315,7 +380,7 @@ function decideDeletion(allVariants, orphanedSKUs, productIdSet, variantAttrIdSe
 // feed + picture check from Image Sync). Returns an imagePlanId that
 // delete-variants-bulk uses for its dry-run log and live run.
 router.post('/delete-variants-image-plan', async (req, res) => {
-  const { variants = [], cfsProductIds = [], cfsVariantAttrIds = [], brandId = null } = req.body || {};
+  const { variants = [], cfsProductIds = [], cfsVariantAttrIds = [], brandId = null, skuHomes = null, decisions = {} } = req.body || {};
   let client;
   try { client = graphqlClient(); } catch (err) { return res.status(400).json({ error: err.message }); }
   const sse = imageSync.openSse(res);
@@ -337,7 +402,7 @@ router.post('/delete-variants-image-plan', async (req, res) => {
       const data = await gql(client, PRODUCT_BY_HANDLE_QUERY, { handle });
       const product = data?.productByHandle;
       if (!product) continue;
-      const decision = decideDeletion(product.variants.edges.map(e => e.node), orphanedSKUs, productIdSet, variantAttrIdSet, product, handle, cfsNames);
+      const decision = decideDeletion(product.variants.edges.map(e => e.node), orphanedSKUs, productIdSet, variantAttrIdSet, product, handle, cfsNames, skuHomes, decisions[handle]);
       if (decision.toDelete.length) items.push({ handle, removedSkus: decision.toDelete.map(v => v.sku) });
     }
     const plan = await imageSync.buildRemovalPlan({ client, items, send, check });   // loads the CFS feed only if items exist
@@ -414,7 +479,10 @@ async function detachPlannedPhotos(product, handle, plan, backupId, log, undoRun
 //   4. 350ms pause between product operations to stay inside Shopify's rate limit.
 //
 router.post('/delete-variants-bulk', async (req, res) => {
-  const { variants = [], dryRun = true, cfsProductIds = [], cfsVariantAttrIds = [], imagePlanId = null, backupId = null, brandId = null } = req.body;
+  // skuHomes: { sku: [active handles] } (own-variant rule, case A/B); decisions: { [handle]: { keepAs: variantId } | { draft: true } }
+  const { variants = [], dryRun = true, cfsProductIds = [], cfsVariantAttrIds = [], imagePlanId = null, backupId = null, brandId = null,
+    skuHomes = null, decisions = {} } = req.body;
+  const decisionList = [], keepAsHandles = [];
   // Photo plan from /delete-variants-image-plan (which photos belong only to deleted variants)
   const imagePlan = imagePlanId ? imageSync.loadRemovalPlan(imagePlanId) : null;
   if (imagePlanId && !imagePlan) return res.status(400).json({ error: 'Photo check not found (server may have restarted) — run it again' });
@@ -503,14 +571,28 @@ router.post('/delete-variants-bulk', async (req, res) => {
               const deleting = allOrphaned
                 ? allVariants.filter(v => { const { prodId, varId } = parseSku(v.sku); return !(prodId && productIdSet.has(prodId)) && !(varId && variantAttrIdSet.has(varId)); })
                 : deletedNodes;
-              const own = ownDraftCheck(product, handle, new Set(deleting.map(v => v.sku)), await getCfsNames(brandId));
+              const own = ownDraftCheck(product, handle, new Set(deleting.map(v => v.sku)), await getCfsNames(brandId), skuHomes);
+              const dec = decisions[handle] || {};
               if (own.draft) { action = 'set product to DRAFT (own variant not in CFS)'; ownReason = own.reason; }
+              else if (own.ask && dec.draft) { action = 'set product to DRAFT (your decision)'; ownReason = 'your decision — whole product goes to DRAFT, variants and photos kept'; }
+              else if (own.ask && dec.keepAs) {
+                const keep = allVariants.find(v => v.id === dec.keepAs);
+                const rn = keep ? renamePlan(product, handle, own.own, keep) : { ok: false, note: 'chosen variant not found' };
+                ownNote = `your choice: keep as the "${keep ? variantLabel(keep) : '?'}" product — ` + (rn.ok
+                  ? `would rename the title "${product.title}" → "${rn.title}"${rn.changedHandle ? `, URL /${handle} → /${rn.handle} (old URL redirects)` : ''} — you can change the title manually later`
+                  : rn.note);
+              } else if (own.ask) {
+                action = 'ask'; ownReason = own.reason;
+                decisionList.push({ origin: 'delete', handle, title: product.title, reason: own.reason, options: keepAsOptions(product, handle, own.own, own.homeless) });
+              }
               else ownNote = own.note;
             }
 
             // Photos: photo-by-photo plan from the photo check (Image Sync engine)
             if (action.startsWith('set product to DRAFT')) {
               photoLines.push({ sku: '-', handle, status: 'dry_run', message: `Photos: product goes to DRAFT — photos left as they are: ${productTitle}` });
+            } else if (action === 'ask') {
+              photoLines.push({ sku: '-', handle, status: 'dry_run', message: `Photos: not changed — waiting for your decision: ${productTitle}` });
             } else if (!action.startsWith('keep')) {
               photoLines.push(...photoLogLines(photoPlanFor(handle), handle, true));
             }
@@ -522,7 +604,10 @@ router.post('/delete-variants-bulk', async (req, res) => {
           const label    = shopNode ? variantLabel(shopNode) : (v.option1 || v.option2 || v.variantSku);
 
           let msg;
-          if (ownReason) {
+          if (action === 'ask') {
+            log.push({ sku: v.variantSku, handle, status: 'flagged', message: `NOT changed — ${ownReason} · ${productTitle}`, productCode: v.productCode || '' });
+            continue;
+          } else if (ownReason) {
             msg = `Would set "${productTitle}" to DRAFT — ${ownReason}`;
           } else if (action.startsWith('set product to DRAFT')) {
             msg = `Would set "${productTitle}" to DRAFT — all variants orphaned (no CFS match); variant "${label}" is kept, nothing deleted`;
@@ -538,7 +623,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
           }
           log.push({ sku: v.variantSku, handle, status: 'dry_run', message: msg, productCode: v.productCode || '' });
         }
-        if (ownNote) log.push({ sku: '-', handle, status: /couldn't tell/.test(ownNote) ? 'warning' : 'info', message: `Which variant is this product: ${ownNote} · ${productTitle}` });
+        if (ownNote) log.push({ sku: '-', handle, status: /couldn't tell|rename it by hand/.test(ownNote) ? 'warning' : 'info', message: `Which variant is this product: ${ownNote} · ${productTitle}` });
 
         log.push(...photoLines);
 
@@ -574,6 +659,20 @@ router.post('/delete-variants-bulk', async (req, res) => {
         rec(undoRun, { type: 'status', productId: product.id, handle, title: product.title, before: product.status || 'ACTIVE', after: 'DRAFT' });
         for (const v of orphanedForProduct) { log.push({ sku: v.variantSku, handle, status: 'drafted', message: `Product set to DRAFT — ${reason}: ${product.title}`, productCode: v.productCode || '' }); deleted++; }
       };
+      // Own variant gone but the others are only sold here → "Needs your decision" (no change)
+      const askOwn = (o) => {
+        for (const v of orphanedForProduct) log.push({ sku: v.variantSku, handle, status: 'flagged', message: `NOT changed — ${o.reason} · ${product.title}`, productCode: v.productCode || '' });
+        decisionList.push({ origin: 'delete', handle, title: product.title, reason: o.reason, options: keepAsOptions(product, handle, o.own, o.homeless) });
+      };
+      // Decision "keep as the Grey product": after the missing variant is deleted, rename title + URL
+      const keepAsRename = async (o, keepId) => {
+        const keep = allVariants.find(v => v.id === keepId);
+        const r = keep ? await applyRename(client, product, handle, renamePlan(product, handle, o.own, keep), undoRun) : { ok: false, message: 'chosen variant not found — title kept' };
+        log.push({ sku: '-', handle, status: r.ok ? 'updated' : 'warning', message: `${r.message} · ${product.title}` });
+        log.push({ sku: '-', handle, status: 'info', message: `Photos: the main photo may still show "${o.own.label}" — update them in Image Sync · ${product.title}` });
+        keepAsHandles.push(r.ok && /URL/.test(r.message) ? renamePlan(product, handle, o.own, keep).handle : handle);
+      };
+      let ownP = null;
       const orphanedNodes   = allVariants.filter(v => orphanedSKUs.has(v.sku));
       const nonOrphanedLeft = allVariants.length - orphanedNodes.length;
 
@@ -605,10 +704,13 @@ router.post('/delete-variants-bulk', async (req, res) => {
         }
 
         const ownMixed = (cfsMatched.length > 0 && cfsUnmatched.length > 0)
-          ? ownDraftCheck(product, handle, new Set(cfsUnmatched.map(n => n.sku)), cfsNames) : null;
-        if (ownMixed && ownMixed.draft) {
+          ? ownDraftCheck(product, handle, new Set(cfsUnmatched.map(n => n.sku)), cfsNames, skuHomes) : null;
+        const decM = decisions[handle] || {};
+        if (ownMixed && (ownMixed.draft || (ownMixed.ask && decM.draft))) {
           console.log(`  → Drafting "${product.title}" — own variant not in CFS`);
-          await draftBecauseOwn(ownMixed.reason);
+          await draftBecauseOwn(ownMixed.draft ? ownMixed.reason : 'your decision');
+        } else if (ownMixed && ownMixed.ask && !decM.keepAs) {
+          askOwn(ownMixed);
         } else if (cfsMatched.length > 0 && cfsUnmatched.length > 0) {
           console.log(`  ↗ "${product.title}" — deleting ${cfsUnmatched.length} unmatched, keeping ${cfsMatched.length} CFS-matched`);
           const variantIds = cfsUnmatched.map(v => v.id);
@@ -629,6 +731,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
             rec(undoRun, { type: 'variants-deleted', productId: product.id, handle, title: product.title, skus: cfsUnmatched.map(n => n.sku) });
             // Photos of the removed variants → detached (from the photo check)
             await detachPlannedPhotos(product, handle, photoPlanFor(handle), backupId, log, undoRun);
+            if (ownMixed && ownMixed.ask && decM.keepAs) await keepAsRename(ownMixed, decM.keepAs);
           }
 
         } else if (cfsUnmatched.length === 0) {
@@ -654,9 +757,12 @@ router.post('/delete-variants-bulk', async (req, res) => {
           }
         }
 
-      } else if (ownDraftCheck(product, handle, new Set(orphanedNodes.map(n => n.sku)), cfsNames).draft) {
+      } else if ((ownP = ownDraftCheck(product, handle, new Set(orphanedNodes.map(n => n.sku)), cfsNames, skuHomes)).draft
+                 || (ownP.ask && (decisions[handle] || {}).draft)) {
         console.log(`  → Drafting "${product.title}" — own variant not in CFS`);
-        await draftBecauseOwn(ownDraftCheck(product, handle, new Set(orphanedNodes.map(n => n.sku)), cfsNames).reason);
+        await draftBecauseOwn(ownP.draft ? ownP.reason : 'your decision');
+      } else if (ownP.ask && !(decisions[handle] || {}).keepAs) {
+        askOwn(ownP);
       } else {
         const variantIds = orphanedNodes.map(v => v.id);
         const result = await gql(client, DELETE_VARIANTS_MUTATION, { productId: product.id, variantsIds: variantIds });
@@ -676,6 +782,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
           rec(undoRun, { type: 'variants-deleted', productId: product.id, handle, title: product.title, skus: orphanedNodes.map(n => n.sku) });
           // Photos of the removed variants → detached (from the photo check)
           await detachPlannedPhotos(product, handle, photoPlanFor(handle), backupId, log, undoRun);
+          if (ownP && ownP.ask && (decisions[handle] || {}).keepAs) await keepAsRename(ownP, decisions[handle].keepAs);
         }
       }
 
@@ -692,7 +799,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
 
   console.log(`  ✓ Done — deleted: ${deleted}, failed: ${failed}, total: ${variants.length}`);
   const undoId = undoRun ? undo.save(undoRun) : null;
-  res.json({ success: true, dryRun, deleted, failed, total: variants.length, log, undoId });
+  res.json({ success: true, dryRun, deleted, failed, total: variants.length, log, undoId, decisions: decisionList, imageSyncHandles: keepAsHandles });
 });
 
 
@@ -704,7 +811,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
 //   POST /api/shopify/undo/upload            { file: <contents of an undo file> }
 //   POST /api/shopify/undo/:id               { dryRun, force, entries?: [index,…] }
 // ════════════════════════════════════════════════════════════════════════════
-const Q_UNDO_PRODUCT = `query P($id: ID!) { product(id: $id) { id title status vendor variants(first: 250) { nodes { id sku } } } }`;
+const Q_UNDO_PRODUCT = `query P($id: ID!) { product(id: $id) { id title handle status vendor variants(first: 250) { nodes { id sku } } } }`;
 const Q_PRODUCT_VENDOR = `query V($h: String!) { productByHandle(handle: $h) { id title vendor } }`;
 const M_SET_STATUS = `mutation S($product: ProductUpdateInput!) { productUpdate(product: $product) { product { id status } userErrors { field message } } }`;
 
@@ -781,6 +888,18 @@ router.post('/undo/:id', async (req, res) => {
         if (errs.length) throw new Error(errs.map(x => x.message).join(', '));
         v.sku = e.before;
         log.push({ ...base, sku: e.before, status: 'undone', message: `SKU put back: ${e.after} → ${e.before} · ${name}` });
+      } else if (e.type === 'title') {
+        const curTitle = p.title;
+        if (curTitle === e.before.title && (!e.after.handle || p.handle === e.before.handle)) { log.push({ ...base, status: 'info', message: `Title is already "${e.before.title}" · ${name}` }); doneIdx.push(i); continue; }
+        if (curTitle !== e.after.title && !force) { log.push({ ...base, status: 'conflict', message: `Title was changed after the run (now "${curTitle}") — skipped; tick "Overwrite" to undo anyway · ${name}` }); skipped++; continue; }
+        if (dryRun) { log.push({ ...base, status: 'dry_run', message: `Would put the title back: "${curTitle}" → "${e.before.title}"${p.handle !== e.before.handle ? `, URL /${p.handle} → /${e.before.handle}` : ''} · ${name}` }); continue; }
+        const input = { id: p.id, title: e.before.title };
+        if (p.handle !== e.before.handle) { input.handle = e.before.handle; input.redirectNewHandle = true; }
+        const r = await gql(client, M_SET_STATUS, { product: input });
+        const errs = r?.productUpdate?.userErrors || [];
+        if (errs.length) throw new Error(errs.map(x => x.message).join(', '));
+        p.title = e.before.title;
+        log.push({ ...base, status: 'undone', message: `Title put back: "${e.after.title}" → "${e.before.title}"${input.handle ? `, URL → /${e.before.handle}` : ''} · ${name}` });
       } else if (e.type === 'vendor') {
         if (p.vendor === e.before) { log.push({ ...base, status: 'info', message: `Vendor is already "${e.before}" · ${name}` }); doneIdx.push(i); continue; }
         if (p.vendor !== e.after && !force) { log.push({ ...base, status: 'conflict', message: `Vendor was changed after the run (now "${p.vendor}") — skipped; tick "Overwrite" to undo anyway · ${name}` }); skipped++; continue; }
@@ -1049,7 +1168,7 @@ router.post('/publish-products', async (req, res) => {
   // decisions: { [handle]: { keep: [variantId] } | { draft: true } | { skip: true } } — the user's
   // choices for products flagged by an earlier run ("Needs your decision"); onlyHandles limits the
   // run to those products.
-  const { variants = [], related = [], dryRun = true, brandId = null, decisions = {}, onlyHandles = null } = req.body;
+  const { variants = [], related = [], dryRun = true, brandId = null, decisions = {}, onlyHandles = null, skuHomes = null } = req.body;
 
   if (!variants.length && !(Array.isArray(onlyHandles) && onlyHandles.length)) {
     return res.status(400).json({ error: 'No variants provided.' });
@@ -1184,12 +1303,42 @@ router.post('/publish-products', async (req, res) => {
       }
       const keepRow = stat(ownCfs.find(n => parseSku(n.sku).prodId === prodId));
       if (keepRow?.cfsProductStatus === 'inactive') {
+        const b = onlySoldHere(product, handle, all, stat, own, ownNodes, `${label} — CFS product UD-${prodId} is inactive`);
+        if (b) return b;
         return { action: 'draft', reason: `${label} — CFS product UD-${prodId} is inactive — whole product goes to DRAFT, variants and photos kept` };
       }
       return tidyPlan(product, all, stat, ownCfs.filter(n => parseSku(n.sku).prodId === prodId), prodId, `${label} — ${why}`);
     }
     if (ownStats.every(s => s === 'unknown')) return { action: 'flag', reason: `${label} — its CFS status is unknown, run the comparison again` };
+    const b = onlySoldHere(product, handle, all, stat, own, ownNodes, `${label} and that is not in CFS`);
+    if (b) return b;
     return { action: 'draft', reason: `${label} and that is not in CFS — whole product goes to DRAFT, variants and photos kept` };
+  }
+
+  // Own variant gone, but some of the other variants are only sold on this product (Vernal case)
+  //   → ask (keep as the Grey product + rename / Draft / Skip); with the choice → do it
+  // Returns null when the normal Draft applies (others sold elsewhere, or no skuHomes from the page)
+  function onlySoldHere(product, handle, all, stat, own, ownNodes, reasonBase) {
+    if (!skuHomes) return null;
+    const remaining = all.filter(n => !own.ownIds.includes(n.id));
+    const homeless = remaining.filter(n => !(skuHomes[n.sku] || []).some(h => h !== handle));
+    if (!remaining.length || !homeless.length) return null;
+    const d = decisions[handle] || {};
+    if (d.keepAs) {
+      const keep = all.find(n => n.id === d.keepAs);
+      if (!keep) return { action: 'flag', reason: 'the variant you chose was not found — run the comparison again' };
+      const ks = stat(keep);
+      const keepProd = ks?.matchStatus === 'cfs-product' && ks.cfsProductStatus !== 'inactive' ? parseSku(keep.sku).prodId : null;
+      const plan = tidyPlan(product, remaining, stat, keepProd ? [keep] : [], keepProd, `your choice — keep as the "${variantLabel(keep)}" product`);
+      if (plan.action === 'flag') return plan;
+      const p2 = plan.action === 'promote' ? plan : { action: 'promote', prodId: null, setActive: false, renames: [], deleteNodes: [], deleteWhy: {}, asIs: [], reason: plan.reason };
+      p2.deleteWhy = p2.deleteWhy || {};
+      for (const n of ownNodes) { p2.deleteNodes.push(n); p2.deleteWhy[n.id] = `own variant "${variantLabel(n)}" is not in CFS — your choice: keep as "${variantLabel(keep)}"`; }
+      p2.rename = renamePlan(product, handle, own, keep);
+      return p2;
+    }
+    return { action: 'flag', ask: 'keepas', keepAsOwn: own, homeless,
+      reason: `${reasonBase}, but ${homeless.map(n => `"${variantLabel(n)}"`).join(', ')} ${homeless.length > 1 ? 'are' : 'is'} only sold on this product — choose what to do` };
   }
 
   // What happens to every variant of a product that stays:
@@ -1292,7 +1441,7 @@ router.post('/publish-products', async (req, res) => {
       if (plan.action === 'flag') {
         for (const r of rowsFor()) log.push({ ...r, handle, status: 'flagged', message: `NOT changed — ${plan.reason} · ${product.title}${extra}` });
         flagged++;
-        const options = [];
+        const options = plan.ask === 'keepas' ? keepAsOptions(product, handle, plan.keepAsOwn, plan.homeless).slice(0, -2) : [];
         for (const n of (plan.candidates || [])) options.push({ value: `keep:${n.id}`,
           label: plan.ask === 'own' ? `This product is "${variantLabel(n)}" (${n.sku}) — then apply the normal rules` : `Keep "${variantLabel(n)}" (${n.sku}), delete the other(s) here` });
         options.push({ value: 'draft', label: 'Set the whole product to Draft (variants & photos kept)' });
@@ -1337,6 +1486,9 @@ router.post('/publish-products', async (req, res) => {
         log.push({ sku: '-', handle, status: 'dry_run', message: plan.setActive
           ? `Would set product to ${targetStatus} (main product — ${plan.reason}) · ${product.title}${extra}`
           : `Product status unchanged (${plan.reason}) · ${product.title}${extra}` });
+        if (plan.rename) log.push({ sku: '-', handle, status: plan.rename.ok ? 'dry_run' : 'warning', message: plan.rename.ok
+          ? `Would rename the title "${product.title}" → "${plan.rename.title}"${plan.rename.changedHandle ? `, URL /${handle} → /${plan.rename.handle} (old URL redirects)` : ''} — you can change the title manually later · ${product.title}`
+          : `${plan.rename.note} · ${product.title}` });
         log.push({ sku: '-', handle, status: 'dry_run', message: `Photos: not changed here — will be updated in Image Sync: ${product.title}` });
         imageSyncHandles.add(handle);
         await sleep(150);
@@ -1395,6 +1547,12 @@ router.post('/publish-products', async (req, res) => {
           if (targetStatus === 'ACTIVE') published++; else drafted++;
           console.log(`  ✓ "${product.title}" → ${targetStatus} as main product`);
         }
+      }
+      // Step E — "keep as the Grey product": rename title + URL (old URL redirects)
+      if (plan.rename) {
+        const r = await applyRename(client, product, handle, plan.rename, undoRun);
+        log.push({ sku: '-', handle, status: r.ok ? 'updated' : 'warning', message: `${r.message} · ${product.title}` });
+        if (r.ok && plan.rename.changedHandle) { imageSyncHandles.delete(handle); imageSyncHandles.add(plan.rename.handle); }
       }
       await sleep(350);
 

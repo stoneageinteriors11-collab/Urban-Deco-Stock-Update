@@ -1470,7 +1470,8 @@ async function testConnection() {
     photoStatus(`Checking photos of ${need.length} product(s) (CFS image feed + picture check)… ${skipTxt} skipped`, 0, 0);
     const needSet = new Set(need);
     const last = await readStream('/api/shopify/delete-variants-image-plan',
-      { variants: variantsToDelete.filter(v => needSet.has(v.handle)), cfsProductIds, cfsVariantAttrIds, brandId: BRAND?.id || null },
+      { variants: variantsToDelete.filter(v => needSet.has(v.handle)), cfsProductIds, cfsVariantAttrIds, brandId: BRAND?.id || null,
+        skuHomes: skuHomesFor(variantsToDelete), decisions: variantsToDelete._decisions || {} },
       ev => { if (ev.type === 'progress') photoStatus(ev.message, ev.done, ev.total); if (ev.type === 'warn') photoStatus(ev.message); },
       'btn-photo-stop');
     if (last?.type === 'stopped') throw new Error(last.message);
@@ -1537,12 +1538,13 @@ async function testConnection() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ variants: variantsToDelete, dryRun, cfsProductIds, cfsVariantAttrIds,
-          imagePlanId: photoPlan.imagePlanId, backupId, brandId: BRAND?.id || null }),
+          imagePlanId: photoPlan.imagePlanId, backupId, brandId: BRAND?.id || null, skuHomes: skuHomesFor(variantsToDelete) }),
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       if (!dryRun) await saveUndoFile(data.undoId);
       showLog(data.log, dryRun);
+      renderDecisions(data.decisions || [], { rows: variantsToDelete, origin: 'delete' });
 
       if (!dryRun && data.deleted > 0) {
         allResults = allResults.filter(r => !skus.includes(r.variantSku));
@@ -1609,15 +1611,34 @@ async function testConnection() {
       const pub = picks.filter(x => x.d.origin === 'publish');
       if (pub.length) {
         const decisions = {};
-        for (const x of pub) decisions[x.d.handle] = x.v === 'draft' ? { draft: true } : { keep: [x.v.slice(5)] };
+        for (const x of pub) decisions[x.d.handle] = x.v === 'draft' ? { draft: true }
+          : x.v.startsWith('keepas:') ? { keepAs: x.v.slice(7) } : { keep: [x.v.slice(5)] };
         const handles = Object.keys(decisions);
         const data = await (await fetch('/api/shopify/publish-products', { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ variants: (ctx.rows || []).filter(r => handles.includes(r.handle)), related: ctx.related || [],
-            decisions, onlyHandles: handles, dryRun, brandId: BRAND?.id || null }) })).json();
+            decisions, onlyHandles: handles, dryRun, brandId: BRAND?.id || null, skuHomes: skuHomesFor(ctx.rows || []) }) })).json();
         if (data.error) throw new Error(data.error);
         if (!dryRun) await saveUndoFile(data.undoId);
         log.push(...data.log); next.push(...(data.decisions || []));
         showImageSyncHandoff(data.imageSyncHandles || [], dryRun);
+      }
+      const del = picks.filter(x => x.d.origin === 'delete');
+      if (del.length) {
+        const decisions = {};
+        for (const x of del) decisions[x.d.handle] = x.v === 'draft' ? { draft: true } : { keepAs: x.v.slice(7) };
+        const rows = (ctx.rows || []).filter(r => decisions[r.handle]);
+        rows._decisions = decisions;
+        // photos of the removed colour: same photo check + backup as Delete Selected Orphaned
+        const photoPlan = await runPhotoCheck(rows);
+        let backupId = null;
+        if (!dryRun && photoPlan.handlesWithRemovals.length) backupId = await photoBackup(photoPlan.handlesWithRemovals);
+        const data = await (await fetch('/api/shopify/delete-variants-bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ variants: rows, dryRun, cfsProductIds, cfsVariantAttrIds, imagePlanId: photoPlan.imagePlanId, backupId,
+            brandId: BRAND?.id || null, skuHomes: skuHomesFor(ctx.rows || []), decisions }) })).json();
+        if (data.error) throw new Error(data.error);
+        if (!dryRun) await saveUndoFile(data.undoId);
+        log.push(...data.log); next.push(...(data.decisions || []));
+        if ((data.imageSyncHandles || []).length) showImageSyncHandoff(data.imageSyncHandles, dryRun);
       }
       const dup = picks.filter(x => x.d.origin === 'fix-skus');
       if (dup.length) {
@@ -1738,6 +1759,19 @@ async function testConnection() {
     }
   }
 
+  // { sku: [handles of ACTIVE products that have this SKU] } for every variant of the products
+  // involved — tells the server whether a colour is also sold on another product (own-variant rule)
+  function skuHomesFor(rows) {
+    const handles = new Set(rows.flatMap(r => [r.handle, ...(r.sharedSkuHandles || [])]));
+    const skus = new Set(allResults.filter(r => handles.has(r.handle)).map(r => r.variantSku));
+    const homes = {};
+    for (const r of allResults) {
+      if (!skus.has(r.variantSku) || r.matchStatus === 'draft') continue;
+      (homes[r.variantSku] = homes[r.variantSku] || []).includes(r.handle) || homes[r.variantSku].push(r.handle);
+    }
+    return homes;
+  }
+
   function relatedRowsFor(rows) {
     const handles = new Set(rows.flatMap(r => [r.handle, ...(r.sharedSkuHandles || [])]));
     return allResults.filter(r => handles.has(r.handle))
@@ -1777,7 +1811,7 @@ async function testConnection() {
         // variants already carry cfsProductStatus from the compare response
         // + comparison status of EVERY variant on these products (and products sharing a selected SKU),
         //   so the server can tell whether each product's own variant is still in CFS
-        body: JSON.stringify({ variants: variantsToPublish, related: relatedRowsFor(variantsToPublish), dryRun, brandId: BRAND?.id || null }),
+        body: JSON.stringify({ variants: variantsToPublish, related: relatedRowsFor(variantsToPublish), dryRun, brandId: BRAND?.id || null, skuHomes: skuHomesFor(variantsToPublish) }),
       });
       const data = await res.json();
       if (!dryRun) await saveUndoFile(data.undoId);

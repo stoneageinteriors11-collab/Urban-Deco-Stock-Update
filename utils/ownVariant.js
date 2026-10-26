@@ -60,7 +60,7 @@ function findOwnVariants(product, variants, cfsNameByProdId = new Map()) {
   if (constraints.length) {
     const own = variants.filter(v => constraints.every(c => (v.selectedOptions || []).find(o => o.name === c.name)?.value === c.value));
     if (!own.length) return { ok: false, reason: 'no variant has that combination' };
-    return { ok: true, ownIds: own.map(v => v.id), label: constraints.map(c => c.value).join(' / '),
+    return { ok: true, ownIds: own.map(v => v.id), label: constraints.map(c => c.value).join(' / '), constraints,
       reason: `title says "${constraints.map(c => c.value).join(' / ')}"` };
   }
 
