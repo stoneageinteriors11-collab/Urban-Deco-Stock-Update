@@ -474,6 +474,8 @@
   <div class="card">
     <div class="card-title" id="step3-title">Step 3 — Compare & Results</div>
     <div class="actions-row" style="margin-bottom:20px;">
+      <button type="button" id="step3-dry" onclick="toggleDryFromStep3()" title="Same switch as Dry Run in Step 1 — click to change"
+        style="border-radius:999px;padding:7px 14px;font-size:12px;font-weight:700;cursor:pointer;border:1px solid"></button>
       <button class="btn btn-primary" id="btn-compare" onclick="runCompare()">
         🔍 Run Comparison
       </button>
@@ -977,7 +979,22 @@
     b.style.background = on ? 'rgba(245,158,11,.15)' : 'rgba(239,68,68,.15)';
     b.style.color      = on ? 'var(--warning)' : 'var(--danger)';
     b.style.borderColor= on ? 'rgba(245,158,11,.3)' : 'rgba(239,68,68,.3)';
+    // Same state shown next to the Step 3 / Clean-up buttons
+    const s3 = document.getElementById('step3-dry');
+    if (s3) {
+      s3.textContent = on ? '🧪 DRY RUN — nothing will change' : '⚠ LIVE — changes WILL be made';
+      s3.style.background  = on ? 'rgba(245,158,11,.15)' : 'rgba(239,68,68,.18)';
+      s3.style.color       = on ? 'var(--warning)' : 'var(--danger)';
+      s3.style.borderColor = on ? 'rgba(245,158,11,.4)' : 'rgba(239,68,68,.6)';
+    }
   }
+  function toggleDryFromStep3() {
+    const t = document.getElementById('dry-run-toggle');
+    if (t.checked && !confirm('Switch to LIVE?\n\nDelete, Draft, Publish, Fix SKUs, Change Vendor and Apply decisions will then change Shopify for real.')) return;
+    t.checked = !t.checked;
+    updateDryBadge();
+  }
+  document.addEventListener('DOMContentLoaded', updateDryBadge);
 
   // ── Check connection on load ───────────────────────────────────────────────
   async function checkConnectionStatus() {

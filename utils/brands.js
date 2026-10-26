@@ -8,7 +8,7 @@
  *   J-Line, Richmond Interiors : IN STOCK → quantity 5 · OUT OF STOCK → quantity 0
  *   Gert Snel                  : always IN STOCK, quantity 5 (CFS status is blank)
  * Flagged for later (copied as-is, marked in the log):
- *   IN STOCK with 0 on hand, blank stock status (Livingfurn has many — decision pending)
+ *   IN STOCK with 0 on hand, blank stock status (information only — values are still copied as-is)
  */
 const axios = require('axios');
 
@@ -20,7 +20,7 @@ const BRANDS = [
   { id: 335, vendor: 'House Nordic',       rule: 'as-is' },
   { id: 28,  vendor: 'Limelight',          rule: 'as-is' },
   { id: 363, vendor: 'J-Line',             rule: 'in-stock-5' },
-  { id: 364, vendor: 'Livingfurn',         rule: 'as-is', note: 'IN STOCK with 0 on hand — decision pending' },
+  { id: 364, vendor: 'Livingfurn',         rule: 'as-is' },
   { id: 365, vendor: 'Twenty 10 Design',   rule: 'as-is' },
   { id: 212, vendor: 'Richmond Interiors', rule: 'in-stock-5' },
   { id: 236, vendor: 'Actona',             rule: 'as-is' },
