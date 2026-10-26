@@ -29,6 +29,7 @@ axios.post = async (url, body) => {
     case 'productByHandle': {
       const p = products[v.handle || v.h];
       data = { productByHandle: p ? { id: p.id, title: p.title, status: p.status, vendor: p.vendor || 'Urban Deco', images: { edges: [] },
+        iid: p.iid ? { value: p.iid } : null, pcode: p.pcode ? { value: p.pcode } : null,
         variants: { edges: p.variants.map(n => ({ node: { ...n, image: null } })) } } : null }; break;
     }
     case 'productVariantsBulkDelete': { const p = byId(v.productId); p.variants = p.variants.filter(n => !v.variantsIds.includes(n.id)); data = { productVariantsBulkDelete: { userErrors: [] } }; break; }
@@ -49,7 +50,9 @@ axios.get = async (url) => {
   if (url.includes('productVariantStockJsonCFS')) return { data: [
     { productId: 1239265, productName: 'London Recliner Sofa 3 Seater Grey Leather' },
     { productId: 1239270, productName: 'London Recliner Sofa 3 Seater Brown Leather' },
-    { productId: 1244789, productName: 'Posey Emerald Green Fabric Ottoman Bed - 4ft 6in Double', productCode: 'P75' }] };
+    { productId: 1244789, productName: 'Posey Emerald Green Fabric Ottoman Bed - 4ft 6in Double', productCode: 'P75' },
+    { productId: 1276461, productName: 'Jesper Natural Mango Wood 230cm Dining Table', productCode: '13860' },
+    { productId: 1276463, productName: 'Jesper Black Mango Wood 230cm Dining Table', productCode: '13866' }] };
   throw new Error('404');
 };
 
@@ -193,6 +196,34 @@ const rows = (brownStatus) => [H_B, H_G].flatMap(h => [
       decisions: { [H_V]: { keepAs: 'gid://shopify/ProductVariant/772' } }, onlyHandles: [H_V] });
     const pv2 = products['vernal-coffee-table-grey-sintered-stone'];
     assert(pv2 && pv2.variants.map(n => n.sku).join() === 'UD-650824' && pv2.status === 'ACTIVE', JSON.stringify(pb.log));
+    // H. Other brands: own variant by iproductid / product code (Jesper — title says "Chestnut", variant says "Brown")
+    const jv = (n, sku, col) => ({ id: `gid://shopify/ProductVariant/${n}`, sku, title: col, selectedOptions: [{ name: 'Color', value: col }] });
+    const jesper = () => {
+      products['jesper-chestnut'] = { id: 'gid://shopify/Product/81', handle: 'jesper-chestnut', title: 'Jesper Dining Table - 230cm - 10 Seater - Star Base - Chestnut - Mango Wood', status: 'ACTIVE', iid: '1276462', pcode: '31021',
+        variants: [jv(811, 'UD-1276462', 'Brown'), jv(812, 'UD-1276461', 'Natural'), jv(813, 'UD-1276463', 'Black')] };
+      products['jesper-natural'] = { id: 'gid://shopify/Product/82', handle: 'jesper-natural', title: 'Jesper Dining Table - 230cm - 10 Seater - Star Base - Natural - Mango Wood', status: 'ACTIVE', iid: '1276461', pcode: '13860',
+        variants: [jv(821, 'UD-1276461', 'Natural'), jv(822, 'UD-1276463', 'Black'), jv(823, 'UD-1276462', 'Brown')] };
+    };
+    const homes = { 'UD-1276462': ['jesper-chestnut', 'jesper-natural'], 'UD-1276461': ['jesper-chestnut', 'jesper-natural'], 'UD-1276463': ['jesper-chestnut', 'jesper-natural'] };
+    const jrows = [{ handle: 'jesper-chestnut', variantSku: 'UD-1276462' }, { handle: 'jesper-natural', variantSku: 'UD-1276462' }];
+    const jbody = extra => ({ variants: jrows, cfsProductIds: [['1276461', 'active'], ['1276463', 'active']], cfsVariantAttrIds: [], skuHomes: homes, brandId: 364, ...extra });
+    reset(); jesper();
+    let jd = await call('/api/shopify/delete-variants-bulk', jbody({ dryRun: true }));
+    const jm = jd.log.map(l => `${l.handle}: ${l.message}`).join('\n'); console.log(jm);
+    assert(/jesper-chestnut: Would set .*Chestnut.* to DRAFT — this product is "Brown" \(UD-1276462\) and that is not in CFS — the other colours are sold on their own products/.test(jm), jm);
+    assert(/jesper-natural: Would delete variant "Brown"/.test(jm), jm);
+    jd = await call('/api/shopify/delete-variants-bulk', jbody({ dryRun: false }));
+    assert(products['jesper-chestnut'].status === 'DRAFT' && products['jesper-chestnut'].variants.length === 3, 'Chestnut drafted, variants kept');
+    assert.deepStrictEqual(products['jesper-natural'].variants.map(v => v.sku), ['UD-1276461', 'UD-1276463'], 'Brown deleted from Natural');
+    // Urban Deco (no brandId) keeps the title rule: can't tell → only the missing variant is deleted
+    reset(); jesper();
+    jd = await call('/api/shopify/delete-variants-bulk', { ...jbody({ dryRun: true }), brandId: null });
+    assert(/jesper-chestnut: Would delete variant "Brown"/.test(jd.log.map(l => `${l.handle}: ${l.message}`).join('\n')), 'UD unchanged');
+    // iproductid and product code disagree → flagged, nothing changed
+    reset(); jesper(); products['jesper-chestnut'].pcode = '13866';
+    jd = await call('/api/shopify/delete-variants-bulk', jbody({ dryRun: false }));
+    assert(products['jesper-chestnut'].status === 'ACTIVE' && products['jesper-chestnut'].variants.length === 3, JSON.stringify(jd.log));
+    assert(jd.log.some(l => l.status === 'flagged' && /iproductid 1276462 says "Brown" but product code 13866 says "Black"/.test(l.message)), JSON.stringify(jd.log));
     console.log('PROMOTE OWN-VARIANT TESTS PASSED');
   } catch (e) { console.error('PROMOTE OWN-VARIANT TESTS FAILED', e); process.exitCode = 1; }
   server.close();

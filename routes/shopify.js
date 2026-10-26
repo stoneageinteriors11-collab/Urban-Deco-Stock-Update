@@ -28,6 +28,36 @@ async function getCfsInfo(brandId) {
 }
 async function getCfsNames(brandId) { return (await getCfsInfo(brandId)).map; }
 
+// Which variant IS this product?
+//   Other brands (brandCtx set), in this order:
+//     1. custom.iproductid  → the variant whose SKU has that CFS product number (UD-1276462…)
+//     2. custom.product_code → the variant whose CFS product code is that code; if the code isn't
+//        active in CFS any more and only one variant is being removed, that one is the product's own
+//     iproductid and product code pointing at different variants → flag
+//     3. the title (utils/ownVariant.js), as before
+//   Urban Deco (no brandCtx): the title only, unchanged.
+function resolveOwn(product, handle, variants, cfsNames, brandCtx = null, deletingSkus = null) {
+  if (brandCtx) {
+    const iid = String(product.iid?.value || '').trim();
+    const pcode = String(product.pcode?.value || '').trim().toUpperCase();
+    const ownOf = list => ({ ok: true, ownIds: list.map(v => v.id), label: list.map(variantLabel).join(', '),
+      constraints: (list[0].selectedOptions || []).filter(o => o.value !== 'Default Title') });
+    const byIid = iid ? variants.filter(v => parseSku(v.sku).prodId === iid) : [];
+    let byCode = [];
+    if (pcode) {
+      byCode = variants.filter(v => String(brandCtx.codes.get(parseSku(v.sku).prodId) || '').trim().toUpperCase() === pcode);
+      const codeActive = [...brandCtx.codes.values()].some(c => String(c).trim().toUpperCase() === pcode);
+      if (!byCode.length && !codeActive && deletingSkus && deletingSkus.size === 1) byCode = variants.filter(v => deletingSkus.has(v.sku));
+    }
+    if (byIid.length && byCode.length && !byCode.every(v => byIid.includes(v))) {
+      return { ok: false, conflict: true, reason: `iproductid ${iid} says "${byIid.map(variantLabel).join(', ')}" but product code ${pcode} says "${byCode.map(variantLabel).join(', ')}"` };
+    }
+    if (byIid.length) return { ...ownOf(byIid), reason: `iproductid ${iid}` };
+    if (byCode.length) return { ...ownOf(byCode), reason: `product code ${pcode}` };
+  }
+  return findOwnVariants({ title: product.title, handle }, variants, cfsNames);
+}
+
 // Is the variant being removed this product's OWN variant? (see utils/ownVariant.js)
 //   own variant(s) being removed and
 //     A. the product's other variants are also sold on another active product (Carrera:
@@ -37,9 +67,14 @@ async function getCfsNames(brandId) { return (await getCfsInfo(brandId)).map; }
 //   otherwise → delete just the missing variant(s)
 // skuHomes = { sku: [handles of ACTIVE products that have this SKU] } from the page.
 // Without it (older page) the old rule applies: draft.
-function ownDraftCheck(product, handle, deletingSkus, cfsNames, skuHomes = null) {
+function ownDraftCheck(product, handle, deletingSkus, cfsNames, skuHomes = null, brandCtx = null) {
   const variants = product.variants.edges.map(e => e.node);
-  const r = findOwnVariants({ title: product.title, handle }, variants, cfsNames);
+  const r = resolveOwn(product, handle, variants, cfsNames, brandCtx, deletingSkus);
+  if (r.conflict) {
+    const remaining = variants.filter(v => !deletingSkus.has(v.sku));
+    return { draft: false, ask: true, own: { label: '?', constraints: [] }, remaining, homeless: remaining,
+      reason: `can't tell which variant this product is: ${r.reason} — please check` };
+  }
   if (!r.ok) return { draft: false, note: `couldn't tell which variant this product is (${r.reason}) — only the missing variant(s) are deleted` };
   const own = variants.filter(v => r.ownIds.includes(v.id));
   const ownSkus = own.map(v => v.sku);
@@ -182,6 +217,8 @@ const PRODUCT_BY_HANDLE_QUERY = `
       id
       title
       status
+      iid: metafield(namespace: "custom", key: "iproductid") { value }
+      pcode: metafield(namespace: "custom", key: "product_code") { value }
       images(first: 250) {
         edges { node { id altText } }
       }
@@ -352,7 +389,7 @@ function productRefSku(variantSku) {
 //   all orphaned, none in CFS feeds   → product set to DRAFT (photos untouched)
 //   all orphaned, all in CFS feeds    → keep everything
 //   all orphaned, mixed               → delete only the ones not in CFS feeds
-function decideDeletion(allVariants, orphanedSKUs, productIdSet, variantAttrIdSet, product = null, handle = '', cfsNames = new Map(), skuHomes = null, decision = null) {
+function decideDeletion(allVariants, orphanedSKUs, productIdSet, variantAttrIdSet, product = null, handle = '', cfsNames = new Map(), skuHomes = null, decision = null, brandCtx = null) {
   const inCfs = v => { const { prodId, varId } = parseSku(v.sku); return (prodId && productIdSet.has(prodId)) || (varId && variantAttrIdSet.has(varId)); };
   const orphaned = allVariants.filter(v => orphanedSKUs.has(v.sku));
   if (!orphaned.length) return { mode: 'none', toDelete: [] };
@@ -365,7 +402,7 @@ function decideDeletion(allVariants, orphanedSKUs, productIdSet, variantAttrIdSe
     result = { mode: 'mixed', toDelete: unmatched };
   }
   if (product) {
-    const own = ownDraftCheck(product, handle, new Set(result.toDelete.map(v => v.sku)), cfsNames, skuHomes);
+    const own = ownDraftCheck(product, handle, new Set(result.toDelete.map(v => v.sku)), cfsNames, skuHomes, brandCtx);
     if (own.draft) return { mode: 'draft-own', toDelete: [], reason: own.reason };
     if (own.ask && decision?.keepAs) return { mode: 'keepas', toDelete: result.toDelete, own };
     if (own.ask && decision?.draft) return { mode: 'draft-own', toDelete: [], reason: 'your decision' };
@@ -393,6 +430,7 @@ router.post('/delete-variants-image-plan', async (req, res) => {
     const byHandle = new Map();
     for (const v of variants) { if (!byHandle.has(v.handle)) byHandle.set(v.handle, new Set()); byHandle.get(v.handle).add(v.variantSku); }
     const cfsNames = await getCfsNames(brandId);
+    const brandCtx = brandId ? { codes: (await getCfsInfo(brandId)).codes } : null;
     const items = [];
     let n = 0;
     for (const [handle, orphanedSKUs] of byHandle) {
@@ -402,7 +440,7 @@ router.post('/delete-variants-image-plan', async (req, res) => {
       const data = await gql(client, PRODUCT_BY_HANDLE_QUERY, { handle });
       const product = data?.productByHandle;
       if (!product) continue;
-      const decision = decideDeletion(product.variants.edges.map(e => e.node), orphanedSKUs, productIdSet, variantAttrIdSet, product, handle, cfsNames, skuHomes, decisions[handle]);
+      const decision = decideDeletion(product.variants.edges.map(e => e.node), orphanedSKUs, productIdSet, variantAttrIdSet, product, handle, cfsNames, skuHomes, decisions[handle], brandCtx);
       if (decision.toDelete.length) items.push({ handle, removedSkus: decision.toDelete.map(v => v.sku) });
     }
     const plan = await imageSync.buildRemovalPlan({ client, items, send, check });   // loads the CFS feed only if items exist
@@ -483,6 +521,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
   const { variants = [], dryRun = true, cfsProductIds = [], cfsVariantAttrIds = [], imagePlanId = null, backupId = null, brandId = null,
     skuHomes = null, decisions = {} } = req.body;
   const decisionList = [], keepAsHandles = [];
+  const brandCtx = brandId ? { codes: (await getCfsInfo(brandId)).codes } : null;   // other brands: own variant by iproductid / product code
   // Photo plan from /delete-variants-image-plan (which photos belong only to deleted variants)
   const imagePlan = imagePlanId ? imageSync.loadRemovalPlan(imagePlanId) : null;
   if (imagePlanId && !imagePlan) return res.status(400).json({ error: 'Photo check not found (server may have restarted) — run it again' });
@@ -571,7 +610,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
               const deleting = allOrphaned
                 ? allVariants.filter(v => { const { prodId, varId } = parseSku(v.sku); return !(prodId && productIdSet.has(prodId)) && !(varId && variantAttrIdSet.has(varId)); })
                 : deletedNodes;
-              const own = ownDraftCheck(product, handle, new Set(deleting.map(v => v.sku)), await getCfsNames(brandId), skuHomes);
+              const own = ownDraftCheck(product, handle, new Set(deleting.map(v => v.sku)), await getCfsNames(brandId), skuHomes, brandCtx);
               const dec = decisions[handle] || {};
               if (own.draft) { action = 'set product to DRAFT (own variant not in CFS)'; ownReason = own.reason; }
               else if (own.ask && dec.draft) { action = 'set product to DRAFT (your decision)'; ownReason = 'your decision — whole product goes to DRAFT, variants and photos kept'; }
@@ -704,7 +743,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
         }
 
         const ownMixed = (cfsMatched.length > 0 && cfsUnmatched.length > 0)
-          ? ownDraftCheck(product, handle, new Set(cfsUnmatched.map(n => n.sku)), cfsNames, skuHomes) : null;
+          ? ownDraftCheck(product, handle, new Set(cfsUnmatched.map(n => n.sku)), cfsNames, skuHomes, brandCtx) : null;
         const decM = decisions[handle] || {};
         if (ownMixed && (ownMixed.draft || (ownMixed.ask && decM.draft))) {
           console.log(`  → Drafting "${product.title}" — own variant not in CFS`);
@@ -757,7 +796,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
           }
         }
 
-      } else if ((ownP = ownDraftCheck(product, handle, new Set(orphanedNodes.map(n => n.sku)), cfsNames, skuHomes)).draft
+      } else if ((ownP = ownDraftCheck(product, handle, new Set(orphanedNodes.map(n => n.sku)), cfsNames, skuHomes, brandCtx)).draft
                  || (ownP.ask && (decisions[handle] || {}).draft)) {
         console.log(`  → Drafting "${product.title}" — own variant not in CFS`);
         await draftBecauseOwn(ownP.draft ? ownP.reason : 'your decision');
@@ -1261,7 +1300,8 @@ router.post('/publish-products', async (req, res) => {
     const stat = n => statusBySku.get(`${handle}|${n.sku}`) || null;
     const picked = all.filter(n => selectedSkus.has(n.sku));
     if ((product.status || 'ACTIVE') !== 'ACTIVE' && !picked.length) return { action: 'none', reason: `already ${product.status}` };
-    let own = findOwnVariants({ title: product.title, handle }, all, cfsNames);
+    let own = resolveOwn(product, handle, all, cfsNames, brandId ? { codes: cfsCodes } : null);
+    if (own.conflict) return { action: 'flag', reason: `can't tell which variant this product is: ${own.reason} — please check` };
     if (!own.ok && decisionKeep.size) {
       const chosen = all.filter(n => decisionKeep.has(n.id));
       if (chosen.length) own = { ok: true, ownIds: chosen.map(n => n.id), label: chosen.map(variantLabel).join(', '), reason: 'your choice' };
