@@ -102,12 +102,16 @@
     <div class="card-title"><span class="num">3</span> Product codes</div>
     <p class="help">Copies CFS codes onto this brand's Shopify products (all statuses), same as Urban Deco's Step 4:
       <b>product_code</b> on the product and <b>variant_code</b> on each variant. Only missing or different codes are written.</p>
+    <div class="row" style="margin-bottom:10px">
+      <label class="chk"><input type="radio" name="codesScope" value="one" checked> Selected brand</label>
+      <label class="chk"><input type="radio" name="codesScope" value="all"> All 14 brands</label>
+    </div>
     <div class="row">
       <label class="chk"><input type="checkbox" id="dryRunCodes" checked> Dry run (show what would change, change nothing)</label>
-      <button class="btn" id="runCodesBtn" onclick="run('codes')" disabled>▶ Run product codes</button>
+      <button class="btn" id="runCodesBtn" onclick="run('codes')">▶ Run product codes</button>
       <button class="btn danger hidden" id="stopCodesBtn" onclick="stop()">■ Stop</button>
     </div>
-    <div class="status" id="statusCodes">Pick a brand first.</div>
+    <div class="status" id="statusCodes">Pick a brand, or choose "All 14 brands".</div>
     <div class="bar"><div id="barCodes"></div></div>
   </div>
 
@@ -208,13 +212,15 @@
              warn: v => `LIVE order-ahead for ${v} (cut-off ${$('aheadCutoff').value}).\n\nOUT OF STOCK variants due before the cut-off get stock_status_override = IN STOCK and quantity 5. Ones that no longer qualify are switched back.\n\nContinue?` },
   };
   const allBrandsScope = () => document.querySelector('input[name=aheadScope]:checked')?.value === 'all';
+  const allCodesScope  = () => document.querySelector('input[name=codesScope]:checked')?.value === 'all';
+  const isAll = kind => kind === 'ahead' ? allBrandsScope() : kind === 'codes' ? allCodesScope() : false;
   let runningKind = null;
 
   async function run(kind) {
     const u = UI[kind];
-    if (runId || (!selected && !(kind === 'ahead' && allBrandsScope()))) { if (!runId) alert('Pick a brand first.'); return; }
+    if (runId || (!selected && !isAll(kind))) { if (!runId) alert('Pick a brand first.'); return; }
     if (kind === 'ahead' && !$('aheadCutoff').value) { alert('Set the cut-off date.'); return; }
-    const who = kind === 'ahead' && allBrandsScope() ? 'ALL 14 brands' : selected.vendor;
+    const who = isAll(kind) ? 'ALL 14 brands' : selected.vendor;
     const dryRun = $(u.dry).checked;
     if (!dryRun && !confirm(u.warn(who))) return;
     runningKind = kind;
@@ -222,8 +228,10 @@
     $(u.status).className = 'status'; $(u.status).textContent = 'Starting…'; $(u.bar).style.width = '0';
     try {
       const res = await fetch(u.url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(kind === 'ahead'
-        ? { brandIds: allBrandsScope() ? brands.map(b => b.id) : [selected.id], cutoff: $('aheadCutoff').value, dryRun }
-        : { brandId: selected.id, dryRun }) });
+        ? { brandIds: isAll(kind) ? brands.map(b => b.id) : [selected.id], cutoff: $('aheadCutoff').value, dryRun }
+        : kind === 'codes'
+          ? { brandIds: isAll(kind) ? brands.map(b => b.id) : [selected.id], dryRun }
+          : { brandId: selected.id, dryRun }) });
       if (!res.ok) throw new Error((await res.json()).error || res.statusText);
       const reader = res.body.getReader(), dec = new TextDecoder();
       let buf = '';
@@ -248,7 +256,7 @@
       $(u.status).className = 'status err'; $(u.status).textContent = 'Error: ' + e.message;
     } finally {
       runId = null; runningKind = null;
-      $('runBtn').disabled = $('runCodesBtn').disabled = !selected; $('runAheadBtn').disabled = false; $(u.stop).classList.add('hidden');
+      $('runBtn').disabled = !selected; $('runCodesBtn').disabled = false; $('runAheadBtn').disabled = false; $(u.stop).classList.add('hidden');
     }
   }
 

@@ -105,6 +105,11 @@ const sse = async body => {
     const t2 = await (await fetch(base + '/api/brands/codes-sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ brandId: 363, dryRun: false }) })).text();
     const k = writes.mf.map(m => `${m.ownerId}.${m.key}=${m.value}`).sort();
     assert.deepStrictEqual(k, ['P1.product_code=LMP-01', 'V1.variant_code=LMP-01', 'V22.variant_code=VAS-L']);
+    // codes for several brands in one run (brandIds); log rows carry the brand
+    const multi = await (async () => { const t = await (await fetch(base + '/api/brands/codes-sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ brandIds: [363, 212], dryRun: true }) })).text();
+      return t.split('\n\n').filter(l => l.startsWith('data: ')).map(l => JSON.parse(l.slice(6))).pop(); })();
+    assert.strictEqual(multi.brand, '2 brands', JSON.stringify(multi).slice(0, 300));
+    assert(multi.log.some(l => l.brand === 'J-Line'));
     // ── Order-ahead (pre-Christmas) ──
     const sseAt = async (path, body) => { const t = await (await fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).text();
       return t.split('\n\n').filter(l => l.startsWith('data: ')).map(l => JSON.parse(l.slice(6))).pop(); };

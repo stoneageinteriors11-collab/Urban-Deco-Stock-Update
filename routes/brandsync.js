@@ -4,7 +4,7 @@
  *   GET  /list             brands + their rule text
  *   GET  /:id/count        Shopify products + variants for this vendor, CFS products + SKUs
  *   POST /stock-sync       { brandId, dryRun }  → live progress (SSE), then a log
- *   POST /codes-sync       { brandId, dryRun }  → Step 2: product_code / variant_code (SSE)
+ *   POST /codes-sync       { brandIds, dryRun } → product_code / variant_code, one brand or all 14 (SSE)
  *   POST /compare          { brandId }          → Step 4 clean-up: Compare & Results for one brand
  *   POST /order-ahead      { brandIds, cutoff, dryRun } → pre-Christmas order-ahead override (SSE)
  *   POST /cancel           { runId }            → Stop
@@ -366,9 +366,12 @@ const CODE_PRODUCTS = `
   }`;
 
 router.post('/codes-sync', async (req, res) => {
-  const brand = getBrand(req.body?.brandId);
+  // brandIds: one brand or all 14 (brandId still accepted)
+  const ids = (Array.isArray(req.body?.brandIds) ? req.body.brandIds : [req.body?.brandId]).map(Number).filter(Boolean);
+  const brands = ids.map(getBrand).filter(Boolean);
   const dryRun = req.body?.dryRun !== false && req.body?.dryRun !== 'false';
-  if (!brand) return res.status(400).json({ error: 'Pick a brand' });
+  if (!brands.length) return res.status(400).json({ error: 'Pick a brand' });
+  const label = brands.length === 1 ? brands[0].vendor : `${brands.length} brands`;
   let client;
   try { client = graphqlClient(); } catch (e) { return res.status(400).json({ error: e.message }); }
 
@@ -380,7 +383,7 @@ router.post('/codes-sync', async (req, res) => {
   const send = o => { if (!res.writableEnded && !res.destroyed) res.write(`data: ${JSON.stringify(o)}\n\n`); };
   const ping = setInterval(() => { if (!res.writableEnded && !res.destroyed) res.write(': ping\n\n'); }, 15000);
   startKeepAwake();
-  console.log(`▶ Other Brands codes — ${brand.vendor} (${brand.id}) dryRun=${dryRun}`);
+  console.log(`▶ Other Brands codes — ${brands.map(b => b.vendor).join(', ')} dryRun=${dryRun}`);
   const runId = crypto.randomBytes(6).toString('hex');
   send({ type: 'run_id', runId });
 
@@ -388,15 +391,19 @@ router.post('/codes-sync', async (req, res) => {
   const c = { products: 0, productCodes: 0, variants: 0, updated: 0, unchanged: 0, notInCfs: 0, flagged: 0, failed: 0 };
   const finish = (extra = {}) => {
     clearInterval(ping); cancelled.delete(runId); stopKeepAwake();
-    console.log(`  ✓ Other Brands codes ${brand.vendor} done — ${JSON.stringify(c)}${extra.cancelled ? ' (stopped)' : ''}`);
-    send({ type: 'done', kind: 'codes', dryRun, brand: brand.vendor, counts: c, log, ...extra });
+    console.log(`  ✓ Other Brands codes ${label} done — ${JSON.stringify(c)}${extra.cancelled ? ' (stopped)' : ''}`);
+    send({ type: 'done', kind: 'codes', dryRun, brand: label, counts: c, log, ...extra });
     if (!res.writableEnded) res.end();
   };
 
   try {
+   for (const brand of brands) {
+    if (cancelled.has(runId)) return finish({ cancelled: true });
     send({ type: 'status', message: `Loading CFS feed for ${brand.vendor} (brand ${brand.id})…` });
-    const codes = buildBrandCodes(await fetchBrandFeed(brand.id));
-    send({ type: 'status', message: `CFS: ${codes.size} SKUs with codes` });
+    let codes;
+    try { codes = buildBrandCodes(await fetchBrandFeed(brand.id)); }
+    catch (e) { c.failed++; log.push({ brand: brand.vendor, handle: '-', sku: '-', status: 'error', message: `${brand.vendor}: CFS feed failed — ${e.message} (brand skipped)` }); continue; }
+    send({ type: 'status', message: `${brand.vendor} — CFS: ${codes.size} SKUs with codes` });
     const vendor = brand.vendor;
 
     const products = [];
@@ -405,12 +412,12 @@ router.post('/codes-sync', async (req, res) => {
       if (cancelled.has(runId)) return finish({ cancelled: true });
       const d = await gql(client, CODE_PRODUCTS, { first: 50, after, q: `vendor:"${vendor}"` });
       products.push(...d.products.nodes.filter(p => sameVendor(p.vendor, vendor)));
-      send({ type: 'fetch', fetched: products.length });
+      send({ type: 'fetch', fetched: products.length, brand: vendor });
       after = d.products.pageInfo.hasNextPage ? d.products.pageInfo.endCursor : null;
       if (after) await sleep(150);
     } while (after);
     send({ type: 'status', message: `Shopify: ${products.length} ${vendor} products` });
-    if (!products.length) log.push({ handle: '-', sku: '-', status: 'warning', message: `No Shopify products found with vendor "${vendor}"` });
+    if (!products.length) log.push({ brand: vendor, handle: '-', sku: '-', status: 'warning', message: `No Shopify products found with vendor "${vendor}"` });
 
     let done = 0;
     for (const p of products) {
@@ -461,10 +468,11 @@ router.post('/codes-sync', async (req, res) => {
         } catch (e) { c.failed++; rows.push({ handle: p.handle, sku: '-', status: 'error', message: e.message }); }
         await sleep(100);
       }
-      log.push(...rows);
-      if (done % 10 === 0 || done === products.length) send({ type: 'progress', done, total: products.length, counts: c });
+      log.push(...rows.map(r => ({ ...r, brand: vendor })));
+      if (done % 10 === 0 || done === products.length) send({ type: 'progress', done, total: products.length, brand: vendor, counts: c });
       if (done % 100 === 0) console.log(`  … ${brand.vendor} codes: ${done}/${products.length} products`);
     }
+   }
     finish();
   } catch (e) {
     log.push({ handle: '-', sku: '-', status: 'error', message: e.message });
