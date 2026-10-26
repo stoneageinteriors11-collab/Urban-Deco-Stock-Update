@@ -495,6 +495,7 @@ const COMPARE_PRODUCTS = `
       nodes {
         handle title vendor status
         metafield(namespace: "custom", key: "product_code") { value }
+        iid: metafield(namespace: "custom", key: "iproductid") { value }
         variants(first: 250) { nodes {
           sku price inventoryQuantity barcode
           selectedOptions { name value }
@@ -557,6 +558,7 @@ router.post('/compare', async (req, res) => {
             barcode: v.barcode || '', price: v.price || '', inventoryQty: v.inventoryQuantity ?? '',
             status: (p.status || '').toLowerCase(),
             shopifyVariantCode: v.metafield?.value || '', shopifyProductCode: p.metafield?.value || '',
+            productIid: String(p.iid?.value || '').trim(),
           });
         }
       }
@@ -569,6 +571,16 @@ router.post('/compare', async (req, res) => {
       productCodesBySku, productCodesByProdId, variantCodesBySku, variantCodesByAttrId,
       cfsVarCodeSet, cfsProductCodeToStatus,
     );
+
+    // A saved PRODUCT code belongs to the product's own variant (the one its iproductid points at).
+    // For any other variant it's not evidence — e.g. Jesper Natural's code 13860 doesn't vouch for
+    // the Brown variant UD-1276462 on that product → Orphaned, not "Check: SKU not in CFS".
+    for (const r of results) {
+      if (r.matchStatus !== 'code-only' || !/^saved product code/.test(r.codeOnlyNote || '') || !r.productIid) continue;
+      if (parseSku(r.variantSku).prodId !== r.productIid) { r.matchStatus = 'orphaned'; delete r.codeOnlyNote; }
+    }
+    summary.orphaned = results.filter(r => r.matchStatus === 'orphaned').length;
+    summary.codeOnly = results.filter(r => r.matchStatus === 'code-only').length;
 
     // Safety: "not in this brand's CFS feed" — is it in another brand's feed?
     let otherBrand = 0, crossNote = null;

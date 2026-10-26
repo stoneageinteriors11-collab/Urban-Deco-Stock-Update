@@ -27,6 +27,9 @@ const shop = [
   { handle: 'sofa', title: 'Sofa (wrong vendor)', vendor: 'J-Line', status: 'ACTIVE', metafield: null, variants: { nodes: [v('UD-55')] } },
   { handle: 'table', title: 'Table', vendor: 'J-Line', status: 'ACTIVE', metafield: null, variants: { nodes: [v('UD-77')] } },
   { handle: 'old', title: 'Old', vendor: 'J-Line', status: 'DRAFT', metafield: null, variants: { nodes: [v('UD-13')] } },
+  // Jesper-style: product code L1 belongs to its own variant UD-10 (iproductid 10); the extra UD-15 isn't in CFS
+  { handle: 'lamp-set', title: 'Lamp Set', vendor: 'J-Line', status: 'ACTIVE', metafield: { value: 'L1' }, iid: { value: '10' }, variants: { nodes: [v('UD-15')] } },
+  { handle: 'lamp-own', title: 'Lamp Own', vendor: 'J-Line', status: 'ACTIVE', metafield: { value: 'L1' }, iid: { value: '16' }, variants: { nodes: [v('UD-16')] } },
   { handle: 'x', title: 'Not J-Line', vendor: 'J-Line Extra', status: 'ACTIVE', metafield: null, variants: { nodes: [v('UD-14')] } },
 ];
 axios.post = async (url, body) => ({ data: { data: { products: { pageInfo: { hasNextPage: false }, nodes: shop } } } });
@@ -41,10 +44,11 @@ const server = app.listen(0);
     assert(r.success, JSON.stringify(r));
     const st = Object.fromEntries(r.results.map(x => [x.variantSku, x.matchStatus]));
     console.log(st, r.summary);
-    assert.deepStrictEqual(st, { 'UD-10': 'ok', 'UD-11-111': 'ok', 'UD-11-999': 'cfs-product', 'UD-12': 'orphaned', 'UD-55': 'other-brand', 'UD-77': 'other-brand', 'UD-13': 'draft' });
+    assert.deepStrictEqual(st, { 'UD-10': 'ok', 'UD-11-111': 'ok', 'UD-11-999': 'cfs-product', 'UD-12': 'orphaned', 'UD-55': 'other-brand', 'UD-77': 'other-brand', 'UD-13': 'draft',
+      'UD-15': 'orphaned', 'UD-16': 'code-only' });
     assert(r.results.find(x => x.variantSku === 'UD-55').otherBrandNote.includes('Beehive (brand 315)'));
     assert(r.results.find(x => x.variantSku === 'UD-77').otherBrandNote.includes('Urban Deco'));
-    assert.strictEqual(r.summary.orphaned, 1); assert.strictEqual(r.summary.otherBrand, 2);
+    assert.strictEqual(r.summary.orphaned, 2); assert.strictEqual(r.summary.otherBrand, 2); assert.strictEqual(r.summary.codeOnly, 1);
     assert(!r.results.some(x => x.handle === 'x'), 'exact vendor only');
     // second run reuses the cross-brand index (only this brand's feed is fetched again)
     const before = feedCalls;
