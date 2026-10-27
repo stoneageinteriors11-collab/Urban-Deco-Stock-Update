@@ -568,18 +568,24 @@ async function storeProducts(client) {
 /**
  * products: iterable of { handle, title, vendor, status, variants:[{sku, price, inventoryQuantity, selectedOptions}] }
  * Returns one row per variant that belongs to this brand, on products with a different vendor.
+ * Only ACTIVE products are checked — draft / archived ones are skipped from the start.
  * A product that ALSO has SKUs not in this brand's feed is "mixed" — shown, but not offered for a one-click fix.
  */
 function wrongVendorRows(products, brand, feed, otherIdx = null) {
-  const prodIds = new Set(), varIds = new Set();
+  const prodIds = new Set(), varIds = new Set(), names = new Map();   // names: prodId / varId → CFS product name
   for (const p of feed) {
-    prodIds.add(String(p.productId));
-    for (const v of (Array.isArray(p.variants) ? p.variants : [])) varIds.add(String(v.variantId));
+    prodIds.add(String(p.productId)); names.set('p' + p.productId, p.productName || '');
+    for (const v of (Array.isArray(p.variants) ? p.variants : [])) {
+      varIds.add(String(v.variantId));
+      names.set('v' + v.variantId, `${p.productName || ''}${v.variantOption ? ' — ' + v.variantOption : ''}`);
+    }
   }
+  const cfsName = sku => { const { prodId, varId } = parseSku(sku); return (varId && names.get('v' + varId)) || names.get('p' + prodId) || ''; };
   const mine = sku => { const { prodId, varId } = parseSku(sku); return (prodId && prodIds.has(prodId)) || (varId && varIds.has(varId)); };
   const rows = [];
   for (const p of products) {
     if (sameVendor(p.vendor, brand.vendor)) continue;
+    if (p.status !== 'active') continue;          // draft / archived products are left out entirely
     const withSku = p.variants.filter(v => String(v.sku || '').trim());
     const hits = withSku.filter(v => mine(v.sku.trim()));
     if (!hits.length) continue;
@@ -590,7 +596,8 @@ function wrongVendorRows(products, brand, feed, otherIdx = null) {
       return `${v.sku.trim()} (${h ? h.vendor : 'not in any CFS feed'})`;
     };
     const mixed = rest.length > 0;
-    const note = `Vendor on Shopify is "${p.vendor || '(blank)'}", but this SKU is in ${brand.vendor}'s CFS feed.`
+    const noteFor = v => `Vendor on Shopify is "${p.vendor || '(blank)'}", but SKU ${v.sku.trim()} is in ${brand.vendor}'s CFS feed (brand ${brand.id})`
+      + (cfsName(v.sku.trim()) ? ` as "${cfsName(v.sku.trim())}".` : '.')
       + (mixed ? ` This product also has other SKUs: ${rest.slice(0, 5).map(where).join(', ')}${rest.length > 5 ? ` … +${rest.length - 5} more` : ''} — fix it by hand.`
                : ` Change Vendor sets it to "${brand.vendor}".`);
     for (const v of hits) {
@@ -600,7 +607,7 @@ function wrongVendorRows(products, brand, feed, otherIdx = null) {
         option1: opts[0] || '', option2: opts[1] || '', option3: opts[2] || '',
         price: v.price || '', inventoryQty: v.inventoryQuantity ?? '', status: p.status,
         matchStatus: 'wrong-vendor', currentVendor: p.vendor || '', otherBrandVendor: brand.vendor,
-        wrongVendorMixed: mixed, otherBrandNote: note,
+        wrongVendorMixed: mixed, otherBrandNote: noteFor(v), cfsName: cfsName(v.sku.trim()),
       });
     }
   }
@@ -673,6 +680,7 @@ router.post('/compare', async (req, res) => {
           r.matchStatus = 'other-brand';
           r.otherBrandNote = `SKU found in CFS under ${hit.label}, not ${brand.vendor} — check the vendor on Shopify. Never deleted here.`;
           r.otherBrandVendor = hit.vendor;
+          r.currentVendor = brand.vendor;
           otherBrand++;
         }
       }

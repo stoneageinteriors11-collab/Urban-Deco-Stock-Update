@@ -2825,18 +2825,26 @@ async function testConnection() {
   // ── Export Results CSV ────────────────────────────────────────────────────
   function exportCSV() {
     if (!allResults.length) return;
-    const headers = ['Handle','Product Title','Variant','SKU','Price','Inventory Qty','Status','Product Code','Note','Same SKU also on'];
+    const q = v => `"${String(v ?? '').replace(/"/g,'""')}"`;
+    const reason = r => r.codeOnlyNote || r.otherBrandNote || '';
+    const headers = ['Handle','Product Title','Variant','SKU','Price','Inventory Qty','Status','Product Status',
+      'Vendor on Shopify','Should be vendor','Mixed brands','CFS product name','Product Code','Reason','Same SKU also on'];
     const rows = filtered.map(r => [
       r.handle,
-      `"${(r.title||'').replace(/"/g,'""')}"`,
-      `"${[r.option1,r.option2,r.option3].filter(Boolean).join(' / ')||'Default'}"`,
+      q(r.title),
+      q([r.option1,r.option2,r.option3].filter(Boolean).join(' / ')||'Default'),
       r.variantSku,
       r.price,
       r.inventoryQty,
       r.matchStatus,
+      r.status || '',
+      q(r.currentVendor || BRAND?.vendor || 'Urban Deco'),
+      q(r.otherBrandVendor || ''),
+      r.matchStatus === 'wrong-vendor' ? (r.wrongVendorMixed ? 'yes - fix by hand' : 'no') : '',
+      q(r.cfsName || ''),
       r.productCode || '',
-      `"${(r.codeOnlyNote || '').replace(/"/g,'""')}"`,
-      `"${(r.sharedSkuHandles || []).join(' | ')}"`,
+      q(reason(r)),
+      q((r.sharedSkuHandles || []).join(' | ')),
     ]);
     const csv  = [headers, ...rows].map(r => r.join(',')).join('\n');
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });

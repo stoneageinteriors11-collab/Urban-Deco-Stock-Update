@@ -36,7 +36,9 @@ const shop = [
 // whole-store variant list (reverse vendor check): the J-Line products above + products with other vendors
 const storeExtra = [
   { handle: 'clock', title: 'Clock', vendor: 'Birlea', status: 'ACTIVE', variants: { nodes: [v('UD-20')] } },          // J-Line SKU, wrong vendor
-  { handle: 'mixed', title: 'Mixed', vendor: 'Urban Deco', status: 'DRAFT', variants: { nodes: [v('UD-20'), v('UD-77')] } }, // J-Line + Urban Deco
+  { handle: 'mixed', title: 'Mixed', vendor: 'Urban Deco', status: 'ACTIVE', variants: { nodes: [v('UD-20'), v('UD-77')] } }, // J-Line + Urban Deco
+  { handle: 'clock-draft', title: 'Clock (draft)', vendor: 'Birlea', status: 'DRAFT', variants: { nodes: [v('UD-20')] } },  // draft → skipped
+  { handle: 'clock-arch', title: 'Clock (archived)', vendor: 'Birlea', status: 'ARCHIVED', variants: { nodes: [v('UD-20')] } }, // archived → skipped
   { handle: 'ud', title: 'UD Table', vendor: 'Urban Deco', status: 'ACTIVE', variants: { nodes: [v('UD-77')] } },        // not J-Line
 ];
 const storeNodes = [...shop, ...storeExtra].flatMap(p => p.variants.nodes.map(x => ({ ...x, product: { id: 'gid://' + p.handle, handle: p.handle, title: p.title, vendor: p.vendor, status: p.status } })));
