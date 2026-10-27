@@ -44,20 +44,30 @@ assert(core.parseUdSku('ABC-1') === null);
 const plan = core.buildProductPlan({ product, feedById: feed });
 console.log(JSON.stringify(plan.counts), plan.errors, plan.warnings);
 assert(plan.ok);
-assert.strictEqual(plan.counts.proposed, 18);
+// CFS 5-photo limit: each colour = main + first 4 gallery photos (CFSUD drops -06 first, the limit then drops -05)
+assert.strictEqual(plan.counts.proposed, 15);
 assert.strictEqual(plan.counts.reuse, 15);
-assert.strictEqual(plan.counts.upload, 3);
-assert.strictEqual(plan.counts.excluded, 3);
-// same product for another brand (cfsudRule off): the 3 last photos come back
+assert.strictEqual(plan.counts.upload, 0);
+assert.strictEqual(plan.counts.excluded, 6);
+assert.strictEqual(plan.counts.excludedCfsud, 3); assert.strictEqual(plan.counts.excludedLimit, 3);
+assert(plan.groups.every(g => g.excluded.some(x => x.rule === 'limit' && x.url.endsWith('-05.jpg') && x.galleryPosition === 5)));
+// same product for another brand (cfsudRule off): -06 is no longer dropped by CFSUD, but the limit still keeps 5
 const planBrand = core.buildProductPlan({ product, feedById: feed, choices: { cfsudRule: false } });
-assert(planBrand.ok); assert.strictEqual(planBrand.counts.excluded, 0); assert.strictEqual(planBrand.counts.proposed, 21);
+assert(planBrand.ok); assert.strictEqual(planBrand.counts.proposed, 15);
+assert.strictEqual(planBrand.counts.excludedCfsud, 0); assert.strictEqual(planBrand.counts.excludedLimit, 6);
+// without the 5-photo limit the other-brand plan would have had 21 photos — limit unit cases:
+let lim = core.applyGalleryLimit({ gallery: ['a', 'b', 'c'] }, ['a', 'b', 'c']);
+assert.deepStrictEqual(lim, { gallery: ['a', 'b', 'c'], excluded: [] });
+lim = core.applyGalleryLimit({ gallery: ['g1', 'g3', 'g4', 'g5', 'g6', 'g7'] }, ['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8']);
+assert.deepStrictEqual(lim.gallery, ['g1', 'g3', 'g4', 'g5'], 'first 4 LEFT after the filters, CFS order');
+assert.deepStrictEqual(lim.excluded.map(x => x.galleryPosition), [6, 7]);
 assert.strictEqual(plan.counts.detach, 0);
 assert.strictEqual(plan.counts.variantChanges, 0);
 assert.strictEqual(plan.counts.altFix, 0);
 assert.strictEqual(plan.featured.proposed, product.featuredMedia.id);
 console.log(plan.proposed.map(o => `${o.position}. ${o.action.padEnd(6)} ${o.group.padEnd(5)} ${core.fileNameFromUrl(o.src).slice(-14)}`).join('\n'));
-assert.deepStrictEqual(plan.proposed.map(o => o.group), [...Array(6).fill('White'), ...Array(6).fill('Grey'), ...Array(6).fill('Beige')]);
-assert(plan.proposed[5].action === 'upload' && plan.proposed[5].src.endsWith('-05.jpg'));
+assert.deepStrictEqual(plan.proposed.map(o => o.group), [...Array(5).fill('White'), ...Array(5).fill('Grey'), ...Array(5).fill('Beige')]);
+assert(!plan.proposed.some(o => /-05\.jpg$/.test(o.src || '')), 'no -05 photos (over the limit)');
 
 // ── Live store already showing the excluded -06 image → default detach ──
 const p2 = JSON.parse(JSON.stringify(product));
@@ -69,7 +79,7 @@ const plan2 = core.buildProductPlan({ product: p2, feedById: feed });
 assert.strictEqual(plan2.detach.length, 1);
 assert.strictEqual(plan2.detach[0].kind, 'excluded-live');
 const manual = plan2.proposed.find(o => o.mediaId === 'gid://shopify/MediaImage/998');
-assert(manual && manual.action === 'keep' && manual.position === 13, 'manual Grey photo stays at end of Grey group');
+assert(manual && manual.action === 'keep' && manual.position === 11, 'manual Grey photo stays at end of Grey group');
 // user chooses to keep the excluded one instead
 const plan3 = core.buildProductPlan({ product: p2, feedById: feed, choices: { detach: { 'gid://shopify/MediaImage/999': false } } });
 assert.strictEqual(plan3.detach.length, 0);
@@ -86,7 +96,7 @@ assert(!core.buildProductPlan({ product: p4, feedById: feed }).ok, 'one CFS prod
 const whiteMainUrl = feed.get('144250').mainImage;
 const rec = { images: [{ mediaId: product.media.nodes[0].id, src: whiteMainUrl, sha: 'AAA' }] };
 const plan5 = core.buildProductPlan({ product, feedById: feed, record: rec, cfsHash: new Map([[whiteMainUrl, { sha: 'BBB', bytes: 1 }]]) });
-assert.strictEqual(plan5.counts.upload, 4);
+assert.strictEqual(plan5.counts.upload, 1);   // only the changed main photo (-05s are over the 5-photo limit)
 assert(plan5.detach.some(d => d.kind === 'replaced') === false, 'featured image is protected from detach');
 assert(plan5.warnings.some(w => /featured/.test(w)));
 
@@ -98,13 +108,16 @@ for (const [cfsId, label] of [['144250','White'],['601535','Grey'],['1262189','B
   p6.media.nodes.splice(idx + 1, 0, { id: `gid://shopify/MediaImage/${n++}`, alt: label, mediaContentType: 'IMAGE',
     image: { url: 'https://cdn.shopify.com/s/files/1/x/' + core.fileNameFromUrl(feed.get(cfsId).galleryImages[4]) } });
 }
+// a product already showing -05 photos: they're over the CFS 5-photo limit → detached by default
 const plan6 = core.buildProductPlan({ product: p6, feedById: feed });
-assert(plan6.noChange, 'second run should change nothing: ' + JSON.stringify(plan6.counts));
+assert.strictEqual(plan6.detach.length, 3); assert(plan6.detach.every(d => d.kind === 'excluded-live' && /5-photo limit/.test(d.reason)), JSON.stringify(plan6.detach));
+// main + first 4 already there → nothing to do
+assert(plan.noChange, 'second run should change nothing: ' + JSON.stringify(plan.counts));
 console.log('CSV lines:', core.plansToCsv([plan, plan2]).split('\n').length);
 console.log('ALL TESTS PASSED');
 // featured can be switched to a new upload slot
-const plan7 = core.buildProductPlan({ product, feedById: feed, choices: { featured: '144250:g5' } });
-assert(plan7.proposed[0].key === '144250:g5' && !plan7.noChange);
+const plan7 = core.buildProductPlan({ product, feedById: feed, choices: { featured: '144250:g4' } });
+assert(plan7.proposed[0].key === '144250:g4' && !plan7.noChange);
 console.log('FEATURED TEST PASSED');
 // not found in CFS → clear message + flag
 const feedNone = new Map();
@@ -129,16 +142,16 @@ console.log('NOT-IN-CFS TEST PASSED');
   const oldW02 = product.media.nodes[2].id;
   cfsHash.set(w02, { sha: 'new', thumb: mkThumb(200), w: 1200, h: 1200 });
   pl = core.buildProductPlan({ product, feedById: feed, cfsHash, shopHash });
-  assert(pl.counts.upload === 4 && pl.counts.replacedSameName === 1, JSON.stringify(pl.counts));
+  assert(pl.counts.upload === 1 && pl.counts.replacedSameName === 1, JSON.stringify(pl.counts));
   assert(pl.detach.some(d => d.mediaId === oldW02 && d.kind === 'replaced'));
   assert(pl.proposed[2].action === 'upload' && pl.proposed[2].replaces === oldW02, 'new -02 takes the old one\'s place');
   // borderline → "please check": default upload, user can choose to reuse
   const t = Buffer.alloc(3072, 100); for (let i = 0; i < 3 * 25; i++) t[i] = 200;   // ~2.4% changed
   cfsHash.set(w02, { sha: 'new', thumb: t.toString('base64'), w: 1200, h: 1200 });
   pl = core.buildProductPlan({ product, feedById: feed, cfsHash, shopHash });
-  assert(pl.counts.unsure === 1 && pl.counts.upload === 4, JSON.stringify(pl.counts));
+  assert(pl.counts.unsure === 1 && pl.counts.upload === 1, JSON.stringify(pl.counts));
   pl = core.buildProductPlan({ product, feedById: feed, cfsHash, shopHash, choices: { reuseUnsure: { [oldW02]: true } } });
-  assert(pl.counts.unsure === 0 && pl.counts.upload === 3 && pl.proposed[2].mediaId === oldW02);
+  assert(pl.counts.unsure === 0 && pl.counts.upload === 0 && pl.proposed[2].mediaId === oldW02);
   // never match a White CFS photo to a Grey Shopify photo by picture alone
   const p2 = JSON.parse(JSON.stringify(product));
   p2.media.nodes[7].image.url = 'https://cdn.shopify.com/x/renamed.jpg';    // Grey -02 renamed
@@ -151,9 +164,9 @@ console.log('NOT-IN-CFS TEST PASSED');
   const pb = JSON.parse(JSON.stringify(product));
   pb.media.nodes.forEach((m, i) => { m.image.url = `https://cdn.shopify.com/x/Bern-old-101052-${i}.jpg`; m.alt = ''; });
   const off = core.buildProductPlan({ product: pb, feedById: feed });
-  assert(off.counts.upload === 18 && off.counts.keep === 15 && off.counts.detach === 0, 'OFF: old photos kept alongside ' + JSON.stringify(off.counts));
+  assert(off.counts.upload === 15 && off.counts.keep === 15 && off.counts.detach === 0, 'OFF: old photos kept alongside ' + JSON.stringify(off.counts));
   const on = core.buildProductPlan({ product: pb, feedById: feed, choices: { replaceMode: true } });
-  assert(on.counts.proposed === 18 && on.counts.detach === 15 && on.counts.keep === 0, 'ON: clean CFS gallery ' + JSON.stringify(on.counts));
+  assert(on.counts.proposed === 15 && on.counts.detach === 15 && on.counts.keep === 0, 'ON: clean CFS gallery ' + JSON.stringify(on.counts));
   assert(on.proposed[0].key === '144250:main' && on.warnings.some(w => /Featured photo changes/.test(w)), 'featured moves to CFS main');
   assert(on.proposed.every(o => o.alt === o.group), 'all photos get colour alt text');
   // keep one specific old photo even in replace mode
@@ -192,7 +205,12 @@ console.log('NOT-IN-CFS TEST PASSED');
   const sq = new Map(); for (const rec2 of feed.values()) for (const u of [rec2.mainImage, ...rec2.galleryImages]) sq.set(u, { w: 2000, h: 2000, edgeWhite: 0 });
   sq.set(feed.get('144250').galleryImages[5], { w: 2000, h: 2000, edgeWhite: 1 });
   const pm = core.buildProductPlan({ product, feedById: feed, cfsHash: sq });
-  assert(pm.counts.proposed === 18 && pm.counts.excludedCfsud === 3 && pm.counts.excludedWhiteBg === 0);
+  assert(pm.counts.proposed === 15 && pm.counts.excludedCfsud === 3 && pm.counts.excludedWhiteBg === 0 && pm.counts.excludedLimit === 3, JSON.stringify(pm.counts));
+  // filters first, then the limit: White loses g2 (cut-out) → the next photo moves up, still 4 gallery photos
+  sq.set(feed.get('144250').galleryImages[1], { w: 2000, h: 2000, edgeWhite: 1 });
+  const pw = core.buildProductPlan({ product, feedById: feed, cfsHash: sq });
+  const white = pw.groups.find(g => g.cfsId === '144250');
+  assert.strictEqual(white.gallery.length, 4); assert(white.gallery[3].endsWith('-05.jpg'), 'g5 moves up after g2 is skipped');
   console.log('PHOTO-FILTER TESTS PASSED');
 }
 // ── Step 3: photos to remove when variants are deleted ──

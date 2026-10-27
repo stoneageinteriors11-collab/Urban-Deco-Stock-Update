@@ -126,6 +126,21 @@ function applyPhotoFilters(r, cfsHash, filters) {
   return { gallery, excluded, warnings };
 }
 
+// ── CFS 5-photo limit (all brands) ───────────────────────────────────────────
+// The CFS site shows the main photo + the first 4 gallery photos, however many the feed
+// has (e.g. Herringford Walnut: 8 in the feed, 01–04 shown). Applied LAST, after the
+// CFSUD rule and the photo-type filters, keeping CFS order — so up to 5 good photos.
+const GALLERY_LIMIT = 4;
+function applyGalleryLimit(r, original = []) {
+  if (r.gallery.length <= GALLERY_LIMIT) return { gallery: r.gallery, excluded: [] };
+  const excluded = r.gallery.slice(GALLERY_LIMIT).map(u => {
+    const pos = original.indexOf(u) + 1 || null;
+    return { url: u, galleryPosition: pos, rule: 'limit',
+      reason: `Over the CFS 5-photo limit${pos ? ` (gallery photo ${pos})` : ''} — CFS shows the main photo + first ${GALLERY_LIMIT} gallery photos` };
+  });
+  return { gallery: r.gallery.slice(0, GALLERY_LIMIT), excluded };
+}
+
 // ── Visual comparison ────────────────────────────────────────────────────────
 // Each image gets a 32x32 colour thumbnail (made in routes/imagesync.js with sharp)
 // plus its width/height. We count how much of the thumbnail CLEARLY changed:
@@ -237,6 +252,9 @@ function buildProductPlan(input) {
     const f = applyPhotoFilters(r, cfsHash, filters);
     r.gallery = f.gallery; r.excluded = [...r.excluded, ...f.excluded];
     for (const w of f.warnings) warnings.push(`${g.vSKU}: ${w}`);
+    // CFS 5-photo limit runs last: main + first 4 gallery photos that are left
+    const lim = applyGalleryLimit(r, Array.isArray(g.rec.galleryImages) ? g.rec.galleryImages : []);
+    r.gallery = lim.gallery; r.excluded = [...r.excluded, ...lim.excluded];
     const label = colourOpt ? ([...g.colours][0] || '') : (product.title || '');
     groups.push({
       cfsId, vSKU: g.vSKU, label,
@@ -361,7 +379,7 @@ function buildProductPlan(input) {
       kind = 'replaced'; reason = `CFS picture changed at the same URL — replaced by new upload`; defaultDetach = true;
     } else if (exclMatch) {
       kind = 'excluded-live'; defaultDetach = true;
-      reason = `Currently shown, but excluded — ${exclMatch.rule === 'white-background' ? 'white-background cut-out' : exclMatch.rule === 'not-square' ? 'not square' : 'CFSUD rule'} (${fileNameFromUrl(exclMatch.url)})`;
+      reason = `Currently shown, but excluded — ${exclMatch.rule === 'white-background' ? 'white-background cut-out' : exclMatch.rule === 'not-square' ? 'not square' : exclMatch.rule === 'limit' ? 'over the CFS 5-photo limit' : 'CFSUD rule'} (${fileNameFromUrl(exclMatch.url)})`;
     } else if (rec) {
       kind = 'removed-at-cfs'; defaultDetach = replaceMode;
       reason = replaceMode ? 'Added by the app before, no longer in the CFS feed — detached (Replace with CFS photos)'
@@ -456,6 +474,7 @@ function buildProductPlan(input) {
     excludedCfsud: groups.reduce((a, g) => a + g.excluded.filter(x => x.rule === 'cfsud').length, 0),
     excludedWhiteBg: groups.reduce((a, g) => a + g.excluded.filter(x => x.rule === 'white-background').length, 0),
     excludedNotSquare: groups.reduce((a, g) => a + g.excluded.filter(x => x.rule === 'not-square').length, 0),
+    excludedLimit: groups.reduce((a, g) => a + g.excluded.filter(x => x.rule === 'limit').length, 0),
     detach: detach.length,
     altFix: order.filter(o => o.altFix).length,
     variantChanges: variantAssign.filter(v => v.change).length,
@@ -617,5 +636,5 @@ function planVariantRemoval(input) {
 
 module.exports = {
   parseUdSku, applyCfsudRule, nameKey, fileNameFromUrl, colourOptionName,
-  buildProductPlan, plansToCsv, toCsv, compareVisual, VIS, applyPhotoFilters, FILTER, planVariantRemoval,
+  buildProductPlan, plansToCsv, toCsv, compareVisual, VIS, applyPhotoFilters, FILTER, planVariantRemoval, applyGalleryLimit, GALLERY_LIMIT,
 };
