@@ -1,7 +1,7 @@
 /**
  * Image Sync (Step 7) — CFS gallery images → Urban Deco Shopify products, or one of the
- * other brands (brandId: products with that brand's vendor; the CFSUD last-photo rule is
- * Urban Deco only).
+ * other brands (brandId: products with that brand's vendor). The CFSUD last-photo rule is
+ * no longer used (27 Oct); Urban Deco skips white-background + non-square photos only.
  *
  * Manual only. Not part of /scheduled-sync or the GitHub Actions job.
  *
@@ -379,7 +379,7 @@ function planFor(session, productId, feed) {
     record: parseRecord(raw),
     // per-product choices; "Replace with CFS photos" falls back to the dry-run-wide setting
     choices: { replaceMode: !!session.replaceMode, skipWhiteBg: session.skipWhiteBg !== false,
-      skipNonSquare: session.skipNonSquare !== false, cfsudRule: !session.brandId, ...(session.choices[productId] || {}) },
+      skipNonSquare: session.skipNonSquare !== false, ...(session.choices[productId] || {}) },
   });
   plan.include = session.include[productId] !== undefined ? session.include[productId] : (plan.ok && !plan.noChange);
   if (!plan.ok) plan.include = false;
@@ -490,7 +490,7 @@ router.post('/dry-run', async (req, res) => {
     const brand = req.body?.brandId ? getBrand(req.body.brandId) : null;
     if (req.body?.brandId && !brand) throw new Error('Unknown brand');
     const vendor = brand ? brand.vendor : 'Urban Deco';
-    if (brand) send({ type: 'status', message: `Brand: ${vendor} — all CFS photos copied unless you tick the skip options; the CFSUD last-photo rule is Urban Deco only` });
+    if (brand) send({ type: 'status', message: `Brand: ${vendor} — all CFS photos copied unless you tick the skip options` });
 
     send({ type: 'status', message: 'Loading CFS image feed (can take ~90 seconds)…' });
     const feed = await getFeed(!!req.body?.refreshFeed);

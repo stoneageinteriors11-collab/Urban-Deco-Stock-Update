@@ -28,6 +28,8 @@ function parseUdSku(sku) {
 // Order matters:
 //   1. galleryCount must equal the ORIGINAL gallery length, otherwise skip.
 //   2. If vSKU contains CFSUD, drop the LAST POSITION of the ORIGINAL gallery.
+//      NOTE: no longer used by default (27 Oct) — Urban Deco keeps the last photo too.
+//      buildProductPlan only applies it when choices.cfsudRule === true.
 //   3. mainImage is always kept.
 //   (De-duplication / ordering happen later, after this.)
 function applyCfsudRule(rec, { dropLast = true } = {}) {   // dropLast=false for other brands (Urban Deco only rule)
@@ -129,7 +131,7 @@ function applyPhotoFilters(r, cfsHash, filters) {
 // ── CFS 5-photo limit (all brands) ───────────────────────────────────────────
 // The CFS site shows the main photo + the first 4 gallery photos, however many the feed
 // has (e.g. Herringford Walnut: 8 in the feed, 01–04 shown). Applied LAST, after the
-// CFSUD rule and the photo-type filters, keeping CFS order — so up to 5 good photos.
+// photo-type filters, keeping CFS order — so up to 5 good photos.
 const GALLERY_LIMIT = 4;
 function applyGalleryLimit(r, original = []) {
   if (r.gallery.length <= GALLERY_LIMIT) return { gallery: r.gallery, excluded: [] };
@@ -246,7 +248,8 @@ function buildProductPlan(input) {
   const groups = [];
   for (const cfsId of groupOrder) {
     const g = groupsById.get(cfsId);
-    const r = applyCfsudRule(g.rec, { dropLast: choices.cfsudRule !== false });
+    // CFSUD last-photo rule switched OFF for everyone (27 Oct) — only kept as an opt-in (choices.cfsudRule === true)
+    const r = applyCfsudRule(g.rec, { dropLast: choices.cfsudRule === true });
     if (!r.ok) { errors.push(`CFS product ${cfsId} (${g.vSKU}): ${r.error}`); continue; }
     // Photo-type filters run AFTER the CFSUD rule (which works on original positions).
     const f = applyPhotoFilters(r, cfsHash, filters);

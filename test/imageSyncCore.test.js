@@ -44,17 +44,24 @@ assert(core.parseUdSku('ABC-1') === null);
 const plan = core.buildProductPlan({ product, feedById: feed });
 console.log(JSON.stringify(plan.counts), plan.errors, plan.warnings);
 assert(plan.ok);
-// CFS 5-photo limit: each colour = main + first 4 gallery photos (CFSUD drops -06 first, the limit then drops -05)
+// CFS 5-photo limit: each colour = main + first 4 gallery photos. The CFSUD last-photo rule is OFF (27 Oct),
+// so -05 and -06 are both dropped by the limit only.
 assert.strictEqual(plan.counts.proposed, 15);
 assert.strictEqual(plan.counts.reuse, 15);
 assert.strictEqual(plan.counts.upload, 0);
 assert.strictEqual(plan.counts.excluded, 6);
-assert.strictEqual(plan.counts.excludedCfsud, 3); assert.strictEqual(plan.counts.excludedLimit, 3);
+assert.strictEqual(plan.counts.excludedCfsud, 0); assert.strictEqual(plan.counts.excludedLimit, 6);
 assert(plan.groups.every(g => g.excluded.some(x => x.rule === 'limit' && x.url.endsWith('-05.jpg') && x.galleryPosition === 5)));
-// same product for another brand (cfsudRule off): -06 is no longer dropped by CFSUD, but the limit still keeps 5
-const planBrand = core.buildProductPlan({ product, feedById: feed, choices: { cfsudRule: false } });
-assert(planBrand.ok); assert.strictEqual(planBrand.counts.proposed, 15);
-assert.strictEqual(planBrand.counts.excludedCfsud, 0); assert.strictEqual(planBrand.counts.excludedLimit, 6);
+// Milan now (CFS re-shoot): main + 2 gallery per colour, all CFSUD SKUs → all 3 kept (no last-photo drop)
+{
+  const short = new Map([...feed].map(([k, r]) => [k, { ...r, galleryCount: 2, galleryImages: r.galleryImages.slice(0, 2) }]));
+  const ps = core.buildProductPlan({ product, feedById: short });
+  assert(ps.groups.every(g => g.gallery.length === 2 && g.excluded.length === 0), 'CFSUD products keep their last photo');
+  assert.strictEqual(ps.proposed.filter(o => o.cfsKey || o.src).length >= 9, true);
+}
+// the old rule still exists as an opt-in only
+const planOld = core.buildProductPlan({ product, feedById: feed, choices: { cfsudRule: true } });
+assert.strictEqual(planOld.counts.excludedCfsud, 3); assert.strictEqual(planOld.counts.excludedLimit, 3);
 // without the 5-photo limit the other-brand plan would have had 21 photos — limit unit cases:
 let lim = core.applyGalleryLimit({ gallery: ['a', 'b', 'c'] }, ['a', 'b', 'c']);
 assert.deepStrictEqual(lim, { gallery: ['a', 'b', 'c'], excluded: [] });
@@ -205,7 +212,8 @@ console.log('NOT-IN-CFS TEST PASSED');
   const sq = new Map(); for (const rec2 of feed.values()) for (const u of [rec2.mainImage, ...rec2.galleryImages]) sq.set(u, { w: 2000, h: 2000, edgeWhite: 0 });
   sq.set(feed.get('144250').galleryImages[5], { w: 2000, h: 2000, edgeWhite: 1 });
   const pm = core.buildProductPlan({ product, feedById: feed, cfsHash: sq });
-  assert(pm.counts.proposed === 15 && pm.counts.excludedCfsud === 3 && pm.counts.excludedWhiteBg === 0 && pm.counts.excludedLimit === 3, JSON.stringify(pm.counts));
+  // no CFSUD drop any more: White's -06 cut-out is skipped by the white-background rule, then the limit keeps 4
+  assert(pm.counts.proposed === 15 && pm.counts.excludedCfsud === 0 && pm.counts.excludedWhiteBg === 1 && pm.counts.excludedLimit === 5, JSON.stringify(pm.counts));
   // filters first, then the limit: White loses g2 (cut-out) → the next photo moves up, still 4 gallery photos
   sq.set(feed.get('144250').galleryImages[1], { w: 2000, h: 2000, edgeWhite: 1 });
   const pw = core.buildProductPlan({ product, feedById: feed, cfsHash: sq });

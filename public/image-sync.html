@@ -284,8 +284,8 @@ async function runDry(after) {
 function logWarn(m) { const el = $('dryStatus'); el.innerHTML += `<div style="color:var(--warning)">${esc(m)}</div>`; }
 $('btnDry').onclick = () => runDry(null);
 // ── Brand picker: Urban Deco or one of the other brands ──────────────────────
-// Other brands copy ALL CFS photos by default (skip boxes unticked); the CFSUD
-// last-photo rule is Urban Deco only. The ?brand=ID link from a brand clean-up picks it.
+// Other brands copy ALL CFS photos by default (skip boxes unticked). The CFSUD
+// last-photo rule is no longer used (27 Oct). The ?brand=ID link from a brand clean-up picks it.
 function onBrandChange() {
   const sel = $('brand'), isUd = !sel.value;
   const name = sel.options[sel.selectedIndex]?.text || 'Urban Deco';
@@ -293,8 +293,8 @@ function onBrandChange() {
   document.title = `Image Sync — ${name}`;
   $('skipWhiteBg').checked = isUd; $('skipNonSquare').checked = isUd;
   $('brandHelp').textContent = isUd
-    ? 'Urban Deco rules: white-background and non-square photos skipped, CFSUD last photo dropped, then max 5 photos (main + first 4), like the CFS site.'
-    : `${name}: all CFS photos copied (skip boxes unticked — tick them if needed), max 5 photos (main + first 4), like the CFS site. CFSUD last-photo rule not used.`;
+    ? 'Urban Deco rules: white-background and non-square photos skipped, then max 5 photos (main + first 4), like the CFS site.'
+    : `${name}: all CFS photos copied (skip boxes unticked — tick them if needed), max 5 photos (main + first 4), like the CFS site.`;
   invalidateBackup();
 }
 const brandReady = (async () => {
@@ -334,7 +334,7 @@ function renderAll() {
   }
   $('summary').innerHTML = `<div class="stats">${[
     ['Products', s.products], ['Ready', s.ready], ['No change', s.noChange], ['Skipped', s.skipped], ["Couldn't find in CFS", s.notInCfs],
-    ['New uploads', s.uploads], ['Reused', s.reuse], ['Skipped: last photo (CFSUD)', s.exCfsud], ['Skipped: white background', s.exWhite], ['Skipped: not square', s.exSquare], ['Skipped: over 5-photo limit', s.exLimit], ['To detach', s.detach], ['Manual photos kept', s.manual],
+    ['New uploads', s.uploads], ['Reused', s.reuse], ['Skipped: white background', s.exWhite], ['Skipped: not square', s.exSquare], ['Skipped: over 5-photo limit', s.exLimit], ['To detach', s.detach], ['Manual photos kept', s.manual],
     ['Same name, different picture', s.replacedSameName], ['Please check', s.unsure],
   ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('')}</div>
   <div class="banner ${state.replaceMode ? 'warn' : 'ok'}" style="margin-top:4px">
@@ -344,7 +344,7 @@ function renderAll() {
       : 'OFF: photos not matched to CFS are kept and the CFS photos are added alongside them.'}</label>
     <div style="margin-top:6px"><label class="chk"><input type="checkbox" id="optWhite" ${state.skipWhiteBg ? 'checked' : ''}> Skip white-background CFS photos</label>
     &nbsp; <label class="chk"><input type="checkbox" id="optSquare" ${state.skipNonSquare ? 'checked' : ''}> Skip non-square CFS photos</label>
-    <span class="help" style="margin:0">(${state.brandId ? 'other brands: all CFS photos unless ticked here' : 'last-photo CFSUD rule always applies'}; max 5 photos per CFS product — main + first 4 gallery, like the CFS site; main image is never skipped)</span></div></div>
+    <span class="help" style="margin:0">(${state.brandId ? 'other brands: all CFS photos unless ticked here' : 'Urban Deco: white-background + non-square skipped'}; max 5 photos per CFS product — main + first 4 gallery, like the CFS site; main image is never skipped)</span></div></div>
   <div class="row"><button class="btn secondary" id="selAll">Select all ready</button><button class="btn secondary" id="selNone">Select none</button>
     ${s.notInCfs ? `<label class="chk"><input type="checkbox" id="onlyMissing"> Show only products not found in CFS (${s.notInCfs})</label>` : ''}</div>`;
   $('selAll').onclick = () => bulkInclude(true); $('selNone').onclick = () => bulkInclude(false);
