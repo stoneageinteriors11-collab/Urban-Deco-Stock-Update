@@ -1879,7 +1879,7 @@ async function testConnection() {
   function showImageSyncHandoff(handles, dryRun) {
     const box = document.getElementById('imagesync-handoff');
     if (!handles.length) { box.classList.add('hidden'); return; }
-    const url = `/image-sync.html?handles=${encodeURIComponent(handles.join(','))}&drafts=1`;
+    const url = `/image-sync.html?handles=${encodeURIComponent(handles.join(','))}&drafts=1${BRAND?.id ? `&brand=${BRAND.id}` : ''}`;
     box.innerHTML = dryRun
       ? `🖼️ <b>Photos:</b> after the live run, ${handles.length} product(s) need their photos updated to the correct CFS photos. ` +
         `You'll get a button here that opens Image Sync with these products filled in.`

@@ -30,7 +30,7 @@ function parseUdSku(sku) {
 //   2. If vSKU contains CFSUD, drop the LAST POSITION of the ORIGINAL gallery.
 //   3. mainImage is always kept.
 //   (De-duplication / ordering happen later, after this.)
-function applyCfsudRule(rec) {
+function applyCfsudRule(rec, { dropLast = true } = {}) {   // dropLast=false for other brands (Urban Deco only rule)
   const gallery = Array.isArray(rec.galleryImages) ? rec.galleryImages.slice() : [];
   const declared = Number(rec.galleryCount);
   if (!Number.isFinite(declared) || declared !== gallery.length) {
@@ -45,7 +45,7 @@ function applyCfsudRule(rec) {
 
   const excluded = [];
   let kept = gallery;
-  if (/CFSUD/i.test(String(rec.vSKU || '')) && gallery.length > 0) {
+  if (dropLast && /CFSUD/i.test(String(rec.vSKU || '')) && gallery.length > 0) {
     const lastIndex = gallery.length - 1;
     excluded.push({
       url: gallery[lastIndex],
@@ -231,7 +231,7 @@ function buildProductPlan(input) {
   const groups = [];
   for (const cfsId of groupOrder) {
     const g = groupsById.get(cfsId);
-    const r = applyCfsudRule(g.rec);
+    const r = applyCfsudRule(g.rec, { dropLast: choices.cfsudRule !== false });
     if (!r.ok) { errors.push(`CFS product ${cfsId} (${g.vSKU}): ${r.error}`); continue; }
     // Photo-type filters run AFTER the CFSUD rule (which works on original positions).
     const f = applyPhotoFilters(r, cfsHash, filters);

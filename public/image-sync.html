@@ -82,7 +82,7 @@
     <div class="logo">🖼️</div>
     <div>
       <h1>Image Sync</h1>
-      <p>CFS gallery images → Urban Deco products. Manual only — run when needed.</p>
+      <p>CFS gallery images → <span id="brandName">Urban Deco</span> products. Manual only — run when needed.</p>
     </div>
     <a href="/">← Back to Variant Sync Tool</a>
   </header>
@@ -92,7 +92,13 @@
   <!-- 1. Dry run -->
   <div class="card">
     <div class="card-title"><span class="num">1</span> Dry run (read-only)</div>
-    <p class="help">Nothing in the store changes here. Paste product handles, CFS product IDs (e.g. <code>144250</code>) or SKUs (<code>UD-144250-16985745</code>), one per line — or leave empty to take the next batch of Urban Deco products.</p>
+    <p class="help">Nothing in the store changes here. Paste product handles, CFS product IDs (e.g. <code>144250</code>) or SKUs (<code>UD-144250-16985745</code>), one per line — or leave empty to take the next batch of the chosen brand's products.</p>
+    <div class="row" style="margin-bottom:10px">
+      <label class="chk">Brand
+        <select id="brand"><option value="">Urban Deco</option></select>
+      </label>
+      <span class="help" id="brandHelp" style="margin:0"></span>
+    </div>
     <textarea id="tokens" placeholder="milan-dining-table-white-marble-sizes-available"></textarea>
     <div class="row" style="margin-top:10px">
       <label class="chk">Batch size
@@ -255,7 +261,7 @@ async function runDry(after) {
   $('products').innerHTML = ''; $('summary').innerHTML = '';
   invalidateBackup();
   try {
-    const last = await stream(API + '/dry-run', { tokens, limit: $('limit').value, includeDrafts: $('includeDrafts').checked, replaceMode: $('replaceMode').checked,
+    const last = await stream(API + '/dry-run', { tokens, brandId: $('brand').value || null, limit: $('limit').value, includeDrafts: $('includeDrafts').checked, replaceMode: $('replaceMode').checked,
       skipWhiteBg: $('skipWhiteBg').checked, skipNonSquare: $('skipNonSquare').checked, after },
       ev => {
         if (ev.type === 'status') setStatus($('dryStatus'), ev.message);
@@ -266,6 +272,7 @@ async function runDry(after) {
     if (!last || last.type === 'error') throw new Error(last?.message || 'Dry run failed');
     state.planId = last.planId; state.nextCursor = last.nextCursor; state.plans = last.plans; state.replaceMode = !!last.replaceMode;
     state.skipWhiteBg = last.skipWhiteBg !== false; state.skipNonSquare = last.skipNonSquare !== false;
+    state.brandId = last.brandId || null;
     $('dryBar').classList.add('hidden');
     setStatus($('dryStatus'), `Dry run ${last.planId} — nothing was changed.`, 'ok');
     $('btnCsv').href = `${API}/plan/${last.planId}/csv`; $('btnCsv').classList.remove('hidden');
@@ -276,8 +283,34 @@ async function runDry(after) {
 }
 function logWarn(m) { const el = $('dryStatus'); el.innerHTML += `<div style="color:var(--warning)">${esc(m)}</div>`; }
 $('btnDry').onclick = () => runDry(null);
+// ── Brand picker: Urban Deco or one of the other brands ──────────────────────
+// Other brands copy ALL CFS photos by default (skip boxes unticked); the CFSUD
+// last-photo rule is Urban Deco only. The ?brand=ID link from a brand clean-up picks it.
+function onBrandChange() {
+  const sel = $('brand'), isUd = !sel.value;
+  const name = sel.options[sel.selectedIndex]?.text || 'Urban Deco';
+  $('brandName').textContent = name;
+  document.title = `Image Sync — ${name}`;
+  $('skipWhiteBg').checked = isUd; $('skipNonSquare').checked = isUd;
+  $('brandHelp').textContent = isUd
+    ? 'Urban Deco rules: white-background and non-square photos skipped, CFSUD last photo dropped.'
+    : `${name}: all CFS photos copied (skip boxes unticked — tick them if needed). CFSUD last-photo rule not used.`;
+  invalidateBackup();
+}
+const brandReady = (async () => {
+  try {
+    const { brands = [] } = await (await fetch('/api/brands/list')).json();
+    $('brand').innerHTML = '<option value="">Urban Deco</option>' + brands.map(b => `<option value="${b.id}">${esc(b.vendor)}</option>`).join('');
+  } catch (_) {}
+  const want = new URLSearchParams(location.search).get('brand');
+  if (want && [...$('brand').options].some(o => o.value === want)) $('brand').value = want;
+  onBrandChange();
+})();
+$('brand').onchange = onBrandChange;
+
 // Opened from Step 3 ("Open in Image Sync"): fill in the products and tick drafts
-(() => {
+(async () => {
+  await brandReady;
   const q = new URLSearchParams(location.search);
   const h = q.get('handles');
   if (h) {
@@ -310,7 +343,7 @@ function renderAll() {
       : 'OFF: photos not matched to CFS are kept and the CFS photos are added alongside them.'}</label>
     <div style="margin-top:6px"><label class="chk"><input type="checkbox" id="optWhite" ${state.skipWhiteBg ? 'checked' : ''}> Skip white-background CFS photos</label>
     &nbsp; <label class="chk"><input type="checkbox" id="optSquare" ${state.skipNonSquare ? 'checked' : ''}> Skip non-square CFS photos</label>
-    <span class="help" style="margin:0">(last-photo CFSUD rule always applies; main image is never skipped)</span></div></div>
+    <span class="help" style="margin:0">(${state.brandId ? 'other brands: all CFS photos unless ticked here' : 'last-photo CFSUD rule always applies'}; main image is never skipped)</span></div></div>
   <div class="row"><button class="btn secondary" id="selAll">Select all ready</button><button class="btn secondary" id="selNone">Select none</button>
     ${s.notInCfs ? `<label class="chk"><input type="checkbox" id="onlyMissing"> Show only products not found in CFS (${s.notInCfs})</label>` : ''}</div>`;
   $('selAll').onclick = () => bulkInclude(true); $('selNone').onclick = () => bulkInclude(false);

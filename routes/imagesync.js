@@ -1,5 +1,7 @@
 /**
- * Image Sync (Step 7) — CFS gallery images → Urban Deco Shopify products.
+ * Image Sync (Step 7) — CFS gallery images → Urban Deco Shopify products, or one of the
+ * other brands (brandId: products with that brand's vendor; the CFSUD last-photo rule is
+ * Urban Deco only).
  *
  * Manual only. Not part of /scheduled-sync or the GitHub Actions job.
  *
@@ -38,6 +40,7 @@ const { parse: parseCsv } = require('csv-parse/sync');
 require('dotenv').config();
 
 const core = require('../utils/imageSyncCore');
+const { getBrand } = require('../utils/brands');
 
 const router = express.Router();
 
@@ -376,7 +379,7 @@ function planFor(session, productId, feed) {
     record: parseRecord(raw),
     // per-product choices; "Replace with CFS photos" falls back to the dry-run-wide setting
     choices: { replaceMode: !!session.replaceMode, skipWhiteBg: session.skipWhiteBg !== false,
-      skipNonSquare: session.skipNonSquare !== false, ...(session.choices[productId] || {}) },
+      skipNonSquare: session.skipNonSquare !== false, cfsudRule: !session.brandId, ...(session.choices[productId] || {}) },
   });
   plan.include = session.include[productId] !== undefined ? session.include[productId] : (plan.ok && !plan.noChange);
   if (!plan.ok) plan.include = false;
@@ -484,6 +487,10 @@ router.post('/dry-run', async (req, res) => {
     const tokens = (req.body?.tokens || []).map(s => String(s).trim()).filter(Boolean);
     const limit = Math.max(1, Math.min(MAX_BATCH, parseInt(req.body?.limit, 10) || 25));
     const includeDrafts = !!req.body?.includeDrafts;
+    const brand = req.body?.brandId ? getBrand(req.body.brandId) : null;
+    if (req.body?.brandId && !brand) throw new Error('Unknown brand');
+    const vendor = brand ? brand.vendor : 'Urban Deco';
+    if (brand) send({ type: 'status', message: `Brand: ${vendor} — all CFS photos copied unless you tick the skip options; the CFSUD last-photo rule is Urban Deco only` });
 
     send({ type: 'status', message: 'Loading CFS image feed (can take ~90 seconds)…' });
     const feed = await getFeed(!!req.body?.refreshFeed);
@@ -497,14 +504,14 @@ router.post('/dry-run', async (req, res) => {
       send({ type: 'status', message: `Looking up ${tokens.length} product reference(s)…` });
       products = await resolveProducts(client, tokens, send);
     } else {
-      const q = `vendor:"Urban Deco"${includeDrafts ? '' : ' status:active'}`;
+      const q = `vendor:"${vendor}"${includeDrafts ? '' : ' status:active'}`;
       let after = req.body?.after || null;
       while (products.length < limit) {
         check();
         const d = await gql(client, Q_PRODUCTS, { first: Math.min(PAGE_SIZE, limit - products.length), after, query: q });
         const page = d.products;
         // exact vendor match (search can be loose)
-        products.push(...page.nodes.filter(p => p.vendor === 'Urban Deco'));
+        products.push(...page.nodes.filter(p => String(p.vendor || '').trim().toLowerCase() === vendor.toLowerCase()));
         send({ type: 'status', message: `Fetched ${products.length} Shopify products…` });
         if (!page.pageInfo.hasNextPage) { after = null; break; }
         after = page.pageInfo.endCursor;
@@ -530,6 +537,7 @@ router.post('/dry-run', async (req, res) => {
     const session = {
       id: newId('plan'), createdAt: new Date().toISOString(), feedGenerated: feed.generated,
       nextCursor, raw: {}, choices: {}, include: {}, replaceMode: !!req.body?.replaceMode,
+      brandId: brand ? brand.id : null, brand: vendor,
       skipWhiteBg: req.body?.skipWhiteBg !== false, skipNonSquare: req.body?.skipNonSquare !== false,
       cfsHash: Object.fromEntries(cfsHash), shopHash: {},
     };
@@ -542,7 +550,7 @@ router.post('/dry-run', async (req, res) => {
     const out = products.map(p => planFor(session, p.id, feed));
     savePlan(session);
     const summary = summarise(out);
-    send({ type: 'done', planId: session.id, nextCursor, replaceMode: session.replaceMode,
+    send({ type: 'done', planId: session.id, nextCursor, replaceMode: session.replaceMode, brandId: session.brandId, brand: session.brand,
       skipWhiteBg: session.skipWhiteBg, skipNonSquare: session.skipNonSquare, summary, plans: out });
   } catch (e) {
     if (e.stopped) send({ type: 'stopped', message: 'Dry run stopped — nothing was changed' });
