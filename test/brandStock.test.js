@@ -99,12 +99,12 @@ const sse = async body => {
       return t.split('\n\n').filter(l => l.startsWith('data: ')).map(l => JSON.parse(l.slice(6))).pop(); })();
     r.log.forEach(l => console.log(' ', l.status, l.sku, l.message));
     assert.strictEqual(writes.mf.length, 0, 'codes dry run writes nothing');
-    assert.deepStrictEqual(r.counts, { products: 2, productCodes: 1, variants: 5, updated: 2, unchanged: 2, notInCfs: 1, flagged: 0, failed: 0 });
-    assert(r.log.some(l => l.sku === 'UD-2-22' && /variant_code: "OLD" → "VAS-L" \(draft\)/.test(l.message)));
-    assert(r.log.some(l => l.sku === 'UD-2' && /left as "keep"/.test(l.message)), 'product with CFS variants: variant_code left alone');
+    // the draft Vase product is skipped entirely — counted, not listed, nothing written
+    assert.deepStrictEqual(r.counts, { products: 1, productCodes: 1, variants: 1, updated: 1, unchanged: 0, notInCfs: 0, flagged: 0, failed: 0, skippedDraft: 1 });
+    assert(!r.log.some(l => l.handle === 'vase'), 'draft product not in the log');
     const t2 = await (await fetch(base + '/api/brands/codes-sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ brandId: 363, dryRun: false }) })).text();
     const k = writes.mf.map(m => `${m.ownerId}.${m.key}=${m.value}`).sort();
-    assert.deepStrictEqual(k, ['P1.product_code=LMP-01', 'V1.variant_code=LMP-01', 'V22.variant_code=VAS-L']);
+    assert.deepStrictEqual(k, ['P1.product_code=LMP-01', 'V1.variant_code=LMP-01']);
     // codes for several brands in one run (brandIds); log rows carry the brand
     const multi = await (async () => { const t = await (await fetch(base + '/api/brands/codes-sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ brandIds: [363, 212], dryRun: true }) })).text();
       return t.split('\n\n').filter(l => l.startsWith('data: ')).map(l => JSON.parse(l.slice(6))).pop(); })();

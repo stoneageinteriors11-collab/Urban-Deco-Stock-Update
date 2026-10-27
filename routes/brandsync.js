@@ -414,7 +414,7 @@ router.post('/codes-sync', async (req, res) => {
   send({ type: 'run_id', runId });
 
   const log = [];
-  const c = { products: 0, productCodes: 0, variants: 0, updated: 0, unchanged: 0, notInCfs: 0, flagged: 0, failed: 0 };
+  const c = { products: 0, productCodes: 0, variants: 0, updated: 0, unchanged: 0, notInCfs: 0, flagged: 0, failed: 0, skippedDraft: 0 };
   const finish = (extra = {}) => {
     clearInterval(ping); cancelled.delete(runId); stopKeepAwake();
     console.log(`  ✓ Other Brands codes ${label} done — ${JSON.stringify(c)}${extra.cancelled ? ' (stopped)' : ''}`);
@@ -446,8 +446,12 @@ router.post('/codes-sync', async (req, res) => {
       after = d.products.pageInfo.hasNextPage ? d.products.pageInfo.endCursor : null;
       if (after) await sleep(150);
     } while (after);
-    send({ type: 'status', message: `Shopify: ${products.length} ${vendor} products` });
-    if (!products.length) log.push({ brand: vendor, handle: '-', sku: '-', status: 'warning', message: `No Shopify products found with vendor "${vendor}"` });
+    // Draft / archived products are skipped entirely (counted, not listed)
+    const skipped = products.filter(p => p.status !== 'ACTIVE').length;
+    c.skippedDraft += skipped;
+    products.splice(0, products.length, ...products.filter(p => p.status === 'ACTIVE'));
+    send({ type: 'status', message: `Shopify: ${products.length} active ${vendor} products${skipped ? ` (${skipped} draft/archived skipped)` : ''}` });
+    if (!products.length) log.push({ brand: vendor, handle: '-', sku: '-', status: 'warning', message: `No active Shopify products found with vendor "${vendor}"` });
 
     let done = 0;
     for (const p of products) {

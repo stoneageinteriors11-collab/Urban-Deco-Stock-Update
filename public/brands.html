@@ -295,7 +295,7 @@
       ['skipped', '', c.oosNoDate, 'Out of stock, no due date'],
       ['error', 'nf', c.failed, 'Errors'],
     ] : lastResult.kind === 'codes' ? [
-      ['all', '', c.products, 'Products'],
+      ['all', '', c.products, 'Active products'],
       ['changes', 'upd', c.productCodes, lastResult.dryRun ? 'Product codes to set' : 'Product codes set'],
       ['all', '', c.variants, 'Variants checked'],
       ['changes', 'upd', c.updated, lastResult.dryRun ? 'Variant codes to set' : 'Variant codes set'],
@@ -303,6 +303,7 @@
       ['flag', 'flag', c.flagged, 'Flagged — check'],
       ['not_in_cfs', 'nf', c.notInCfs, 'SKU not in CFS'],
       ['error', 'nf', c.failed, 'Errors'],
+      ['all', '', c.skippedDraft, 'Draft / archived (skipped)'],
     ] : [
       ['all', '', c.products, 'Active products'],
       ['all', '', c.variants, 'Variants checked'],
