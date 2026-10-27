@@ -12,6 +12,9 @@
  *   variants-deleted — listed for information only: Shopify can't bring back a
  *                      deleted variant, so this part can NOT be undone.
  *
+ * Each run also records which brand it came from (brand / brandId — Urban Deco or
+ * one of the other brands). Older undo files have no brand and show "—".
+ *
  * Records are saved on the server (uploads/step3-undo/<id>.json) AND downloaded
  * to the user as a file, because Render's disk is wiped on restarts. An undo
  * file can be uploaded again later.
@@ -27,8 +30,15 @@ const newId = () => `undo-${new Date().toISOString().replace(/[-:T]/g, '').slice
 const safeId = id => /^undo-\d{14}-[0-9a-f]{6}$/.test(String(id || ''));
 const file = id => path.join(DIR, `${id}.json`);
 
-function startRun(kind, label) {
-  return { type: 'urban-deco-step3-undo', version: 1, id: newId(), kind, label, createdAt: new Date().toISOString(),
+// brandId empty = Urban Deco (main page); otherwise one of the 14 other brands
+function brandOf(brandId) {
+  if (!brandId) return { brandId: null, brand: 'Urban Deco' };
+  const b = require('./brands').getBrand(brandId);
+  return { brandId: Number(brandId), brand: b ? b.vendor : `Brand ${brandId}` };
+}
+
+function startRun(kind, label, brandId = null) {
+  return { type: 'urban-deco-step3-undo', version: 1, id: newId(), kind, label, ...brandOf(brandId), createdAt: new Date().toISOString(),
     store: process.env.SHOPIFY_STORE, entries: [] };
 }
 
@@ -67,7 +77,7 @@ function list() {
 function summarise(r) {
   const undoable = r.entries.filter(e => e.type !== 'variants-deleted');
   return {
-    id: r.id, kind: r.kind, label: r.label, createdAt: r.createdAt,
+    id: r.id, kind: r.kind, label: r.label, brand: r.brand || '', brandId: r.brandId ?? null, createdAt: r.createdAt,
     products: new Set(r.entries.map(e => e.productId)).size,
     changes: undoable.length,
     undone: undoable.filter(e => e.undoneAt).length,
@@ -82,4 +92,4 @@ function markUndone(run, indexes) {
   fs.writeFileSync(file(run.id), JSON.stringify(run, null, 2));
 }
 
-module.exports = { startRun, add, save, load, importRun, list, summarise, markUndone, safeId, file };
+module.exports = { brandOf, startRun, add, save, load, importRun, list, summarise, markUndone, safeId, file };

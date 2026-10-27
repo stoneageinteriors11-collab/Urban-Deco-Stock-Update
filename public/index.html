@@ -1645,7 +1645,7 @@ async function testConnection() {
       const dup = picks.filter(x => x.d.origin === 'fix-skus');
       if (dup.length) {
         const data = await (await fetch('/api/shopify/fix-skus', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ variants: dup.map(x => ({ handle: x.d.handle, variantSku: x.d.variantSku, fixedSku: x.d.fixedSku, action: x.v })), dryRun }) })).json();
+          body: JSON.stringify({ variants: dup.map(x => ({ handle: x.d.handle, variantSku: x.d.variantSku, fixedSku: x.d.fixedSku, action: x.v })), dryRun, brandId: BRAND?.id || null }) })).json();
         if (data.error) throw new Error(data.error);
         if (!dryRun) await saveUndoFile(data.undoId);
         log.push(...data.log);
@@ -1671,7 +1671,7 @@ async function testConnection() {
       + (items.length > 15 ? `\n… and ${items.length - 15} more` : '') + (mixed.length ? `\n\nSkipped (variants from different brands): ${mixed.join(', ')}` : '');
     if (!confirm(msg)) return;
     try {
-      const data = await (await fetch('/api/shopify/set-vendor', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items, dryRun }) })).json();
+      const data = await (await fetch('/api/shopify/set-vendor', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items, dryRun, brandId: BRAND?.id || null }) })).json();
       if (data.error) throw new Error(data.error);
       if (!dryRun) await saveUndoFile(data.undoId);
       showLog(data.log, dryRun);
@@ -1697,7 +1697,7 @@ async function testConnection() {
     btn.disabled = true;
     try {
       const data = await (await fetch('/api/shopify/fix-skus', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ variants: rows.map(r => ({ handle: r.handle, variantSku: r.variantSku, fixedSku: r.fixedSku })), dryRun }) })).json();
+        body: JSON.stringify({ variants: rows.map(r => ({ handle: r.handle, variantSku: r.variantSku, fixedSku: r.fixedSku })), dryRun, brandId: BRAND?.id || null }) })).json();
       if (data.error) throw new Error(data.error);
       if (!dryRun) await saveUndoFile(data.undoId);
       showLog(data.log, dryRun);
@@ -1889,11 +1889,11 @@ async function testConnection() {
       const { runs = [], error } = await (await fetch('/api/shopify/undo/runs')).json();
       if (error) throw new Error(error);
       if (!runs.length) { el.innerHTML = 'No live runs saved on the server. If the server restarted, upload the undo file you downloaded after the run.'; return; }
-      el.innerHTML = `<table><tr><th>When</th><th>Action</th><th>Products</th><th>Can be undone</th><th>Not undoable</th><th>Status</th><th></th></tr>` +
+      el.innerHTML = `<table><tr><th>When</th><th>Brand</th><th>Action</th><th>Products</th><th>Can be undone</th><th>Not undoable</th><th>Status</th><th></th></tr>` +
         runs.map(r => {
           const what = Object.entries(r.counts).map(([k, v]) => `${v} ${UNDO_TYPES[k] || k}`).join(' · ') || '—';
           const done = r.changes && r.undone === r.changes;
-          return `<tr><td>${new Date(r.createdAt).toLocaleString()}</td><td>${r.label}</td><td>${r.products}</td><td>${what}</td>
+          return `<tr><td>${new Date(r.createdAt).toLocaleString()}</td><td>${r.brand || '—'}</td><td>${r.label}</td><td>${r.products}</td><td>${what}</td>
             <td>${r.variantsDeleted ? `${r.variantsDeleted} deleted variant(s)` : '—'}</td>
             <td>${done ? '✓ undone' : r.undone ? `${r.undone} of ${r.changes} undone` : 'not undone'}</td>
             <td style="white-space:nowrap"><button class="btn btn-outline" onclick="runUndo('${r.id}', true)">Preview</button>

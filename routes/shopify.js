@@ -526,7 +526,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
   const imagePlan = imagePlanId ? imageSync.loadRemovalPlan(imagePlanId) : null;
   if (imagePlanId && !imagePlan) return res.status(400).json({ error: 'Photo check not found (server may have restarted) — run it again' });
   const photoPlanFor = handle => (imagePlan ? imagePlan.byHandle[handle] || null : null);
-  const undoRun = dryRun ? null : undo.startRun('delete-orphaned', 'Delete Selected Orphaned');
+  const undoRun = dryRun ? null : undo.startRun('delete-orphaned', 'Delete Selected Orphaned', brandId);
   if (!dryRun && imagePlan) {
     const needBackup = Object.values(imagePlan.byHandle).some(p => p.counts && p.counts.remove > 0);
     if (needBackup && !backupId) return res.status(400).json({ error: 'A backup zip is required before photos are removed — create it first' });
@@ -862,7 +862,7 @@ router.get('/undo/:id/download', (req, res) => {
   const run = undo.load(req.params.id);
   if (!run) return res.status(404).send('Undo record not found (server may have restarted) — upload the undo file instead');
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.setHeader('Content-Disposition', `attachment; filename="step3-undo_${run.createdAt.slice(0, 10)}_${run.id.slice(-6)}.json"`);
+  res.setHeader('Content-Disposition', `attachment; filename="step3-undo_${(run.brand || 'urban-deco').toLowerCase().replace(/[^a-z0-9]+/g, '-')}_${run.createdAt.slice(0, 10)}_${run.id.slice(-6)}.json"`);
   res.send(JSON.stringify(run, null, 2));
 });
 
@@ -1001,7 +1001,7 @@ router.post('/set-draft', async (req, res) => {
   }
 
   console.log(`▶ Setting ${byHandle.size} products to DRAFT (dryRun=${dryRun})`);
-  const undoRun = dryRun ? null : undo.startRun('set-draft', 'Set Selected to Draft');
+  const undoRun = dryRun ? null : undo.startRun('set-draft', 'Set Selected to Draft', req.body.brandId || null);
 
   for (const [handle, representative] of byHandle) {
     const variantsForHandle = variants.filter(v => v.handle === handle);
@@ -1110,7 +1110,7 @@ router.post('/fix-skus', async (req, res) => {
   const { cleanSku } = require('../utils/matchVariants');
   const log = [], decisionList = [];
   let fixed = 0, skipped = 0, failed = 0;
-  const undoRun = dryRun ? null : undo.startRun('fix-skus', 'Fix Selected SKUs');
+  const undoRun = dryRun ? null : undo.startRun('fix-skus', 'Fix Selected SKUs', req.body.brandId || null);
   const byHandle = new Map();
   for (const v of variants) { if (!byHandle.has(v.handle)) byHandle.set(v.handle, []); byHandle.get(v.handle).push(v); }
   console.log(`▶ Fix SKUs — ${variants.length} variants on ${byHandle.size} products (dryRun=${dryRun})`);
@@ -1183,7 +1183,7 @@ router.post('/set-vendor', async (req, res) => {
   try { client = graphqlClient(); } catch (err) { return res.status(400).json({ error: err.message }); }
   const log = [];
   let changed = 0, failed = 0;
-  const undoRun = dryRun ? null : undo.startRun('set-vendor', 'Change vendor');
+  const undoRun = dryRun ? null : undo.startRun('set-vendor', 'Change vendor', req.body.brandId || null);
   for (const it of items) {
     try {
       const p = (await gql(client, Q_PRODUCT_VENDOR, { h: it.handle }))?.productByHandle;
@@ -1236,7 +1236,7 @@ router.post('/publish-products', async (req, res) => {
 
   console.log(`▶ Promoting ${byHandle.size} CFS-product-match products (dryRun=${dryRun})`);
   const imageSyncHandles = new Set();   // products whose photos Image Sync should update afterwards
-  const undoRun = dryRun ? null : undo.startRun('publish', onlyHandles ? 'Flagged products — your decisions' : 'Publish Selected as Main Product');
+  const undoRun = dryRun ? null : undo.startRun('publish', onlyHandles ? 'Flagged products — your decisions' : 'Publish Selected as Main Product', brandId);
 
   // ── Before changing anything: decide what happens to each product (same for
   //    dry run and live run). Based on the variant the product IS (its "own"
