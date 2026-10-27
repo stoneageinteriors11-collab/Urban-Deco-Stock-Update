@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>"Default" Colours</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --surface2: #222636; --border: #2e3248;
+    --accent: #6366f1; --accent-hover: #818cf8; --danger: #ef4444; --success: #22c55e;
+    --warning: #f59e0b; --info: #38bdf8; --text: #e2e8f0; --text-muted: #94a3b8; --radius: 10px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; padding: 24px 16px 80px; }
+  .container { max-width: 1300px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 24px; flex-wrap: wrap; }
+  header .logo { width: 42px; height: 42px; background: var(--accent); border-radius: 10px; display: grid; place-items: center; font-size: 22px; }
+  header h1 { font-size: 20px; } header p { font-size: 13px; color: var(--text-muted); }
+  header a { margin-left: auto; color: var(--accent-hover); text-decoration: none; font-size: 13px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 18px; }
+  .card-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); margin-bottom: 14px; display: flex; gap: 10px; align-items: center; }
+  .card-title .num { background: var(--accent); color: #fff; border-radius: 6px; padding: 1px 8px; }
+  .help { color: var(--text-muted); font-size: 13px; margin-bottom: 12px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .btn { border: none; border-radius: 8px; padding: 9px 16px; font-size: 13px; font-weight: 600; cursor: pointer; color: #fff; background: var(--accent); }
+  .btn:hover:not(:disabled) { background: var(--accent-hover); } .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.secondary { background: var(--surface2); border: 1px solid var(--border); color: var(--text); }
+  .btn.danger { background: var(--danger); }
+  label.chk { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; font-size: 13px; }
+  select, input[type=text] { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 7px 10px; font: inherit; }
+  td input[type=text] { min-width: 150px; padding: 4px 8px; font-size: 12px; }
+  .status { font-size: 13px; color: var(--text-muted); margin-top: 10px; min-height: 20px; }
+  .status.err { color: var(--danger); } .status.ok { color: var(--success); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin: 14px 0; }
+  .stat { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px; cursor: pointer; }
+  .stat.on { border-color: var(--accent); }
+  .stat b { font-size: 20px; display: block; } .stat span { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
+  th { text-align: left; color: var(--text-muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  td a { color: var(--accent-hover); text-decoration: none; }
+  .tag { font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 4px; text-transform: uppercase; white-space: nowrap; }
+  .c-high { background: rgba(34,197,94,.15); color: var(--success); }
+  .c-medium { background: rgba(56,189,248,.15); color: var(--info); }
+  .c-low, .c-clash { background: rgba(245,158,11,.15); color: var(--warning); }
+  .c-none { background: rgba(239,68,68,.15); color: var(--danger); }
+  .t-A { background: rgba(239,68,68,.15); color: var(--danger); } .t-B { background: rgba(245,158,11,.15); color: var(--warning); } .t-C { background: rgba(148,163,184,.15); color: var(--text-muted); }
+  .t-dry_run, .t-updated { background: rgba(56,189,248,.15); color: var(--info); }
+  .t-skipped { background: rgba(148,163,184,.15); color: var(--text-muted); } .t-error { background: rgba(239,68,68,.15); color: var(--danger); }
+  .notes { color: var(--text-muted); font-size: 11px; max-width: 360px; }
+  .muted { color: var(--text-muted); }
+  .wrap { max-height: 620px; overflow: auto; }
+  .banner { border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 12px; background: rgba(245,158,11,.12); border: 1px solid rgba(245,158,11,.35); color: var(--warning); }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="logo">🎨</div>
+    <div>
+      <h1>"Default" colours</h1>
+      <p>Find products showing "Default" as a colour and rename it to the real one</p>
+    </div>
+    <a href="/">← Back to Urban Deco tool</a>
+  </header>
+
+  <div class="card">
+    <div class="card-title"><span class="num">1</span> Find</div>
+    <p class="help">Lists every product with an option value "Default" or "Default Title" (Shopify's normal single products are left out) and suggests the real name from:
+      the same SKU on another product, the CFS product name, or the product title (when it's the product's own CFS product). Nothing changes here.</p>
+    <div class="row">
+      <label class="chk">Vendor <select id="vendor"><option value="">All vendors</option><option>Urban Deco</option></select></label>
+      <label class="chk"><input type="checkbox" id="includeDrafts"> Include draft products</label>
+      <button class="btn" id="btnScan">Find "Default" colours</button>
+    </div>
+    <div class="status" id="scanStatus"></div>
+  </div>
+
+  <div class="card hidden" id="resultsCard">
+    <div class="card-title"><span class="num">2</span> Review &amp; rename</div>
+    <p class="help"><b>A</b> = "Default" next to real colours (customers see it — fix first) · <b>B</b> = only colour, product has sizes · <b>C</b> = one-variant product (usually hidden).
+      Ticked by default: A and B with a <span class="tag c-high">high</span> or <span class="tag c-medium">medium</span> suggestion. Edit any name before renaming.</p>
+    <div class="stats" id="stats"></div>
+    <div class="row">
+      <label class="chk"><input type="checkbox" id="selAll"> Select all shown (with a name)</label>
+      <label class="chk" style="margin-left:auto"><input type="checkbox" id="dryRun" checked> Dry Run (nothing changes)</label>
+      <button class="btn" id="btnApply">Rename selected</button>
+      <button class="btn secondary" id="btnCsv">Export CSV</button>
+    </div>
+    <div class="status" id="applyStatus"></div>
+    <div class="wrap"><table>
+      <thead><tr><th></th><th>Product</th><th>Vendor</th><th>Type</th><th>Option</th><th>Now</th><th>Other values</th><th>Variants</th><th>Rename to</th><th>Confidence</th><th>How we found it</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+  </div>
+
+  <div class="card hidden" id="logCard">
+    <div class="card-title"><span class="num">3</span> Log</div>
+    <div class="wrap"><table><thead><tr><th>Status</th><th>Message</th></tr></thead><tbody id="log"></tbody></table></div>
+    <p class="help" style="margin-top:10px">Live renames are saved for Undo — main page → Step 3 → "↩ Undo a previous run". Photo alt texts that say "Default" are fixed by the next Image Sync run.</p>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const state = { rows: [], filter: 'all', shop: '', picked: new Set(), names: {} };
+const keyOf = r => `${r.productId}|${r.valueId}`;
+
+(async () => {
+  try {
+    const { brands = [] } = await (await fetch('/api/brands/list')).json();
+    $('vendor').innerHTML += brands.map(b => `<option>${esc(b.vendor)}</option>`).join('');
+  } catch (_) {}
+  const want = new URLSearchParams(location.search).get('vendor');   // /default-colours.html?vendor=Birlea
+  if (want && [...$('vendor').options].some(o => o.value === want)) $('vendor').value = want;
+})();
+
+async function stream(url, body, onEvent) {
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!res.ok && !res.body) throw new Error('HTTP ' + res.status);
+  const reader = res.body.getReader(), dec = new TextDecoder(); let buf = '', last = null;
+  for (;;) {
+    const { done, value } = await reader.read(); if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i; while ((i = buf.indexOf('\n\n')) >= 0) {
+      const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+      if (!chunk.startsWith('data: ')) continue;
+      const ev = JSON.parse(chunk.slice(6)); last = ev; onEvent(ev);
+    }
+  }
+  return last;
+}
+function setStatus(el, msg, cls = '') { el.className = 'status ' + cls; el.textContent = msg; }
+
+$('btnScan').onclick = async () => {
+  $('btnScan').disabled = true; $('resultsCard').classList.add('hidden');
+  try {
+    const last = await stream('/api/default-colours/scan', { vendor: $('vendor').value, includeDrafts: $('includeDrafts').checked }, ev => {
+      if (ev.type === 'status') setStatus($('scanStatus'), ev.message);
+      if (ev.type === 'warn') setStatus($('scanStatus'), ev.message, 'err');
+      if (ev.type === 'progress') setStatus($('scanStatus'), `Checked ${ev.seen} products — ${ev.found} "Default" value(s) so far…`);
+    });
+    if (!last || last.type === 'error') throw new Error(last?.message || 'Scan failed');
+    state.rows = last.rows; state.shop = last.shop; state.picked.clear(); state.names = {};
+    for (const r of state.rows) {
+      state.names[keyOf(r)] = r.suggestion || '';
+      if ((r.type === 'A' || r.type === 'B') && ['high', 'medium'].includes(r.confidence) && r.suggestion) state.picked.add(keyOf(r));
+    }
+    const s = last.summary;
+    setStatus($('scanStatus'), `Found ${s.total} "Default" value(s) on ${s.products} product(s). Nothing was changed.`, 'ok');
+    state.filter = 'all'; render();
+    $('resultsCard').classList.remove('hidden');
+  } catch (e) { setStatus($('scanStatus'), e.message, 'err'); }
+  $('btnScan').disabled = false;
+};
+
+function shown() {
+  const f = state.filter;
+  return state.rows.filter(r => f === 'all' || r.type === f || (f === 'none' && !r.suggestion) || (f === 'check' && ['low', 'clash', 'none'].includes(r.confidence)));
+}
+function render() {
+  const n = f => (f === 'all' ? state.rows : state.rows.filter(r => r.type === f || (f === 'none' && !r.suggestion) || (f === 'check' && ['low', 'clash', 'none'].includes(r.confidence)))).length;
+  $('stats').innerHTML = [['all', 'All'], ['A', 'A — next to real colours'], ['B', 'B — only colour + sizes'], ['C', 'C — one variant'], ['check', 'Please check'], ['none', 'No suggestion']]
+    .map(([f, l]) => `<div class="stat ${state.filter === f ? 'on' : ''}" data-f="${f}"><b>${n(f)}</b><span>${l}</span></div>`).join('');
+  document.querySelectorAll('.stat').forEach(el => el.onclick = () => { state.filter = el.dataset.f; render(); });
+  const admin = id => state.shop ? `https://${state.shop}/admin/products/${String(id).split('/').pop()}` : '#';
+  $('rows').innerHTML = shown().map(r => {
+    const k = keyOf(r);
+    return `<tr>
+      <td><input type="checkbox" data-k="${esc(k)}" ${state.picked.has(k) ? 'checked' : ''}></td>
+      <td><a href="${admin(r.productId)}" target="_blank">${esc(r.title)}</a><div class="muted"><a href="https://www.urbandeco.co.uk/products/${esc(r.handle)}" target="_blank">${esc(r.handle)}</a>${r.status !== 'ACTIVE' ? ' · ' + esc(r.status.toLowerCase()) : ''}</div></td>
+      <td>${esc(r.vendor)}</td>
+      <td><span class="tag t-${r.type}">${r.type}</span></td>
+      <td>${esc(r.optionName)}</td>
+      <td>${esc(r.current)}</td>
+      <td>${esc(r.otherValues.join(', ')) || '<span class="muted">—</span>'}</td>
+      <td>${r.variants}</td>
+      <td><input type="text" data-n="${esc(k)}" value="${esc(state.names[k])}" placeholder="type the real name"></td>
+      <td><span class="tag c-${r.confidence}">${r.confidence === 'none' ? 'no suggestion' : r.confidence}</span></td>
+      <td class="notes">${r.notes.map(esc).join('<br>')}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="11" class="muted">Nothing here.</td></tr>';
+  document.querySelectorAll('#rows input[type=checkbox]').forEach(el => el.onchange = () => { el.checked ? state.picked.add(el.dataset.k) : state.picked.delete(el.dataset.k); });
+  document.querySelectorAll('#rows input[type=text]').forEach(el => el.oninput = () => {
+    state.names[el.dataset.n] = el.value;
+    const cb = document.querySelector(`#rows input[type=checkbox][data-k="${CSS.escape(el.dataset.n)}"]`);
+    if (el.value.trim() && cb && !cb.checked) { cb.checked = true; state.picked.add(el.dataset.n); }
+  });
+  $('selAll').checked = false;
+}
+$('selAll').onchange = e => {
+  for (const r of shown()) { const k = keyOf(r); if (e.target.checked && String(state.names[k] || '').trim()) state.picked.add(k); else if (!e.target.checked) state.picked.delete(k); }
+  const keep = e.target.checked; render(); $('selAll').checked = keep;
+};
+
+$('btnApply').onclick = async () => {
+  const items = state.rows.filter(r => state.picked.has(keyOf(r))).map(r => ({ productId: r.productId, optionId: r.optionId, valueId: r.valueId, current: r.current,
+    newName: String(state.names[keyOf(r)] || '').trim(), handle: r.handle, title: r.title }));
+  if (!items.length) { setStatus($('applyStatus'), 'Tick at least one row.', 'err'); return; }
+  const empty = items.filter(i => !i.newName);
+  if (empty.length) { setStatus($('applyStatus'), `${empty.length} ticked row(s) have no name — type one or untick them.`, 'err'); return; }
+  const dryRun = $('dryRun').checked;
+  if (!dryRun && !confirm(`Rename ${items.length} option value(s) LIVE on Shopify?\n\n` + items.slice(0, 15).map(i => `• ${i.title}: "${i.current}" → "${i.newName}"`).join('\n') + (items.length > 15 ? `\n… and ${items.length - 15} more` : '') + '\n\nSaved for Undo.')) return;
+  $('btnApply').disabled = true; setStatus($('applyStatus'), dryRun ? 'Dry run…' : 'Renaming…');
+  try {
+    const data = await (await fetch('/api/default-colours/apply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items, dryRun }) })).json();
+    if (data.error) throw new Error(data.error);
+    $('log').innerHTML = data.log.map(l => `<tr><td><span class="tag t-${l.status}">${esc(l.status.replace('_', ' '))}</span></td><td>${esc(l.message)}</td></tr>`).join('');
+    $('logCard').classList.remove('hidden');
+    if (!dryRun && data.undoId) {
+      try {
+        const res = await fetch(`/api/shopify/undo/${data.undoId}/download`);
+        if (res.ok) { const a = document.createElement('a'); a.href = URL.createObjectURL(await res.blob()); a.download = `undo_default-colours_${data.undoId}.json`; a.click(); }
+      } catch (_) {}
+    }
+    setStatus($('applyStatus'), dryRun ? `Dry run — ${data.log.filter(l => l.status === 'dry_run').length} would be renamed, nothing changed. Untick Dry Run to rename for real.`
+      : `Renamed ${data.changed}, skipped ${data.skipped}, failed ${data.failed}. Run "Find" again to refresh.`, data.failed ? 'err' : 'ok');
+  } catch (e) { setStatus($('applyStatus'), e.message, 'err'); }
+  $('btnApply').disabled = false;
+};
+
+$('btnCsv').onclick = () => {
+  const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const head = ['Type', 'Product', 'Handle', 'Vendor', 'Status', 'Option', 'Now', 'Other values', 'Variants', 'SKUs', 'Suggested name', 'Confidence', 'How we found it'];
+  const lines = state.rows.map(r => [r.type, r.title, r.handle, r.vendor, r.status, r.optionName, r.current, r.otherValues.join(' | '), r.variants, r.skus.join(' '),
+    state.names[keyOf(r)] || '', r.confidence, r.notes.join(' / ')].map(q).join(','));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['﻿' + [head.map(q).join(','), ...lines].join('\n')], { type: 'text/csv;charset=utf-8' }));
+  a.download = `default-colours_${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+};
+</script>
+</body>
+</html>

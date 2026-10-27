@@ -35,6 +35,7 @@ app.use('/api/shopify', shopifyRoutes);
 app.use('/api/stock', stockSyncRoutes);
 app.use('/api/images', imageSyncRoutes);
 app.use('/api/brands', brandRoutes);
+app.use('/api/default-colours', require('./routes/defaultcolours'));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));

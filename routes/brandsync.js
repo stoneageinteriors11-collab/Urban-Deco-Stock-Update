@@ -550,8 +550,8 @@ async function crossBrandIndex() {
         const feed = b.id === 215 ? await fetchCfsProducts() : await fetchBrandFeed(b.id);
         const label = `${feed[0]?.brandName || b.vendor} (brand ${b.id})`;
         for (const p of feed) {
-          byProd.set(String(p.productId), { brandId: b.id, label, vendor: b.vendor });
-          for (const v of (Array.isArray(p.variants) ? p.variants : [])) byVar.set(String(v.variantId), { brandId: b.id, label, vendor: b.vendor });
+          byProd.set(String(p.productId), { brandId: b.id, label, vendor: b.vendor, name: p.productName || '' });
+          for (const v of (Array.isArray(p.variants) ? p.variants : [])) byVar.set(String(v.variantId), { brandId: b.id, label, vendor: b.vendor, name: `${p.productName || ''}${v.variantOption ? ' ' + v.variantOption : ''}` });
         }
       } catch (e) { failed.push(`${b.vendor} (${e.message})`); }
     }
@@ -898,3 +898,5 @@ module.exports._orderAhead = { dueDay, ukToday, orderAheadCheck };
 module.exports._wrongVendor = { wrongVendorRows };
 module.exports.clearStoreCache = clearStoreCache;
 module.exports._codes = { chooseProductCode };
+// shared with routes/defaultcolours.js
+module.exports._shared = { gql, graphqlClient, storeProducts, crossBrandIndex, startKeepAwake, stopKeepAwake, clearStoreCache, sleep };

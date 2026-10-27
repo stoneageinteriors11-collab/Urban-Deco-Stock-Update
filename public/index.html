@@ -327,6 +327,7 @@
       <p>Urban Deco (Shopify) ↔ Choice Furniture Superstore — orphaned variant cleanup</p>
     </div>
     <a class="ud-only" href="/brands.html" style="margin-left:auto;background:var(--surface2);border:1px solid var(--border);color:var(--text);text-decoration:none;padding:8px 14px;border-radius:8px;font-size:13px;font-weight:600">🏷️ Other Brands</a>
+    <a class="ud-only" href="/default-colours.html" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);text-decoration:none;padding:8px 14px;border-radius:8px;font-size:13px;font-weight:600">🎨 "Default" colours</a>
     <a class="ud-only" href="/image-sync.html" style="background:var(--accent);color:#fff;text-decoration:none;padding:8px 14px;border-radius:8px;font-size:13px;font-weight:600">🖼️ Step 7 — Image Sync</a>
   </header>
 
@@ -1907,7 +1908,7 @@ async function testConnection() {
     p.classList.toggle('hidden');
     if (!p.classList.contains('hidden')) loadUndoRuns();
   }
-  const UNDO_TYPES = { status: 'status change(s)', sku: 'SKU change(s)', photos: 'photo set(s)' };
+  const UNDO_TYPES = { status: 'status change(s)', sku: 'SKU change(s)', photos: 'photo set(s)', vendor: 'vendor change(s)', title: 'title change(s)', 'option-value': 'colour name(s)' };
   async function loadUndoRuns() {
     const el = document.getElementById('undo-list');
     try {

@@ -948,6 +948,20 @@ router.post('/undo/:id', async (req, res) => {
         if (errs.length) throw new Error(errs.map(x => x.message).join(', '));
         p.vendor = e.before;
         log.push({ ...base, status: 'undone', message: `Vendor put back: "${e.after}" → "${e.before}" · ${name}` });
+      } else if (e.type === 'option-value') {
+        // "Default" colour renamed (routes/defaultcolours.js) → put the old name back
+        const { M_RENAME, Q_PRODUCT } = require('./defaultcolours')._q;
+        const pp = (await gql(client, Q_PRODUCT, { id: e.productId }))?.product;
+        const o = pp?.options.find(x => x.id === e.optionId);
+        const val = o?.optionValues.find(x => x.id === e.valueId);
+        if (!val) { log.push({ ...base, status: 'error', message: `${e.optionName} value no longer exists — can't put "${e.before}" back · ${name}` }); failed++; continue; }
+        if (val.name === e.before) { log.push({ ...base, status: 'info', message: `${e.optionName} is already "${e.before}" · ${name}` }); doneIdx.push(i); continue; }
+        if (val.name !== e.after && !force) { log.push({ ...base, status: 'conflict', message: `${e.optionName} was changed after the run (now "${val.name}") — skipped; tick "Overwrite" to undo anyway · ${name}` }); skipped++; continue; }
+        if (dryRun) { log.push({ ...base, status: 'dry_run', message: `Would put ${e.optionName} back: "${val.name}" → "${e.before}" · ${name}` }); continue; }
+        const r = await gql(client, M_RENAME, { productId: e.productId, option: { id: e.optionId }, values: [{ id: e.valueId, name: e.before }] });
+        const errs = r?.productOptionUpdate?.userErrors || [];
+        if (errs.length) throw new Error(errs.map(x => x.message).join(', '));
+        log.push({ ...base, status: 'undone', message: `${e.optionName} put back: "${e.after}" → "${e.before}" · ${name}` });
       } else if (e.type === 'photos') {
         if (dryRun) {
           for (const ph of e.photos) log.push({ ...base, status: 'dry_run', message: `Would re-attach photo · ${name}`, imageUrl: ph.url, imageVerdict: 'keep' });
