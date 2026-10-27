@@ -360,10 +360,36 @@ const CODE_PRODUCTS = `
       nodes {
         id handle title vendor status
         metafield(namespace: "custom", key: "product_code") { value }
+        iid: metafield(namespace: "custom", key: "iproductid") { value }
         variants(first: 250) { nodes { id sku title metafield(namespace: "custom", key: "variant_code") { value } } }
       }
     }
   }`;
+
+/**
+ * product_code = exactly what CFS has for THIS product's own CFS product.
+ *   own CFS product = custom.iproductid (the CFS product the page was made from)
+ *   - own product in this brand's feed       → its CFS code (copied as-is, even if Shopify differs)
+ *   - own product NOT in the feed             → leave the code alone (never borrow another colour's code)
+ *   - no iproductid: one CFS product on page  → that code
+ *                    several CFS products     → keep the current code if it's one of them, else leave it — flagged
+ * Returns { code: string|null (null = don't change), note, flag }
+ */
+function chooseProductCode(p, codes, codeByProdId) {
+  const iid = String(p.iid?.value || '').trim();
+  const cur = p.metafield?.value || '';
+  const distinct = [...new Set(p.variants.nodes.map(v => v.sku && codes.get(v.sku.trim())?.productCode).filter(Boolean))];
+  if (iid) {
+    if (codeByProdId.has(iid)) return { code: codeByProdId.get(iid), note: `own CFS product ${iid}` };
+    return { code: null, note: distinct.length ? `own CFS product ${iid} is not in the CFS feed — product_code left as "${cur}" (other colours' codes not used)` : null };
+  }
+  if (distinct.length === 1) return { code: distinct[0] };
+  if (distinct.length > 1) {
+    if (distinct.includes(cur)) return { code: null, flag: `Variants belong to ${distinct.length} CFS products (${distinct.join(', ')}) and there's no iproductid — product_code kept as "${cur}"` };
+    return { code: null, flag: `Variants belong to ${distinct.length} CFS products (${distinct.join(', ')}) and there's no iproductid — can't tell which is this product's own, product_code left as "${cur}", please check` };
+  }
+  return { code: null };
+}
 
 router.post('/codes-sync', async (req, res) => {
   // brandIds: one brand or all 14 (brandId still accepted)
@@ -400,8 +426,12 @@ router.post('/codes-sync', async (req, res) => {
    for (const brand of brands) {
     if (cancelled.has(runId)) return finish({ cancelled: true });
     send({ type: 'status', message: `Loading CFS feed for ${brand.vendor} (brand ${brand.id})…` });
-    let codes;
-    try { codes = buildBrandCodes(await fetchBrandFeed(brand.id)); }
+    let codes, codeByProdId;
+    try {
+      const feed = await fetchBrandFeed(brand.id);
+      codes = buildBrandCodes(feed);
+      codeByProdId = new Map(feed.filter(x => String(x.productCode || '').trim()).map(x => [String(x.productId), String(x.productCode).trim()]));
+    }
     catch (e) { c.failed++; log.push({ brand: brand.vendor, handle: '-', sku: '-', status: 'error', message: `${brand.vendor}: CFS feed failed — ${e.message} (brand skipped)` }); continue; }
     send({ type: 'status', message: `${brand.vendor} — CFS: ${codes.size} SKUs with codes` });
     const vendor = brand.vendor;
@@ -425,21 +455,19 @@ router.post('/codes-sync', async (req, res) => {
       done++; c.products++;
       const metafields = [], rows = [];
       const statusNote = p.status !== 'ACTIVE' ? ` (${p.status.toLowerCase()})` : '';
-      // product_code = CFS product code of the first variant found in CFS
+      // product_code = what CFS has for this product's own CFS product (see chooseProductCode)
       const found = p.variants.nodes.map(v => ({ v, code: v.sku ? codes.get(v.sku.trim()) : null }));
-      const prodCode = found.find(x => x.code?.productCode)?.code.productCode || '';
+      const pick = chooseProductCode(p, codes, codeByProdId);
       const curProd = p.metafield?.value || '';
-      if (prodCode && curProd !== prodCode) {
-        metafields.push({ ownerId: p.id, namespace: 'custom', key: 'product_code', value: prodCode, type: 'single_line_text_field' });
+      if (pick.code && curProd !== pick.code) {
+        metafields.push({ ownerId: p.id, namespace: 'custom', key: 'product_code', value: pick.code, type: 'single_line_text_field' });
         c.productCodes++;
         rows.push({ handle: p.handle, sku: '(product)', status: dryRun ? 'dry_run' : 'updated',
-          message: `${dryRun ? 'Would set' : 'Set'} product_code: "${curProd}" → "${prodCode}"${statusNote}` });
+          message: `${dryRun ? 'Would set' : 'Set'} product_code: "${curProd}" → "${pick.code}"${pick.note ? ` (${pick.note})` : ''}${statusNote}` });
+      } else if (!pick.code && pick.note) {
+        rows.push({ handle: p.handle, sku: '(product)', status: 'unchanged', message: pick.note + statusNote });
       }
-      const distinct = new Set(found.map(x => x.code?.productCode).filter(Boolean));
-      if (distinct.size > 1) {
-        c.flagged++;
-        rows.push({ handle: p.handle, sku: '(product)', status: 'flag', message: `Variants belong to ${distinct.size} CFS products (${[...distinct].join(', ')}) — product_code set to the first one, please check` });
-      }
+      if (pick.flag) { c.flagged++; rows.push({ handle: p.handle, sku: '(product)', status: 'flag', message: pick.flag + statusNote }); }
       for (const { v, code } of found) {
         if (!v.sku) continue;
         c.variants++;
@@ -865,3 +893,4 @@ module.exports = router;
 module.exports._orderAhead = { dueDay, ukToday, orderAheadCheck };
 module.exports._wrongVendor = { wrongVendorRows };
 module.exports.clearStoreCache = clearStoreCache;
+module.exports._codes = { chooseProductCode };
