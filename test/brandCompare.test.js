@@ -9,6 +9,7 @@ const feeds = {
     { productId: 10, brandName: 'J-Line', productName: 'Lamp', productCode: 'L1', stockStatus: 'IN STOCK', variants: [] },
     { productId: 11, brandName: 'J-Line', productName: 'Vase', productCode: 'V1', stockStatus: 'IN STOCK',
       variants: [{ variantId: 111, productCode: 'V1-S' }] },
+    { productId: 20, brandName: 'J-Line', productName: 'Clock', productCode: 'C1', stockStatus: 'IN STOCK', variants: [] },
   ],
   315: [{ productId: 55, brandName: 'Beehive', productName: 'Sofa', productCode: 'S1', variants: [] }], // Beehive
   215: [{ productId: 77, brandName: 'Urban Deco', productName: 'Table', productCode: 'T1', variants: [] }],
@@ -32,7 +33,18 @@ const shop = [
   { handle: 'lamp-own', title: 'Lamp Own', vendor: 'J-Line', status: 'ACTIVE', metafield: { value: 'L1' }, iid: { value: '16' }, variants: { nodes: [v('UD-16')] } },
   { handle: 'x', title: 'Not J-Line', vendor: 'J-Line Extra', status: 'ACTIVE', metafield: null, variants: { nodes: [v('UD-14')] } },
 ];
-axios.post = async (url, body) => ({ data: { data: { products: { pageInfo: { hasNextPage: false }, nodes: shop } } } });
+// whole-store variant list (reverse vendor check): the J-Line products above + products with other vendors
+const storeExtra = [
+  { handle: 'clock', title: 'Clock', vendor: 'Birlea', status: 'ACTIVE', variants: { nodes: [v('UD-20')] } },          // J-Line SKU, wrong vendor
+  { handle: 'mixed', title: 'Mixed', vendor: 'Urban Deco', status: 'DRAFT', variants: { nodes: [v('UD-20'), v('UD-77')] } }, // J-Line + Urban Deco
+  { handle: 'ud', title: 'UD Table', vendor: 'Urban Deco', status: 'ACTIVE', variants: { nodes: [v('UD-77')] } },        // not J-Line
+];
+const storeNodes = [...shop, ...storeExtra].flatMap(p => p.variants.nodes.map(x => ({ ...x, product: { id: 'gid://' + p.handle, handle: p.handle, title: p.title, vendor: p.vendor, status: p.status } })));
+let storeCalls = 0;
+axios.post = async (url, body) => {
+  if (/productVariants\(/.test(body.query)) { storeCalls++; return { data: { data: { productVariants: { pageInfo: { hasNextPage: false }, nodes: storeNodes } } } }; }
+  return { data: { data: { products: { pageInfo: { hasNextPage: false }, nodes: shop } } } };
+};
 
 const express = require('express');
 const app = express(); app.use(express.json());
@@ -42,7 +54,14 @@ const server = app.listen(0);
   try {
     const r = await (await fetch(`http://127.0.0.1:${server.address().port}/api/brands/compare`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ brandId: 363 }) })).json();
     assert(r.success, JSON.stringify(r));
-    const st = Object.fromEntries(r.results.map(x => [x.variantSku, x.matchStatus]));
+    const st = Object.fromEntries(r.results.filter(x => x.matchStatus !== 'wrong-vendor').map(x => [x.variantSku, x.matchStatus]));
+    // reverse vendor check
+    const wv = r.results.filter(x => x.matchStatus === 'wrong-vendor');
+    assert.deepStrictEqual(wv.map(x => `${x.handle}:${x.variantSku}:${x.wrongVendorMixed}`).sort(), ['clock:UD-20:false', 'mixed:UD-20:true']);
+    assert.strictEqual(wv[0].otherBrandVendor, 'J-Line');
+    assert.strictEqual(wv.find(x => x.handle === 'clock').currentVendor, 'Birlea');
+    assert(wv.find(x => x.handle === 'mixed').otherBrandNote.includes('UD-77 (Urban Deco)'), wv.find(x => x.handle === 'mixed').otherBrandNote);
+    assert.strictEqual(r.summary.wrongVendor, 2); assert.strictEqual(r.summary.wrongVendorProducts, 2);
     console.log(st, r.summary);
     assert.deepStrictEqual(st, { 'UD-10': 'ok', 'UD-11-111': 'ok', 'UD-11-999': 'cfs-product', 'UD-12': 'orphaned', 'UD-55': 'other-brand', 'UD-77': 'other-brand', 'UD-13': 'draft',
       'UD-15': 'orphaned', 'UD-16': 'code-only' });
@@ -54,6 +73,10 @@ const server = app.listen(0);
     const before = feedCalls;
     await (await fetch(`http://127.0.0.1:${server.address().port}/api/brands/compare`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ brandId: 363 }) })).json();
     assert.strictEqual(feedCalls - before, 1);
+    assert.strictEqual(storeCalls, 1, 'store list is kept 30 minutes');
+    require('../routes/brandsync').clearStoreCache();
+    await (await fetch(`http://127.0.0.1:${server.address().port}/api/brands/compare`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ brandId: 363 }) })).json();
+    assert.strictEqual(storeCalls, 2, 're-read after a vendor change');
     console.log('BRAND COMPARE TESTS PASSED');
   } catch (e) { console.error('BRAND COMPARE TESTS FAILED', e); process.exitCode = 1; }
   server.close();

@@ -1200,6 +1200,7 @@ router.post('/set-vendor', async (req, res) => {
     } catch (e) { log.push({ sku: '-', handle: it.handle, status: 'error', message: e.message }); failed++; }
   }
   const undoId = undoRun ? undo.save(undoRun) : null;
+  if (changed) { try { require('./brandsync').clearStoreCache(); } catch (_) {} }   // brand wrong-vendor check re-reads the store
   res.json({ success: true, dryRun, changed, failed, log, undoId });
 });
 

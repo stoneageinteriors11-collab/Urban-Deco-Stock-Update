@@ -529,6 +529,84 @@ async function crossBrandIndex() {
   return otherIndex;
 }
 
+// ── Reverse vendor check ──────────────────────────────────────────────────────
+// Products whose SKUs are in THIS brand's CFS feed but whose Shopify vendor is something
+// else (e.g. a Julian Bowen product saved as "Birlea"). They miss this brand's stock sync,
+// codes and order-ahead. Shown as "wrong-vendor" rows; the fix is Change Vendor.
+// The whole store's variant list is read once and kept 30 minutes.
+const STORE_VARIANTS = `
+  query v($after: String) {
+    productVariants(first: 250, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        sku price inventoryQuantity
+        selectedOptions { name value }
+        product { id handle title vendor status }
+      }
+    }
+  }`;
+let storeIdx = null;
+const clearStoreCache = () => { storeIdx = null; };   // called after a live vendor change
+async function storeProducts(client) {
+  if (storeIdx && Date.now() - storeIdx.at < 30 * 60 * 1000) return storeIdx.products;
+  const products = new Map();
+  let after = null;
+  do {
+    const d = await gql(client, STORE_VARIANTS, { after });
+    for (const v of d.productVariants.nodes) {
+      const p = v.product; if (!p) continue;
+      if (!products.has(p.handle)) products.set(p.handle, { handle: p.handle, title: p.title || '', vendor: p.vendor || '', status: (p.status || '').toLowerCase(), variants: [] });
+      products.get(p.handle).variants.push(v);
+    }
+    after = d.productVariants.pageInfo.hasNextPage ? d.productVariants.pageInfo.endCursor : null;
+    if (after) await sleep(150);
+  } while (after);
+  storeIdx = { at: Date.now(), products };
+  return products;
+}
+
+/**
+ * products: iterable of { handle, title, vendor, status, variants:[{sku, price, inventoryQuantity, selectedOptions}] }
+ * Returns one row per variant that belongs to this brand, on products with a different vendor.
+ * A product that ALSO has SKUs not in this brand's feed is "mixed" — shown, but not offered for a one-click fix.
+ */
+function wrongVendorRows(products, brand, feed, otherIdx = null) {
+  const prodIds = new Set(), varIds = new Set();
+  for (const p of feed) {
+    prodIds.add(String(p.productId));
+    for (const v of (Array.isArray(p.variants) ? p.variants : [])) varIds.add(String(v.variantId));
+  }
+  const mine = sku => { const { prodId, varId } = parseSku(sku); return (prodId && prodIds.has(prodId)) || (varId && varIds.has(varId)); };
+  const rows = [];
+  for (const p of products) {
+    if (sameVendor(p.vendor, brand.vendor)) continue;
+    const withSku = p.variants.filter(v => String(v.sku || '').trim());
+    const hits = withSku.filter(v => mine(v.sku.trim()));
+    if (!hits.length) continue;
+    const rest = withSku.filter(v => !mine(v.sku.trim()));
+    const where = v => {
+      const { prodId, varId } = parseSku(v.sku.trim());
+      const h = otherIdx && ((prodId && otherIdx.byProd.get(prodId)) || (varId && otherIdx.byVar.get(varId)));
+      return `${v.sku.trim()} (${h ? h.vendor : 'not in any CFS feed'})`;
+    };
+    const mixed = rest.length > 0;
+    const note = `Vendor on Shopify is "${p.vendor || '(blank)'}", but this SKU is in ${brand.vendor}'s CFS feed.`
+      + (mixed ? ` This product also has other SKUs: ${rest.slice(0, 5).map(where).join(', ')}${rest.length > 5 ? ` … +${rest.length - 5} more` : ''} — fix it by hand.`
+               : ` Change Vendor sets it to "${brand.vendor}".`);
+    for (const v of hits) {
+      const opts = (v.selectedOptions || []).filter(o => o.value !== 'Default Title').map(o => o.value);
+      rows.push({
+        handle: p.handle, title: p.title, variantSku: v.sku.trim(),
+        option1: opts[0] || '', option2: opts[1] || '', option3: opts[2] || '',
+        price: v.price || '', inventoryQty: v.inventoryQuantity ?? '', status: p.status,
+        matchStatus: 'wrong-vendor', currentVendor: p.vendor || '', otherBrandVendor: brand.vendor,
+        wrongVendorMixed: mixed, otherBrandNote: note,
+      });
+    }
+  }
+  return rows;
+}
+
 router.post('/compare', async (req, res) => {
   const brand = getBrand(req.body?.brandId);
   if (!brand) return res.status(400).json({ success: false, error: 'Unknown brand' });
@@ -602,6 +680,22 @@ router.post('/compare', async (req, res) => {
       summary.codeOnly = results.filter(r => r.matchStatus === 'code-only').length;
     }
     summary.otherBrand = otherBrand;
+
+    // Reverse vendor check — this brand's SKUs sitting on products with another vendor
+    let wrongVendor = [];
+    try {
+      const store = await storeProducts(client);
+      const rows = wrongVendorRows(store.values(), brand, feed);
+      if (rows.some(r => r.wrongVendorMixed)) {   // name the other SKUs' brands for mixed products
+        const idx = await crossBrandIndex();
+        wrongVendor = wrongVendorRows(store.values(), brand, feed, idx);
+      } else wrongVendor = rows;
+    } catch (e) {
+      crossNote = (crossNote ? crossNote + ' · ' : '') + `Wrong-vendor check failed: ${e.message}`;
+    }
+    summary.wrongVendor = wrongVendor.length;
+    summary.wrongVendorProducts = new Set(wrongVendor.map(r => r.handle)).size;
+    results.push(...wrongVendor);
     console.log(`  ✓ Other Brands compare ${brand.vendor}: ${JSON.stringify(summary)}`);
     res.json({
       success: true, brand: { id: brand.id, vendor: brand.vendor }, results, summary, crossNote,
@@ -761,3 +855,5 @@ router.post('/order-ahead', async (req, res) => {
 
 module.exports = router;
 module.exports._orderAhead = { dueDay, ukToday, orderAheadCheck };
+module.exports._wrongVendor = { wrongVendorRows };
+module.exports.clearStoreCache = clearStoreCache;
