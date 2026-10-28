@@ -3,8 +3,8 @@ const multer  = require('multer');
 const path    = require('path');
 const fs      = require('fs');
 const { streamShopifyVariants } = require('../utils/parseCSV');
-const { compareVariants }       = require('../Claude outputs/fix-wrong-variant-no/new/utils/matchVariants');
-const { fetchCfsProducts, buildCompareData } = require('../Claude outputs/fix-wrong-variant-no/new/utils/cfsApi');
+const { compareVariants }       = require('../utils/matchVariants');
+const { fetchCfsProducts, buildCompareData } = require('../utils/cfsApi');
 
 const router = express.Router();
 

@@ -6,8 +6,8 @@ const axios   = require('axios');
 require('dotenv').config();
 
 const { streamShopifyVariants, getRows } = require('../utils/parseCSV');
-const { fetchCfsProducts, buildStockData, buildCompareData } = require('../Claude outputs/fix-wrong-variant-no/new/utils/cfsApi');
-const { compareVariants } = require('../Claude outputs/fix-wrong-variant-no/new/utils/matchVariants');
+const { fetchCfsProducts, buildStockData, buildCompareData } = require('../utils/cfsApi');
+const { compareVariants } = require('../utils/matchVariants');
 
 const router = express.Router();
 
@@ -1542,4 +1542,4 @@ router.get('/download-log', (req, res) => {
   res.send(csvLines.join('\n'));
 });
 
-module.exports = router;
+module.exports = router;

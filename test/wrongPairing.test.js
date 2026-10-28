@@ -1,8 +1,8 @@
 // Batilda (Actona): Black/Anthracite variants carry Cream's variant numbers → SKU typo with the right SKU.
 const assert = require('assert');
-const { buildCompareData } = require('../utils/cfsApi');
-const { compareVariants } = require('../utils/matchVariants');
-const { runChecks } = require('../utils/storeHealth');
+const { buildCompareData } = require('../Claude outputs/fix-wrong-variant-no/new/utils/cfsApi');
+const { compareVariants } = require('../Claude outputs/fix-wrong-variant-no/new/utils/matchVariants');
+const { runChecks } = require('../Claude outputs/fix-wrong-variant-no/new/utils/storeHealth');
 
 const packs = ['2 x Chairs', '4 x Chairs', '6 x Chairs', '8 x Chairs', '10 x Chairs', '12 x Chairs'];
 const feed = [

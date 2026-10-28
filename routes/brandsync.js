@@ -517,8 +517,8 @@ router.post('/codes-sync', async (req, res) => {
 // Shopify products with this vendor. Extra safety: a SKU that isn't in this brand's
 // feed is also looked up in every other brand's feed (and Urban Deco's). If it's
 // there, the row becomes "other-brand" — shown for checking, never deleted.
-const { buildCompareData, fetchCfsProducts } = require('../Claude outputs/fix-wrong-variant-no/new/utils/cfsApi');
-const { compareVariants, parseSku } = require('../Claude outputs/fix-wrong-variant-no/new/utils/matchVariants');
+const { buildCompareData, fetchCfsProducts } = require('../utils/cfsApi');
+const { compareVariants, parseSku } = require('../utils/matchVariants');
 
 const COMPARE_PRODUCTS = `
   query p($first: Int!, $after: String, $q: String) {
