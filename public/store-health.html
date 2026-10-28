@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Store Health</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --surface2: #222636; --border: #2e3248;
+    --accent: #6366f1; --accent-hover: #818cf8; --danger: #ef4444; --success: #22c55e;
+    --warning: #f59e0b; --info: #38bdf8; --text: #e2e8f0; --text-muted: #94a3b8; --radius: 10px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; line-height: 1.5; padding: 24px 16px 80px; }
+  .container { max-width: 1300px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 24px; flex-wrap: wrap; }
+  header .logo { width: 42px; height: 42px; background: var(--accent); border-radius: 10px; display: grid; place-items: center; font-size: 22px; }
+  header h1 { font-size: 20px; } header p { font-size: 13px; color: var(--text-muted); }
+  header a { margin-left: auto; color: var(--accent-hover); text-decoration: none; font-size: 13px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 18px; }
+  .card-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); margin-bottom: 14px; display: flex; gap: 10px; align-items: center; }
+  .help { color: var(--text-muted); font-size: 13px; margin-bottom: 12px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .btn { border: none; border-radius: 8px; padding: 9px 16px; font-size: 13px; font-weight: 600; cursor: pointer; color: #fff; background: var(--accent); text-decoration: none; display: inline-block; }
+  .btn:hover:not(:disabled) { background: var(--accent-hover); } .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.secondary { background: var(--surface2); border: 1px solid var(--border); color: var(--text); }
+  label.chk { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; font-size: 13px; }
+  input[type=text] { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 7px 10px; font: inherit; min-width: 240px; }
+  .status { font-size: 13px; color: var(--text-muted); margin-top: 10px; min-height: 20px; }
+  .status.err { color: var(--danger); } .status.ok { color: var(--success); } .status.warn { color: var(--warning); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+  .tile { background: var(--surface2); border: 2px solid var(--border); border-radius: 8px; padding: 12px; cursor: pointer; }
+  .tile:hover { border-color: var(--accent-hover); } .tile.on { border-color: var(--accent); background: rgba(99,102,241,.1); }
+  .tile b { font-size: 24px; display: block; } .tile.bad b { color: var(--warning); } .tile.good b { color: var(--success); }
+  .tile .l { font-weight: 600; font-size: 13px; } .tile .w { color: var(--text-muted); font-size: 11px; margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
+  th { text-align: left; color: var(--text-muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  td a { color: var(--accent-hover); text-decoration: none; }
+  .muted { color: var(--text-muted); } .sku { font-family: ui-monospace, monospace; font-size: 11px; color: var(--text-muted); word-break: break-all; }
+  .wrap { max-height: 640px; overflow: auto; }
+  .fixbox { background: rgba(99,102,241,.08); border: 1px solid rgba(99,102,241,.3); border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 8px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="logo">🩺</div>
+    <div>
+      <h1>Store health</h1>
+      <p>Finds problems across the whole store — read-only, nothing is changed here</p>
+    </div>
+    <a href="/">← Back to Urban Deco tool</a>
+  </header>
+
+  <div class="card">
+    <div class="card-title">Run the check</div>
+    <p class="help">Reads every product and variant in Shopify plus all CFS feeds (Urban Deco + 14 brands), then runs 11 checks. The first run takes 1–3 minutes; runs within 30 minutes reuse the same data (tick "Fresh data" after making fixes).</p>
+    <div class="row">
+      <label class="chk"><input type="checkbox" id="includeDrafts"> Include draft products</label>
+      <label class="chk"><input type="checkbox" id="refresh"> Fresh data (re-read the store)</label>
+      <button class="btn" id="btnRun">Run check</button>
+      <button class="btn secondary hidden" id="btnAllCsv">⬇ Export everything (CSV)</button>
+    </div>
+    <div class="status" id="runStatus"></div>
+  </div>
+
+  <div class="card hidden" id="tilesCard">
+    <div class="card-title">Results</div>
+    <div class="tiles" id="tiles"></div>
+  </div>
+
+  <div class="card hidden" id="listCard">
+    <div class="card-title" id="listTitle"></div>
+    <div class="fixbox" id="fixBox"></div>
+    <div class="row">
+      <input type="text" id="search" placeholder="Search product / SKU / vendor…">
+      <span class="muted" id="shown" style="font-size:12px"></span>
+      <button class="btn secondary" id="btnCsv" style="margin-left:auto">⬇ Export this list (CSV)</button>
+    </div>
+    <div class="wrap"><table>
+      <thead><tr><th>Product</th><th>Vendor</th><th>Status</th><th>SKU(s)</th><th>Details</th><th>Fix</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const state = { data: null, sel: null };
+function setStatus(el, msg, cls = '') { el.className = 'status ' + cls; el.textContent = msg; }
+
+async function stream(url, body, onEvent) {
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  if (!res.ok && !res.body) throw new Error('HTTP ' + res.status);
+  const reader = res.body.getReader(), dec = new TextDecoder(); let buf = '', last = null;
+  for (;;) {
+    const { done, value } = await reader.read(); if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i; while ((i = buf.indexOf('\n\n')) >= 0) {
+      const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+      if (!chunk.startsWith('data: ')) continue;
+      const ev = JSON.parse(chunk.slice(6)); last = ev; onEvent(ev);
+    }
+  }
+  return last;
+}
+
+$('btnRun').onclick = async () => {
+  $('btnRun').disabled = true;
+  try {
+    const last = await stream('/api/store-health/run', { includeDrafts: $('includeDrafts').checked, refresh: $('refresh').checked }, ev => {
+      if (ev.type === 'status') setStatus($('runStatus'), ev.message);
+      if (ev.type === 'warn') setStatus($('runStatus'), ev.message, 'warn');
+    });
+    if (!last || last.type === 'error') throw new Error(last?.message || 'Check failed — lost the connection');
+    state.data = last; $('refresh').checked = false;
+    const issues = last.checks.reduce((a, c) => a + c.count, 0);
+    setStatus($('runStatus'), `Checked ${last.products.toLocaleString()} ${last.includeDrafts ? 'active + draft' : 'active'} products at ${new Date(last.checkedAt).toLocaleTimeString()} — ${issues.toLocaleString()} item(s) across ${last.checks.filter(c => c.count).length} checks. Nothing was changed.`
+      + (last.cfsFailed.length ? ` ⚠ Couldn't load CFS feeds for: ${last.cfsFailed.join(', ')}` : ''), last.cfsFailed.length ? 'warn' : 'ok');
+    renderTiles();
+    const first = last.checks.find(c => c.count);
+    if (first) select(first.id); else $('listCard').classList.add('hidden');
+    $('btnAllCsv').classList.remove('hidden');
+  } catch (e) { setStatus($('runStatus'), e.message, 'err'); }
+  $('btnRun').disabled = false;
+};
+
+function renderTiles() {
+  $('tiles').innerHTML = state.data.checks.map(c => `<div class="tile ${c.count ? 'bad' : 'good'} ${state.sel === c.id ? 'on' : ''}" data-id="${c.id}">
+    <b>${c.count.toLocaleString()}</b><div class="l">${esc(c.label)}</div><div class="w">${esc(c.why)}</div></div>`).join('');
+  document.querySelectorAll('.tile').forEach(el => el.onclick = () => select(el.dataset.id));
+  $('tilesCard').classList.remove('hidden');
+}
+
+// clean-up page for a vendor: Urban Deco → main page, a brand → /?brand=ID
+function cleanupLink(vendor) {
+  const b = (state.data.brands || []).find(x => x.vendor.toLowerCase() === String(vendor || '').trim().toLowerCase());
+  return b ? `/?brand=${b.id}` : (String(vendor).trim().toLowerCase() === 'urban deco' ? '/' : null);
+}
+function fixFor(c, r) {
+  if (r.fixLink) return `<a href="${esc(r.fixLink)}" target="_blank">Open →</a>`;
+  if (['not-in-cfs', 'sku-typo'].includes(c.id)) { const l = cleanupLink(r.vendor); return l ? `<a href="${l}" target="_blank">Clean-up →</a>` : '<span class="muted">by hand</span>'; }
+  if (c.id === 'wrong-vendor') { const l = r.shouldBe && cleanupLink(r.shouldBe); return l ? `<a href="${l}" target="_blank">${esc(r.shouldBe)} clean-up →</a>` : '<span class="muted">by hand</span>'; }
+  if (c.id === 'missing-ids') return '<a href="/brands.html" target="_blank">Product codes →</a>';
+  return '<span class="muted">by hand</span>';
+}
+
+function select(id) {
+  state.sel = id; renderTiles();
+  const c = state.data.checks.find(x => x.id === id);
+  $('listTitle').textContent = `${c.label} — ${c.count.toLocaleString()}`;
+  $('fixBox').innerHTML = `<b>Why it matters:</b> ${esc(c.why)}<br><b>How to fix:</b> ${esc(c.fix)}${c.link ? ` — <a href="${c.link}" target="_blank" style="color:var(--accent-hover)">open</a>` : ''}`;
+  $('search').value = '';
+  renderRows();
+  $('listCard').classList.remove('hidden');
+}
+function renderRows() {
+  const c = state.data.checks.find(x => x.id === state.sel);
+  const q = $('search').value.trim().toLowerCase();
+  const rows = c.rows.filter(r => !q || [r.title, r.handle, r.vendor, r.skus.join(' '), r.detail].join(' ').toLowerCase().includes(q));
+  const admin = id => state.data.shop ? `https://${state.data.shop}/admin/products/${String(id || '').split('/').pop()}` : '#';
+  $('rows').innerHTML = rows.slice(0, 2000).map(r => `<tr>
+    <td><a href="${admin(r.productId)}" target="_blank">${esc(r.title)}</a><div><a class="muted" href="https://www.urbandeco.co.uk/products/${esc(r.handle)}" target="_blank">${esc(r.handle)}</a></div></td>
+    <td>${esc(r.vendor)}</td><td>${esc(String(r.status).toLowerCase())}</td>
+    <td class="sku">${esc(r.skus.slice(0, 8).join(' '))}${r.skus.length > 8 ? ` … +${r.skus.length - 8}` : ''}</td>
+    <td>${esc(r.detail)}</td><td>${fixFor(c, r)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">Nothing here 🎉</td></tr>';
+  $('shown').textContent = `Showing ${Math.min(rows.length, 2000).toLocaleString()} of ${c.rows.length.toLocaleString()}${rows.length > 2000 ? ' (export for the full list)' : ''}`;
+}
+$('search').oninput = () => renderRows();
+
+function csv(rowsWithCheck, name) {
+  const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const head = ['Check', 'Product', 'Handle', 'Vendor', 'Status', 'SKU(s)', 'Details', 'Should be vendor', 'Shopify admin', 'Website'];
+  const lines = rowsWithCheck.map(([c, r]) => [c.label, r.title, r.handle, r.vendor, r.status, r.skus.join(' '), r.detail, r.shouldBe || '',
+    state.data.shop ? `https://${state.data.shop}/admin/products/${String(r.productId || '').split('/').pop()}` : '', `https://www.urbandeco.co.uk/products/${r.handle}`].map(q).join(','));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['﻿' + [head.map(q).join(','), ...lines].join('\n')], { type: 'text/csv;charset=utf-8' }));
+  a.download = `${name}_${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+}
+$('btnCsv').onclick = () => { const c = state.data.checks.find(x => x.id === state.sel); csv(c.rows.map(r => [c, r]), `store-health_${c.id}`); };
+$('btnAllCsv').onclick = () => csv(state.data.checks.flatMap(c => c.rows.map(r => [c, r])), 'store-health_all');
+</script>
+</body>
+</html>

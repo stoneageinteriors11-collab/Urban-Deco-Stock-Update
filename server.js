@@ -36,6 +36,7 @@ app.use('/api/stock', stockSyncRoutes);
 app.use('/api/images', imageSyncRoutes);
 app.use('/api/brands', brandRoutes);
 app.use('/api/default-colours', require('./routes/defaultcolours'));
+app.use('/api/store-health', require('./routes/storehealth'));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));

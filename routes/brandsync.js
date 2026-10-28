@@ -587,7 +587,7 @@ async function storeProducts(client) {
     const d = await gql(client, STORE_VARIANTS, { after });
     for (const v of d.productVariants.nodes) {
       const p = v.product; if (!p) continue;
-      if (!products.has(p.handle)) products.set(p.handle, { handle: p.handle, title: p.title || '', vendor: p.vendor || '', status: (p.status || '').toLowerCase(), variants: [] });
+      if (!products.has(p.handle)) products.set(p.handle, { id: p.id, handle: p.handle, title: p.title || '', vendor: p.vendor || '', status: (p.status || '').toLowerCase(), variants: [] });
       products.get(p.handle).variants.push(v);
     }
     after = d.productVariants.pageInfo.hasNextPage ? d.productVariants.pageInfo.endCursor : null;
