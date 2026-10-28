@@ -49,6 +49,9 @@ app.use('/api/default-colours', require('../routes/defaultcolours'));
 app.use('/api/shopify', require('../routes/shopify'));
 const server = app.listen(0);
 const base = () => `http://127.0.0.1:${server.address().port}`;
+const applySse = async body => { const t = await (await post('/api/default-colours/apply', body)).text();
+  const evs = t.split('\n\n').filter(l => l.startsWith('data: ')).map(l => JSON.parse(l.slice(6)));
+  assert(evs.some(e => e.type === 'progress'), 'progress events'); return evs.pop(); };
 const post = async (path, body) => (await fetch(base() + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }));
 (async () => {
   try {
@@ -62,17 +65,17 @@ const post = async (path, body) => (await fetch(base() + path, { method: 'POST',
     assert.strictEqual(r.suggestion, 'Oak'); assert.strictEqual(r.confidence, 'high'); assert.strictEqual(r.type, 'A');
     const item = { productId: r.productId, optionId: r.optionId, valueId: r.valueId, current: r.current, newName: r.suggestion, handle: r.handle, title: r.title };
     // dry run
-    let d = await (await post('/api/default-colours/apply', { items: [item], dryRun: true })).json();
+    let d = await applySse({ items: [item], dryRun: true });
     assert.strictEqual(renames.length, 0); assert(/Would rename Color: "Default" → "Oak"/.test(d.log[0].message), JSON.stringify(d));
     // clash is refused
-    d = await (await post('/api/default-colours/apply', { items: [{ ...item, newName: 'brown' }], dryRun: false })).json();
+    d = await applySse({ items: [{ ...item, newName: 'brown' }], dryRun: false });
     assert.strictEqual(d.failed, 1); assert.strictEqual(renames.length, 0);
     // live
-    d = await (await post('/api/default-colours/apply', { items: [item], dryRun: false })).json();
+    d = await applySse({ items: [item], dryRun: false });
     assert.strictEqual(d.changed, 1); assert(d.undoId);
     assert.strictEqual(P.options[0].optionValues[1].name, 'Oak');
     // second time → already done
-    d = await (await post('/api/default-colours/apply', { items: [{ ...item, current: 'Oak' }], dryRun: false })).json();
+    d = await applySse({ items: [{ ...item, current: 'Oak' }], dryRun: false });
     assert.strictEqual(d.skipped, 1);
     // undo puts "Default" back
     let u;

@@ -202,21 +202,30 @@ $('btnApply').onclick = async () => {
   if (empty.length) { setStatus($('applyStatus'), `${empty.length} ticked row(s) have no name — type one or untick them.`, 'err'); return; }
   const dryRun = $('dryRun').checked;
   if (!dryRun && !confirm(`Rename ${items.length} option value(s) LIVE on Shopify?\n\n` + items.slice(0, 15).map(i => `• ${i.title}: "${i.current}" → "${i.newName}"`).join('\n') + (items.length > 15 ? `\n… and ${items.length - 15} more` : '') + '\n\nSaved for Undo.')) return;
-  $('btnApply').disabled = true; setStatus($('applyStatus'), dryRun ? 'Dry run…' : 'Renaming…');
+  $('btnApply').disabled = true; $('btnScan').disabled = true;
+  setStatus($('applyStatus'), `${dryRun ? 'Dry run' : 'Renaming'} 0 / ${items.length}…`);
+  $('log').innerHTML = ''; $('logCard').classList.remove('hidden');
+  const addLog = l => $('log').insertAdjacentHTML('beforeend', `<tr><td><span class="tag t-${l.status}">${esc(l.status.replace('_', ' '))}</span></td><td>${esc(l.message)}</td></tr>`);
   try {
-    const data = await (await fetch('/api/default-colours/apply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ items, dryRun }) })).json();
-    if (data.error) throw new Error(data.error);
-    $('log').innerHTML = data.log.map(l => `<tr><td><span class="tag t-${l.status}">${esc(l.status.replace('_', ' '))}</span></td><td>${esc(l.message)}</td></tr>`).join('');
-    $('logCard').classList.remove('hidden');
-    if (!dryRun && data.undoId) {
+    // live progress: one line per product as it happens
+    const last = await stream('/api/default-colours/apply', { items, dryRun }, ev => {
+      if (ev.type !== 'progress') return;
+      addLog(ev.row);
+      const c = ev.counts;
+      setStatus($('applyStatus'), `${dryRun ? 'Dry run' : 'Renaming'} ${ev.done} / ${ev.total} — ${dryRun ? '' : `renamed ${c.changed}, `}skipped ${c.skipped}, failed ${c.failed}… (keep this page open)`);
+    });
+    if (!last) throw new Error('Lost the connection to the server — check the log above; renames done so far are saved for Undo');
+    if (last.type === 'error') throw new Error(last.message);
+    if (!dryRun && last.undoId) {
       try {
-        const res = await fetch(`/api/shopify/undo/${data.undoId}/download`);
-        if (res.ok) { const a = document.createElement('a'); a.href = URL.createObjectURL(await res.blob()); a.download = `undo_default-colours_${data.undoId}.json`; a.click(); }
+        const res = await fetch(`/api/shopify/undo/${last.undoId}/download`);
+        if (res.ok) { const a = document.createElement('a'); a.href = URL.createObjectURL(await res.blob()); a.download = `undo_default-colours_${last.undoId}.json`; a.click(); }
       } catch (_) {}
     }
-    setStatus($('applyStatus'), dryRun ? `Dry run — ${data.log.filter(l => l.status === 'dry_run').length} would be renamed, nothing changed. Untick Dry Run to rename for real.`
-      : `Renamed ${data.changed}, skipped ${data.skipped}, failed ${data.failed}. Run "Find" again to refresh.`, data.failed ? 'err' : 'ok');
+    setStatus($('applyStatus'), dryRun ? `Dry run done — ${last.log.filter(l => l.status === 'dry_run').length} would be renamed, ${last.skipped} skipped, ${last.failed} with a problem. Nothing changed. Untick Dry Run to rename for real.`
+      : `Done — renamed ${last.changed}, skipped ${last.skipped}, failed ${last.failed}. Run "Find" again to refresh.`, last.failed ? 'err' : 'ok');
   } catch (e) { setStatus($('applyStatus'), e.message, 'err'); }
+  $('btnScan').disabled = false;
   $('btnApply').disabled = false;
 };
 
