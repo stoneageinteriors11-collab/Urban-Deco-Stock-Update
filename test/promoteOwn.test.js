@@ -33,7 +33,7 @@ axios.post = async (url, body) => {
         variants: { edges: p.variants.map(n => ({ node: { ...n, image: null } })) } } : null }; break;
     }
     case 'productVariantsBulkDelete': { const p = byId(v.productId); p.variants = p.variants.filter(n => !v.variantsIds.includes(n.id)); data = { productVariantsBulkDelete: { userErrors: [] } }; break; }
-    case 'productVariantsBulkUpdate': { const p = byId(v.productId); for (const u of v.variants) p.variants.find(n => n.id === u.id).sku = u.sku; data = { productVariantsBulkUpdate: { userErrors: [] } }; break; }
+    case 'productVariantsBulkUpdate': { const p = byId(v.productId); for (const u of v.variants) { if (u.sku !== undefined) throw new Error("Field sku is not defined by type ProductVariantsBulkInput"); p.variants.find(n => n.id === u.id).sku = (u.inventoryItem ? u.inventoryItem.sku : u.sku); } data = { productVariantsBulkUpdate: { userErrors: [] } }; break; }
     case 'productUpdate': {
       const p = byId(v.productId || v.product?.id || v.input?.id);
       if (v.product?.vendor) p.vendor = v.product.vendor;

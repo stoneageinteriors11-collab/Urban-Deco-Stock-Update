@@ -248,21 +248,15 @@ const DELETE_VARIANTS_MUTATION = `
 
 const SET_PRODUCT_DRAFT_MUTATION = `
   mutation setProductDraft($productId: ID!) {
-    productUpdate(input: { id: $productId, status: DRAFT }) {
+    productUpdate(product: { id: $productId, status: DRAFT }) {
       product { id title status }
       userErrors { field message }
     }
   }
 `;
 
-const DELETE_PRODUCT_IMAGES_MUTATION = `
-  mutation deleteProductImages($id: ID!, $imageIds: [ID!]!) {
-    productDeleteImages(id: $id, imageIds: $imageIds) {
-      deletedImageIds
-      userErrors { field message }
-    }
-  }
-`;
+// (old DELETE_PRODUCT_IMAGES_MUTATION removed — productDeleteImages no longer exists in the Admin API and was unused;
+//  photos are detached by Image Sync with media mutations)
 
 const METAFIELDS_SET_MUTATION = `
   mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
@@ -922,7 +916,7 @@ router.post('/undo/:id', async (req, res) => {
         if (v.sku === e.before) { log.push({ ...base, status: 'info', message: `SKU is already ${e.before} · ${name}` }); doneIdx.push(i); continue; }
         if (v.sku !== e.after && !force) { log.push({ ...base, status: 'conflict', message: `SKU was changed after the run (now ${v.sku}) — skipped; tick "Overwrite" to undo anyway · ${name}` }); skipped++; continue; }
         if (dryRun) { log.push({ ...base, sku: e.before, status: 'dry_run', message: `Would put SKU back: ${v.sku} → ${e.before} · ${name}` }); continue; }
-        const r = await gql(client, UPDATE_VARIANT_SKU_MUTATION, { productId: p.id, variants: [{ id: v.id, sku: e.before }] });
+        const r = await gql(client, UPDATE_VARIANT_SKU_MUTATION, { productId: p.id, variants: [skuInput(v.id, e.before)] });
         const errs = r?.productVariantsBulkUpdate?.userErrors || [];
         if (errs.length) throw new Error(errs.map(x => x.message).join(', '));
         v.sku = e.before;
@@ -1116,7 +1110,7 @@ router.post('/set-draft', async (req, res) => {
 //
 const SET_PRODUCT_ACTIVE_MUTATION = `
   mutation setProductActive($productId: ID!) {
-    productUpdate(input: { id: $productId, status: ACTIVE }) {
+    productUpdate(product: { id: $productId, status: ACTIVE }) {
       product { id title status }
       userErrors { field message }
     }
@@ -1125,6 +1119,8 @@ const SET_PRODUCT_ACTIVE_MUTATION = `
 
 // Updates a single variant's SKU in-place (used when promoting the last variant
 // to a product-level SKU instead of deleting it).
+// SKU lives on the inventory item since API 2024-04: variants: [{ id, inventoryItem: { sku } }] — use skuInput()
+const skuInput = (id, sku) => ({ id, inventoryItem: { sku } });
 const UPDATE_VARIANT_SKU_MUTATION = `
   mutation updateVariantSku($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
     productVariantsBulkUpdate(productId: $productId, variants: $variants) {
@@ -1192,7 +1188,7 @@ router.post('/fix-skus', async (req, res) => {
         for (const u of updates) log.push({ sku: u.before, handle, status: 'dry_run', message: `Would fix SKU "${u.before}" → "${u.sku}" · ${product.title} / ${u.label}` });
         continue;
       }
-      const result = await gql(client, UPDATE_VARIANT_SKU_MUTATION, { productId: product.id, variants: updates.map(u => ({ id: u.id, sku: u.sku })) });
+      const result = await gql(client, UPDATE_VARIANT_SKU_MUTATION, { productId: product.id, variants: updates.map(u => skuInput(u.id, u.sku)) });
       const errs = result?.productVariantsBulkUpdate?.userErrors || [];
       if (errs.length) { for (const u of updates) { log.push({ sku: u.before, handle, status: 'error', message: `SKU fix failed: ${errs.map(e => e.message).join(', ')}` }); failed++; } }
       else for (const u of updates) {
@@ -1592,7 +1588,7 @@ router.post('/publish-products', async (req, res) => {
 
       // Step B — shorten SKUs to UD-{prodId}
       if (plan.renames.length) {
-        const updateResult = await gql(client, UPDATE_VARIANT_SKU_MUTATION, { productId: product.id, variants: plan.renames.map(r => ({ id: r.node.id, sku: r.newSku })) });
+        const updateResult = await gql(client, UPDATE_VARIANT_SKU_MUTATION, { productId: product.id, variants: plan.renames.map(r => skuInput(r.node.id, r.newSku)) });
         const updateErrors = updateResult?.productVariantsBulkUpdate?.userErrors || [];
         if (updateErrors.length) {
           for (const r of plan.renames) { log.push({ sku: r.node.sku, handle, status: 'error', message: `SKU update failed: ${updateErrors.map(e => e.message).join(', ')}`, productCode: codeOf(r.node.sku) }); failed++; }
