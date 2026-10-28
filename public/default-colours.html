@@ -82,8 +82,18 @@
     <p class="help"><b>A</b> = "Default" next to real colours (customers see it — fix first) · <b>B</b> = only colour, product has sizes · <b>C</b> = one-variant product (usually hidden).
       Ticked by default: A and B with a <span class="tag c-high">high</span> or <span class="tag c-medium">medium</span> suggestion. Edit any name before renaming.</p>
     <div class="stats" id="stats"></div>
+    <div class="row" style="margin-bottom:10px">
+      <label class="chk">Suggested name <select id="fName"><option value="">All</option></select></label>
+      <label class="chk">Confidence <select id="fConf">
+        <option value="">All</option><option value="high">High</option><option value="medium">Medium</option>
+        <option value="low">Low</option><option value="clash">Clash</option><option value="none">No suggestion</option></select></label>
+      <label class="chk">Vendor <select id="fVendor"><option value="">All</option></select></label>
+      <input type="text" id="fText" placeholder="Search product / SKU…" style="min-width:220px">
+      <button class="btn secondary" id="fClear" style="padding:6px 12px">Clear filters</button>
+    </div>
     <div class="row">
       <label class="chk"><input type="checkbox" id="selAll"> Select all shown (with a name)</label>
+      <span class="muted" id="shownCount" style="font-size:12px"></span>
       <label class="chk" style="margin-left:auto"><input type="checkbox" id="dryRun" checked> Dry Run (nothing changes)</label>
       <button class="btn" id="btnApply">Rename selected</button>
       <button class="btn secondary" id="btnCsv">Export CSV</button>
@@ -149,15 +159,38 @@ $('btnScan').onclick = async () => {
     }
     const s = last.summary;
     setStatus($('scanStatus'), `Found ${s.total} "Default" value(s) on ${s.products} product(s). Nothing was changed.`, 'ok');
-    state.filter = 'all'; render();
+    state.filter = 'all'; fillFilters(); render();
     $('resultsCard').classList.remove('hidden');
   } catch (e) { setStatus($('scanStatus'), e.message, 'err'); }
   $('btnScan').disabled = false;
 };
 
+// tile (type / please check / no suggestion) + the filter row (suggested name, confidence, vendor, search)
 function shown() {
   const f = state.filter;
-  return state.rows.filter(r => f === 'all' || r.type === f || (f === 'none' && !r.suggestion) || (f === 'check' && ['low', 'clash', 'none'].includes(r.confidence)));
+  const fn = $('fName').value, fc = $('fConf').value, fv = $('fVendor').value, ft = $('fText').value.trim().toLowerCase();
+  return state.rows.filter(r => (f === 'all' || r.type === f || (f === 'none' && !r.suggestion) || (f === 'check' && ['low', 'clash', 'none'].includes(r.confidence)))
+    && (!fn || (fn === '(none)' ? !r.suggestion : (r.suggestion || '').toLowerCase() === fn.toLowerCase()))
+    && (!fc || r.confidence === fc)
+    && (!fv || r.vendor === fv)
+    && (!ft || [r.title, r.handle, r.skus.join(' '), state.names[keyOf(r)] || ''].join(' ').toLowerCase().includes(ft)));
+}
+// fill the "Suggested name" and "Vendor" dropdowns from the scan, with counts
+function fillFilters() {
+  const count = arr => arr.reduce((m, k) => m.set(k, (m.get(k) || 0) + 1), new Map());
+  const names = count(state.rows.map(r => r.suggestion || '(none)'));
+  const sorted = [...names].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  $('fName').innerHTML = '<option value="">All</option>' + sorted.map(([n, c]) => `<option value="${esc(n)}">${esc(n === '(none)' ? 'No suggestion' : n)} (${c})</option>`).join('');
+  const vendors = [...count(state.rows.map(r => r.vendor))].sort((a, b) => a[0].localeCompare(b[0]));
+  $('fVendor').innerHTML = '<option value="">All</option>' + vendors.map(([v, c]) => `<option value="${esc(v)}">${esc(v)} (${c})</option>`).join('');
+  $('fConf').value = ''; $('fText').value = '';
+}
+['fName', 'fConf', 'fVendor'].forEach(id => $(id).onchange = () => render());
+$('fText').oninput = () => render();
+$('fClear').onclick = () => { $('fName').value = ''; $('fConf').value = ''; $('fVendor').value = ''; $('fText').value = ''; state.filter = 'all'; render(); };
+function updCount() {
+  const ticked = state.rows.filter(r => state.picked.has(keyOf(r))).length;
+  $('shownCount').textContent = `Showing ${shown().length} of ${state.rows.length} · ${ticked} ticked in total (only ticked rows are renamed)`;
 }
 function render() {
   const n = f => (f === 'all' ? state.rows : state.rows.filter(r => r.type === f || (f === 'none' && !r.suggestion) || (f === 'check' && ['low', 'clash', 'none'].includes(r.confidence)))).length;
@@ -181,11 +214,12 @@ function render() {
       <td class="notes">${r.notes.map(esc).join('<br>')}</td>
     </tr>`;
   }).join('') || '<tr><td colspan="11" class="muted">Nothing here.</td></tr>';
-  document.querySelectorAll('#rows input[type=checkbox]').forEach(el => el.onchange = () => { el.checked ? state.picked.add(el.dataset.k) : state.picked.delete(el.dataset.k); });
+  updCount();
+  document.querySelectorAll('#rows input[type=checkbox]').forEach(el => el.onchange = () => { el.checked ? state.picked.add(el.dataset.k) : state.picked.delete(el.dataset.k); updCount(); });
   document.querySelectorAll('#rows input[type=text]').forEach(el => el.oninput = () => {
     state.names[el.dataset.n] = el.value;
     const cb = document.querySelector(`#rows input[type=checkbox][data-k="${CSS.escape(el.dataset.n)}"]`);
-    if (el.value.trim() && cb && !cb.checked) { cb.checked = true; state.picked.add(el.dataset.n); }
+    if (el.value.trim() && cb && !cb.checked) { cb.checked = true; state.picked.add(el.dataset.n); updCount(); }
   });
   $('selAll').checked = false;
 }
