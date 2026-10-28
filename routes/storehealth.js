@@ -10,7 +10,7 @@
  */
 const express = require('express');
 const { _shared: S } = require('./brandsync');
-const { runChecks } = require('../Claude outputs/store-health-fixurl/new/utils/storeHealth');
+const { runChecks } = require('../utils/storeHealth');
 const { findDefaults } = require('../utils/defaultColour');
 const { BRANDS } = require('../utils/brands');
 
@@ -96,7 +96,7 @@ router.post('/run', async (req, res) => {
 // Skipped: title already matches, URL changed since the check, or the new URL is used by another product.
 // Saved for Undo as type 'title' (puts the old URL back, with a redirect).
 const undo = require('../utils/undoLog');
-const { slugify } = require('../Claude outputs/store-health-fixurl/new/utils/storeHealth');
+const { slugify } = require('../utils/storeHealth');
 const Q_P = `query P($id: ID!) { product(id: $id) { id title handle } }`;
 const Q_BY_HANDLE = `query H($h: String!) { productByHandle(handle: $h) { id title status } }`;
 const M_HANDLE = `mutation U($product: ProductUpdateInput!) { productUpdate(product: $product) { product { id handle } userErrors { field message } } }`;
