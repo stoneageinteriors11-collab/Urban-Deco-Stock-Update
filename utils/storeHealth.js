@@ -15,6 +15,8 @@ const { cleanSku } = require('./matchVariants');
 const UD_RE = /^UD-(\d+)(?:-(\d+))?$/i;
 const parse = sku => { const m = UD_RE.exec(String(sku || '').trim()); return m ? { prodId: m[1], varId: m[2] || null } : null; };
 const low = s => String(s || '').trim().toLowerCase();
+// URL (handle) made from the title — same rule as the rest of the tool (routes/shopify.js slugify)
+const slugify = t => String(t || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 
 const CHECKS = [
   { id: 'default-colours', label: '"Default" colours', why: 'Customers see "Default" / "Default Title" as a colour choice.', fix: '"Default" colours page', link: '/default-colours.html' },
@@ -26,7 +28,7 @@ const CHECKS = [
   { id: 'dup-sku', label: 'Same SKU twice on one product', why: 'Two variants on one product share a SKU — usually a duplicate variant.', fix: 'By hand (delete the extra variant)' },
   { id: 'same-own-item', label: 'Same item on two pages', why: 'Two or more products are the same CFS product (own item) — duplicate pages.', fix: 'Check if intended; draft the extra page' },
   { id: 'missing-ids', label: 'Missing CFS product ID / code', why: 'No custom.iproductid or custom.product_code — skipped by the product code step and own-colour checks.', fix: 'Product codes step / by hand' },
-  { id: 'url-title', label: 'URL doesn\'t match title', why: 'A colour in the title is not in the URL (e.g. title "Natural", URL "…medium-brown…").', fix: 'By hand — change the URL with a redirect' },
+  { id: 'url-title', label: 'URL doesn\'t match title', why: 'A colour in the title is not in the URL (e.g. title "Natural", URL "…medium-brown…").', fix: 'Tick them and click "Fix URLs" — new URL made from the title, old URL redirects (dry run + Undo)' },
   { id: 'unknown-vendor', label: 'Unknown vendor', why: 'Vendor is not Urban Deco or one of the 14 brands — no tool step covers it.', fix: 'Info only' },
 ];
 
@@ -99,7 +101,7 @@ function runChecks(products, ctx) {
     const missing = tw.filter(w => !hw.has(w));
     if (missing.length) {
       const hc = [...colourWords(String(p.handle || '').replace(/-/g, ' '))].filter(w => !tw.includes(w));
-      out['url-title'].push({ ...base(p), skus: [], detail: `Title says ${missing.map(w => `"${w}"`).join(', ')}, URL doesn't${hc.length ? ` (URL says ${hc.map(w => `"${w}"`).join(', ')})` : ''}` });
+      out['url-title'].push({ ...base(p), skus: [], newHandle: slugify(p.title), detail: `Title says ${missing.map(w => `"${w}"`).join(', ')}, URL doesn't${hc.length ? ` (URL says ${hc.map(w => `"${w}"`).join(', ')})` : ''}` });
     }
 
     // 11. unknown vendor
@@ -116,4 +118,4 @@ function runChecks(products, ctx) {
   return CHECKS.map(c => ({ ...c, count: out[c.id].length, rows: out[c.id] }));
 }
 
-module.exports = { runChecks, CHECKS };
+module.exports = { runChecks, CHECKS, slugify };

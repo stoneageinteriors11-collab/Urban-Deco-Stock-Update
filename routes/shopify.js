@@ -931,14 +931,17 @@ router.post('/undo/:id', async (req, res) => {
         const curTitle = p.title;
         if (curTitle === e.before.title && (!e.after.handle || p.handle === e.before.handle)) { log.push({ ...base, status: 'info', message: `Title is already "${e.before.title}" · ${name}` }); doneIdx.push(i); continue; }
         if (curTitle !== e.after.title && !force) { log.push({ ...base, status: 'conflict', message: `Title was changed after the run (now "${curTitle}") — skipped; tick "Overwrite" to undo anyway · ${name}` }); skipped++; continue; }
-        if (dryRun) { log.push({ ...base, status: 'dry_run', message: `Would put the title back: "${curTitle}" → "${e.before.title}"${p.handle !== e.before.handle ? `, URL /${p.handle} → /${e.before.handle}` : ''} · ${name}` }); continue; }
+        const urlOnly = e.before.title === e.after.title;   // Store health "Fix URL" — only the URL changed
+        if (dryRun) { log.push({ ...base, status: 'dry_run', message: urlOnly ? `Would put the URL back: /${p.handle} → /${e.before.handle} · ${name}`
+          : `Would put the title back: "${curTitle}" → "${e.before.title}"${p.handle !== e.before.handle ? `, URL /${p.handle} → /${e.before.handle}` : ''} · ${name}` }); continue; }
         const input = { id: p.id, title: e.before.title };
         if (p.handle !== e.before.handle) { input.handle = e.before.handle; input.redirectNewHandle = true; }
         const r = await gql(client, M_SET_STATUS, { product: input });
         const errs = r?.productUpdate?.userErrors || [];
         if (errs.length) throw new Error(errs.map(x => x.message).join(', '));
         p.title = e.before.title;
-        log.push({ ...base, status: 'undone', message: `Title put back: "${e.after.title}" → "${e.before.title}"${input.handle ? `, URL → /${e.before.handle}` : ''} · ${name}` });
+        log.push({ ...base, status: 'undone', message: urlOnly ? `URL put back: /${e.after.handle} → /${e.before.handle} · ${name}`
+          : `Title put back: "${e.after.title}" → "${e.before.title}"${input.handle ? `, URL → /${e.before.handle}` : ''} · ${name}` });
       } else if (e.type === 'vendor') {
         if (p.vendor === e.before) { log.push({ ...base, status: 'info', message: `Vendor is already "${e.before}" · ${name}` }); doneIdx.push(i); continue; }
         if (p.vendor !== e.after && !force) { log.push({ ...base, status: 'conflict', message: `Vendor was changed after the run (now "${p.vendor}") — skipped; tick "Overwrite" to undo anyway · ${name}` }); skipped++; continue; }

@@ -40,6 +40,10 @@
   .muted { color: var(--text-muted); } .sku { font-family: ui-monospace, monospace; font-size: 11px; color: var(--text-muted); word-break: break-all; }
   .wrap { max-height: 640px; overflow: auto; }
   .fixbox { background: rgba(99,102,241,.08); border: 1px solid rgba(99,102,241,.3); border-radius: 8px; padding: 10px 12px; font-size: 13px; margin-bottom: 8px; }
+  .tag { font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 4px; text-transform: uppercase; white-space: nowrap; }
+  .t-dry_run, .t-updated { background: rgba(56,189,248,.15); color: var(--info); } .t-skipped { background: rgba(148,163,184,.15); color: var(--text-muted); }
+  .t-error { background: rgba(239,68,68,.15); color: var(--danger); }
+  .newurl { font-family: ui-monospace, monospace; font-size: 11px; color: var(--success); word-break: break-all; }
   .hidden { display: none; }
 </style>
 </head>
@@ -49,7 +53,7 @@
     <div class="logo">🩺</div>
     <div>
       <h1>Store health</h1>
-      <p>Finds problems across the whole store — read-only, nothing is changed here</p>
+      <p>Finds problems across the whole store — read-only, except the "Fix URLs" button (dry run + Undo)</p>
     </div>
     <a href="/">← Back to Urban Deco tool</a>
   </header>
@@ -79,16 +83,30 @@
       <span class="muted" id="shown" style="font-size:12px"></span>
       <button class="btn secondary" id="btnCsv" style="margin-left:auto">⬇ Export this list (CSV)</button>
     </div>
+    <div class="row hidden" id="fixBar" style="margin-top:10px">
+      <label class="chk"><input type="checkbox" id="selAll"> Select all shown</label>
+      <label class="chk" style="margin-left:auto"><input type="checkbox" id="dryRun" checked> Dry Run (nothing changes)</label>
+      <button class="btn" id="btnFix">Fix selected URLs</button>
+    </div>
+    <div class="status" id="fixStatus"></div>
     <div class="wrap"><table>
-      <thead><tr><th>Product</th><th>Vendor</th><th>Status</th><th>SKU(s)</th><th>Details</th><th>Fix</th></tr></thead>
+      <thead id="thead"></thead>
       <tbody id="rows"></tbody>
     </table></div>
+  </div>
+
+  <div class="card hidden" id="logCard">
+    <div class="card-title" style="justify-content:space-between"><span>Log <span id="logWhat" style="text-transform:none;letter-spacing:0;font-weight:500"></span></span>
+      <button class="btn secondary" id="btnLogCsv" style="padding:6px 12px">⬇ Download log (CSV)</button></div>
+    <div class="wrap"><table><thead><tr><th>Status</th><th>Message</th></tr></thead><tbody id="log"></tbody></table></div>
+    <p class="help" style="margin-top:10px">Live URL changes are saved for Undo — main page → Step 3 → "↩ Undo a previous run" (puts the old URL back). Old URLs keep redirecting to the new ones.</p>
   </div>
 </div>
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const state = { data: null, sel: null };
+const state = { data: null, sel: null, picked: new Set(), lastLog: null };
+const FIXABLE = 'url-title';   // the only check with a fix button on this page
 function setStatus(el, msg, cls = '') { el.className = 'status ' + cls; el.textContent = msg; }
 
 async function stream(url, body, onEvent) {
@@ -153,6 +171,8 @@ function select(id) {
   $('listTitle').textContent = `${c.label} — ${c.count.toLocaleString()}`;
   $('fixBox').innerHTML = `<b>Why it matters:</b> ${esc(c.why)}<br><b>How to fix:</b> ${esc(c.fix)}${c.link ? ` — <a href="${c.link}" target="_blank" style="color:var(--accent-hover)">open</a>` : ''}`;
   $('search').value = '';
+  state.picked = new Set(id === FIXABLE ? c.rows.filter(r => r.newHandle && r.newHandle !== r.handle).map(r => r.productId) : []);
+  $('fixBar').classList.toggle('hidden', id !== FIXABLE); $('fixStatus').textContent = '';
   renderRows();
   $('listCard').classList.remove('hidden');
 }
@@ -161,14 +181,64 @@ function renderRows() {
   const q = $('search').value.trim().toLowerCase();
   const rows = c.rows.filter(r => !q || [r.title, r.handle, r.vendor, r.skus.join(' '), r.detail].join(' ').toLowerCase().includes(q));
   const admin = id => state.data.shop ? `https://${state.data.shop}/admin/products/${String(id || '').split('/').pop()}` : '#';
+  const fixable = c.id === FIXABLE;
+  $('thead').innerHTML = `<tr>${fixable ? '<th></th>' : ''}<th>Product</th><th>Vendor</th><th>Status</th>${fixable ? '<th>Now → new URL</th>' : '<th>SKU(s)</th>'}<th>Details</th><th>Fix</th></tr>`;
   $('rows').innerHTML = rows.slice(0, 2000).map(r => `<tr>
+    ${fixable ? `<td><input type="checkbox" data-id="${esc(r.productId)}" ${state.picked.has(r.productId) ? 'checked' : ''}></td>` : ''}
     <td><a href="${admin(r.productId)}" target="_blank">${esc(r.title)}</a><div><a class="muted" href="https://www.urbandeco.co.uk/products/${esc(r.handle)}" target="_blank">${esc(r.handle)}</a></div></td>
     <td>${esc(r.vendor)}</td><td>${esc(String(r.status).toLowerCase())}</td>
-    <td class="sku">${esc(r.skus.slice(0, 8).join(' '))}${r.skus.length > 8 ? ` … +${r.skus.length - 8}` : ''}</td>
-    <td>${esc(r.detail)}</td><td>${fixFor(c, r)}</td></tr>`).join('') || '<tr><td colspan="6" class="muted">Nothing here 🎉</td></tr>';
+    ${fixable ? `<td><div class="sku">/${esc(r.handle)}</div><div class="newurl">→ /${esc(r.newHandle || '')}</div></td>`
+      : `<td class="sku">${esc(r.skus.slice(0, 8).join(' '))}${r.skus.length > 8 ? ` … +${r.skus.length - 8}` : ''}</td>`}
+    <td>${esc(r.detail)}</td><td>${fixable ? 'Fix URL (tick)' : fixFor(c, r)}</td></tr>`).join('') || `<tr><td colspan="${fixable ? 7 : 6}" class="muted">Nothing here 🎉</td></tr>`;
+  document.querySelectorAll('#rows input[type=checkbox]').forEach(el => el.onchange = () => { el.checked ? state.picked.add(el.dataset.id) : state.picked.delete(el.dataset.id); updFix(); });
+  updFix();
   $('shown').textContent = `Showing ${Math.min(rows.length, 2000).toLocaleString()} of ${c.rows.length.toLocaleString()}${rows.length > 2000 ? ' (export for the full list)' : ''}`;
 }
 $('search').oninput = () => renderRows();
+
+// ── Fix URLs (only for "URL doesn't match title") ──
+function updFix() { if (state.sel === FIXABLE) $('btnFix').textContent = `Fix selected URLs (${state.picked.size})`; }
+$('selAll').onchange = e => {
+  const c = state.data.checks.find(x => x.id === FIXABLE), q = $('search').value.trim().toLowerCase();
+  for (const r of c.rows.filter(r => !q || [r.title, r.handle, r.vendor, r.detail].join(' ').toLowerCase().includes(q))) e.target.checked ? state.picked.add(r.productId) : state.picked.delete(r.productId);
+  renderRows();
+};
+$('btnFix').onclick = async () => {
+  const c = state.data.checks.find(x => x.id === FIXABLE);
+  const items = c.rows.filter(r => state.picked.has(r.productId)).map(r => ({ productId: r.productId, handle: r.handle, title: r.title, to: r.newHandle }));
+  if (!items.length) { setStatus($('fixStatus'), 'Tick at least one product.', 'err'); return; }
+  const dryRun = $('dryRun').checked;
+  if (!dryRun && !confirm(`Change ${items.length} URL(s) LIVE on Shopify?\n\n` + items.slice(0, 15).map(i => `• /${i.handle}\n   → /${i.to}`).join('\n') + (items.length > 15 ? `\n… and ${items.length - 15} more` : '') + '\n\nOld URLs redirect to the new ones. Saved for Undo.')) return;
+  $('btnFix').disabled = true; $('btnRun').disabled = true;
+  $('log').innerHTML = ''; $('logCard').classList.remove('hidden');
+  state.lastLog = { dryRun, at: new Date(), rows: [] };
+  $('logWhat').textContent = `— Fix URLs · ${dryRun ? 'DRY RUN' : 'LIVE'} ${state.lastLog.at.toLocaleString()}`;
+  try {
+    const last = await stream('/api/store-health/fix-url', { items, dryRun }, ev => {
+      if (ev.type !== 'progress') return;
+      state.lastLog.rows.push(ev.row);
+      $('log').insertAdjacentHTML('beforeend', `<tr><td><span class="tag t-${ev.row.status}">${esc(ev.row.status.replace('_', ' '))}</span></td><td>${esc(ev.row.message)}</td></tr>`);
+      setStatus($('fixStatus'), `${dryRun ? 'Dry run' : 'Changing URLs'} ${ev.done} / ${ev.total}… (keep this page open)`);
+    });
+    if (!last) throw new Error('Lost the connection — check the log; changes made so far are saved for Undo');
+    if (last.type === 'error') throw new Error(last.message);
+    if (!dryRun && last.undoId) {
+      try { const r = await fetch(`/api/shopify/undo/${last.undoId}/download`); if (r.ok) { const a = document.createElement('a'); a.href = URL.createObjectURL(await r.blob()); a.download = `undo_fix-url_${last.undoId}.json`; a.click(); } } catch (_) {}
+    }
+    const wouldN = last.log.filter(l => l.status === 'dry_run').length;
+    setStatus($('fixStatus'), dryRun ? `Dry run done — ${wouldN} URL(s) would change, ${last.skipped} skipped, ${last.failed} with a problem. Nothing changed. Untick Dry Run to do it for real.`
+      : `Done — ${last.changed} URL(s) changed, ${last.skipped} skipped, ${last.failed} failed. Run the check again (tick "Fresh data") to refresh.`, last.failed ? 'err' : 'ok');
+  } catch (e) { setStatus($('fixStatus'), e.message, 'err'); }
+  $('btnFix').disabled = false; $('btnRun').disabled = false;
+};
+$('btnLogCsv').onclick = () => {
+  const L = state.lastLog; if (!L || !L.rows.length) return;
+  const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const lines = [['Run', 'Time', 'Status', 'Handle', 'Message'].map(q).join(','), ...L.rows.map(l => [L.dryRun ? 'dry run' : 'live', L.at.toISOString(), l.status, l.handle, l.message].map(q).join(','))];
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8' }));
+  a.download = `fix-url_${L.dryRun ? 'dry-run' : 'live'}_${L.at.toISOString().slice(0, 16).replace(/[:T]/g, '-')}.csv`; a.click();
+};
 
 function csv(rowsWithCheck, name) {
   const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
