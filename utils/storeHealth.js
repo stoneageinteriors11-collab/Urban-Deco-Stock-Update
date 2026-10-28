@@ -10,7 +10,7 @@
  * Nothing here changes the store — every tile points to the place in the tool that fixes it.
  */
 const { colourWords } = require('./colourMatch');
-const { cleanSku } = require('./matchVariants');
+const { cleanSku, wrongPairing } = require('./matchVariants');
 
 const UD_RE = /^UD-(\d+)(?:-(\d+))?$/i;
 const parse = sku => { const m = UD_RE.exec(String(sku || '').trim()); return m ? { prodId: m[1], varId: m[2] || null } : null; };
@@ -22,7 +22,7 @@ const CHECKS = [
   { id: 'default-colours', label: '"Default" colours', why: 'Customers see "Default" / "Default Title" as a colour choice.', fix: '"Default" colours page', link: '/default-colours.html' },
   { id: 'split-colours', label: 'Split colours', why: 'One CFS product shown as a real colour + "Default" (e.g. Bisque Oasis 2 Chairs + Default Title 4–12 Chairs).', fix: '"Default" colours page → Merge', link: '/default-colours.html' },
   { id: 'not-in-cfs', label: 'SKU not in any CFS feed', why: 'Not in Urban Deco\'s or any brand\'s CFS feed — no stock updates; may be discontinued.', fix: 'Clean-up for that vendor (Step 3)' },
-  { id: 'sku-typo', label: 'SKU typos', why: 'Spaces or stray characters in the SKU — it only matches CFS once cleaned.', fix: 'Clean-up → SKU typo tab → Fix Selected SKUs' },
+  { id: 'sku-typo', label: 'SKU typos', why: 'Spaces or stray characters in the SKU, or a variant number that belongs to another CFS product — it only matches CFS once corrected.', fix: 'Clean-up → SKU typo tab → Fix Selected SKUs' },
   { id: 'wrong-vendor', label: 'Wrong vendor', why: 'SKUs belong to another brand\'s CFS feed — this product misses that brand\'s stock, codes and order-ahead.', fix: 'Brand clean-up → Wrong vendor tab → Change Vendor' },
   { id: 'no-sku', label: 'No SKU', why: 'Variants with an empty SKU — no tool can match them to CFS (fine for bundles/packages).', fix: 'By hand, or ignore if intended' },
   { id: 'dup-sku', label: 'Same SKU twice on one product', why: 'Two variants on one product share a SKU — usually a duplicate variant.', fix: 'By hand (delete the extra variant)' },
@@ -56,9 +56,16 @@ function runChecks(products, ctx) {
 
     // 3 + 4. not in any CFS feed / SKU typos
     const notIn = [], typos = [];
+    const optsOf = sku => (vs.find(v => String(v.sku || '').trim() === sku)?.selectedOptions || []).map(o => o.value);
     for (const s of skus) {
       if (!s) continue;
-      if (parse(s)) { if (!brandOfSku(s)) notIn.push(s); continue; }
+      if (parse(s)) {
+        // variant number that belongs to another CFS product (e.g. Batilda Black UD-1271925-17373742 = Cream's number)
+        const wp = wrongPairing(s, id => ctx.byVar.get(id), id => ctx.byProd.get(id)?.vars, optsOf(s));
+        if (wp) { if (wp.fixedSku) typos.push(`"${s}" → ${wp.fixedSku} (variant no. belongs to CFS product ${wp.ownerProdId})`); else notIn.push(s); continue; }
+        if (!brandOfSku(s)) notIn.push(s);
+        continue;
+      }
       const c = cleanSku(s);
       if (parse(c)) typos.push(`"${s}" → ${c}${brandOfSku(c) ? '' : ' (not in CFS either)'}`);
       else notIn.push(s);

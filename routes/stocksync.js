@@ -6,8 +6,8 @@ const axios   = require('axios');
 require('dotenv').config();
 
 const { streamShopifyVariants, getRows } = require('../utils/parseCSV');
-const { fetchCfsProducts, buildStockData, buildCompareData } = require('../utils/cfsApi');
-const { compareVariants } = require('../utils/matchVariants');
+const { fetchCfsProducts, buildStockData, buildCompareData } = require('../Claude outputs/fix-wrong-variant-no/new/utils/cfsApi');
+const { compareVariants } = require('../Claude outputs/fix-wrong-variant-no/new/utils/matchVariants');
 
 const router = express.Router();
 
@@ -866,7 +866,7 @@ router.post('/compare-api', async (req, res) => {
     const {
       validProductSKUs, cfsProductIds, validVariantSKUs, cfsVariantAttrIds,
       productCodesBySku, productCodesByProdId, cfsProductCodeToStatus,
-      variantCodesBySku, variantCodesByAttrId, cfsVarCodeSet,
+      variantCodesBySku, variantCodesByAttrId, cfsVarCodeSet, cfsVarInfo,
     } = buildCompareData(cfsProducts);
 
     console.log('▶ [compare-api] Fetching Shopify products…');
@@ -912,7 +912,7 @@ router.post('/compare-api', async (req, res) => {
     const { results, summary } = compareVariants(
       shopifyVariants, validVariantSKUs, validProductSKUs, cfsProductIds, cfsVariantAttrIds,
       productCodesBySku, productCodesByProdId, variantCodesBySku, variantCodesByAttrId,
-      cfsVarCodeSet, cfsProductCodeToStatus,
+      cfsVarCodeSet, cfsProductCodeToStatus, cfsVarInfo,
     );
 
     res.json({

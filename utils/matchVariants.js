@@ -57,6 +57,26 @@ function parseSku(sku) {
   return { prodId: parts[1] || null, varId: parts[2] || null };
 }
 
+// CFS variant number that belongs to a DIFFERENT CFS product — e.g. Batilda Black/Anthracite
+// "UD-1271925-17373742": 17373742 is Cream's (1271926) "2 x Chairs"; Anthracite's is 17373736.
+// ownerOf(varId) → { prodId, option } | undefined;  varsOf(prodId) → [{ varId, option }] | undefined
+// Returns null when the pairing is fine (or unknown), else { ownerProdId, ownerOption, fixedSku|null, option }.
+// The right SKU is picked by matching the option text (e.g. "2 x Chairs"): first the Shopify options,
+// then the option of the variant the number really belongs to. Only a single clear match is used.
+const normOpt = s => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+function wrongPairing(sku, ownerOf, varsOf, shopifyOptions = []) {
+  const { prodId, varId } = parseSku(String(sku || ''));
+  if (!prodId || !varId) return null;
+  const own = ownerOf(varId);
+  if (!own || own.prodId == null || String(own.prodId) === prodId) return null;
+  const mine = varsOf(prodId) || [];
+  const pickOne = want => { const m = mine.filter(v => normOpt(v.option) && normOpt(v.option) === want); return m.length === 1 ? m[0] : null; };
+  let hit = null;
+  for (const o of shopifyOptions.map(normOpt).filter(Boolean)) { hit = pickOne(o); if (hit) break; }
+  if (!hit && own.option) hit = pickOne(normOpt(own.option));
+  return { ownerProdId: String(own.prodId), ownerOption: own.option || '', fixedSku: hit ? `UD-${prodId}-${hit.varId}` : null, option: hit ? hit.option : '' };
+}
+
 function compareVariants(
   shopifyVariants,
   validVariantSKUs,
@@ -69,6 +89,7 @@ function compareVariants(
   variantCodesByAttrId    = new Map(),
   cfsVarCodeSet           = new Set(), // all var_code values from CFS variant feed
   cfsProductCodeToStatus  = new Map(), // CFS Product Code → 'active'|'inactive'
+  cfsVarInfo              = null,      // { owner: Map(varId → {prodId, option}), byProd: Map(prodId → [{varId, option}]) }
 ) {
   const results = [];
 
@@ -81,6 +102,7 @@ function compareVariants(
 
     let matchStatus;
     let codeOnlyNote = '';
+    let fixedSku = '';
 
     if (SHOPIFY_INACTIVE.has(shopifyStatus)) {
       // Product is already draft/archived on Shopify — no action needed
@@ -104,8 +126,22 @@ function compareVariants(
     } else {
       // Step 2c — split SKU into raw IDs and check CFS feed columns directly.
       const { prodId, varId } = parseSku(sku);
+      // Is the variant number really this product's? (it may belong to another CFS product)
+      const wp = cfsVarInfo ? wrongPairing(sku, id => cfsVarInfo.owner.get(id), id => cfsVarInfo.byProd.get(id), [v.option1, v.option2, v.option3]) : null;
+      const wpNote = wp ? `variant no. ${varId} belongs to another CFS product (${wp.ownerProdId}${wp.ownerOption ? ` "${wp.ownerOption}"` : ''}), not ${prodId}` : '';
 
-      if (varId && cfsVariantAttrIds.has(varId)) {
+      if (wp && wp.fixedSku) {
+        // Wrong variant number → fix the SKU to this product's own variant with the same option
+        matchStatus = 'sku-typo';
+        fixedSku = wp.fixedSku;
+        codeOnlyNote = `Wrong SKU — ${wpNote}. CFS has ${wp.fixedSku}${wp.option ? ` for "${wp.option}"` : ''}`;
+
+      } else if (wp) {
+        // Wrong variant number and no clear match on this product → not in CFS
+        matchStatus = 'orphaned';
+        codeOnlyNote = `Wrong SKU — ${wpNote}; no matching variant found on CFS product ${prodId}`;
+
+      } else if (varId && cfsVariantAttrIds.has(varId)) {
         // Raw variant attr ID found in CFS variant feed → variant exists, just different SKU
         matchStatus = 'ok';
 
@@ -159,7 +195,7 @@ function compareVariants(
     // Combined display value (variant code preferred; falls back to product code)
     const productCode = variantCode || productCodeOnly || '';
 
-    results.push({ ...v, ...(matchStatus === 'sku-typo' && { fixedSku: cleanSku(sku) }), matchStatus, productCode, variantCode, productCodeOnly, ...(cfsProductStatus !== undefined && { cfsProductStatus }),
+    results.push({ ...v, ...(matchStatus === 'sku-typo' && { fixedSku: fixedSku || cleanSku(sku) }), matchStatus, productCode, variantCode, productCodeOnly, ...(cfsProductStatus !== undefined && { cfsProductStatus }),
       ...(codeOnlyNote && { codeOnlyNote }) });
   }
 
@@ -194,4 +230,4 @@ function cleanSku(sku) {
     .replace(/-{2,}/g, '-').replace(/^[-.]+|[-.]+$/g, '');
 }
 
-module.exports = { compareVariants, parseSku, cleanSku };
+module.exports = { compareVariants, parseSku, cleanSku, wrongPairing };

@@ -564,7 +564,7 @@
         <div class="num" id="tile-code-only">0</div>
         <div class="lbl">Check: SKU not in CFS (only old saved code matches)</div>
       </div>
-      <div class="tile sku-typo-count" title="The SKU only matches CFS once spaces or stray characters are removed (e.g. 'UD-1244787- 17221688'). Use Fix Selected SKUs on the SKU typo tab.">
+      <div class="tile sku-typo-count" title="The SKU only matches CFS once corrected: spaces or stray characters (e.g. 'UD-1244787- 17221688'), or a variant number that belongs to another CFS product (e.g. Batilda Black using Cream's numbers). Use Fix Selected SKUs on the SKU typo tab.">
         <div class="num" id="tile-sku-typo">0</div>
         <div class="lbl">SKU typo (fix the SKU)</div>
       </div>
@@ -1366,7 +1366,7 @@ async function testConnection() {
         <td>${isSelectable ? `<input type="checkbox" ${checked} onchange="toggleSKU('${r.variantSku}',this.checked)" />` : ''}</td>
         <td title="${r.title}">${r.title || '—'}</td>
         <td title="${variantLabel}">${variantLabel}</td>
-        <td><code style="font-size:11px;color:var(--text-muted)">${r.variantSku}</code></td>
+        <td><code style="font-size:11px;color:var(--text-muted)">${r.variantSku}</code>${r.matchStatus === 'sku-typo' && r.fixedSku ? `<div style="font-size:11px;color:#f472b6" title="${(r.codeOnlyNote || '').replace(/"/g, '&quot;')}">→ ${r.fixedSku}</div>` : ''}</td>
         <td>£${r.price || '—'}</td>
         <td>${r.inventoryQty === '' || r.inventoryQty == null ? '—' : r.inventoryQty}</td>
         <td><span class="badge ${badgeCls}" title="${(r.codeOnlyNote || r.otherBrandNote || '').replace(/"/g, '&quot;')}">${badgeTxt}</span>${
@@ -1718,7 +1718,7 @@ async function testConnection() {
     const dryRun = document.getElementById('dry-run-toggle').checked;
     const msg = dryRun
       ? `DRY RUN: show how ${rows.length} SKU(s) would be fixed (no changes).`
-      : `Fix ${rows.length} SKU(s) on Shopify?\n\nEach SKU is rewritten to its clean form, e.g.\n  "${rows[0].variantSku}" → "${rows[0].fixedSku}"\n\nSaved for Undo. Continue?`;
+      : `Fix ${rows.length} SKU(s) on Shopify?\n\nEach SKU is rewritten to the correct CFS SKU, e.g.\n  "${rows[0].variantSku}" → "${rows[0].fixedSku}"\n\nSaved for Undo. Continue?`;
     if (!confirm(msg)) return;
     const btn = document.getElementById('btn-fix-sku');
     btn.disabled = true;

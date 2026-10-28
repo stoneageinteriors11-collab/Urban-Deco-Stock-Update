@@ -517,8 +517,8 @@ router.post('/codes-sync', async (req, res) => {
 // Shopify products with this vendor. Extra safety: a SKU that isn't in this brand's
 // feed is also looked up in every other brand's feed (and Urban Deco's). If it's
 // there, the row becomes "other-brand" — shown for checking, never deleted.
-const { buildCompareData, fetchCfsProducts } = require('../utils/cfsApi');
-const { compareVariants, parseSku } = require('../utils/matchVariants');
+const { buildCompareData, fetchCfsProducts } = require('../Claude outputs/fix-wrong-variant-no/new/utils/cfsApi');
+const { compareVariants, parseSku } = require('../Claude outputs/fix-wrong-variant-no/new/utils/matchVariants');
 
 const COMPARE_PRODUCTS = `
   query p($first: Int!, $after: String, $q: String) {
@@ -550,8 +550,11 @@ async function crossBrandIndex() {
         const feed = b.id === 215 ? await fetchCfsProducts() : await fetchBrandFeed(b.id);
         const label = `${feed[0]?.brandName || b.vendor} (brand ${b.id})`;
         for (const p of feed) {
-          byProd.set(String(p.productId), { brandId: b.id, label, vendor: b.vendor, name: p.productName || '' });
-          for (const v of (Array.isArray(p.variants) ? p.variants : [])) byVar.set(String(v.variantId), { brandId: b.id, label, vendor: b.vendor, name: `${p.productName || ''}${v.variantOption ? ' ' + v.variantOption : ''}` });
+          const vs = Array.isArray(p.variants) ? p.variants : [];
+          byProd.set(String(p.productId), { brandId: b.id, label, vendor: b.vendor, name: p.productName || '',
+            vars: vs.map(v => ({ varId: String(v.variantId), option: v.variantOption || '' })) });
+          for (const v of vs) byVar.set(String(v.variantId), { brandId: b.id, label, vendor: b.vendor, name: `${p.productName || ''}${v.variantOption ? ' ' + v.variantOption : ''}`,
+            prodId: String(p.productId), option: v.variantOption || '' });
         }
       } catch (e) { failed.push(`${b.vendor} (${e.message})`); }
     }
@@ -657,7 +660,7 @@ router.post('/compare', async (req, res) => {
     const {
       validProductSKUs, cfsProductIds, validVariantSKUs, cfsVariantAttrIds,
       productCodesBySku, productCodesByProdId, cfsProductCodeToStatus,
-      variantCodesBySku, variantCodesByAttrId, cfsVarCodeSet,
+      variantCodesBySku, variantCodesByAttrId, cfsVarCodeSet, cfsVarInfo,
     } = buildCompareData(feed);
 
     const shopifyVariants = [];
@@ -686,7 +689,7 @@ router.post('/compare', async (req, res) => {
     const { results, summary } = compareVariants(
       shopifyVariants, validVariantSKUs, validProductSKUs, cfsProductIds, cfsVariantAttrIds,
       productCodesBySku, productCodesByProdId, variantCodesBySku, variantCodesByAttrId,
-      cfsVarCodeSet, cfsProductCodeToStatus,
+      cfsVarCodeSet, cfsProductCodeToStatus, cfsVarInfo,
     );
 
     // A saved PRODUCT code belongs to the product's own variant (the one its iproductid points at).

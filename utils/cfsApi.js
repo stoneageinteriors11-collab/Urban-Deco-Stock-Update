@@ -54,6 +54,7 @@ function buildCompareData(products) {
   const variantCodesBySku      = new Map();
   const variantCodesByAttrId   = new Map();
   const cfsVarCodeSet          = new Set();
+  const cfsVarInfo             = { owner: new Map(), byProd: new Map() };   // which CFS product each variant no. belongs to
 
   for (const item of products) {
     const prodId   = String(item.productId);
@@ -79,6 +80,9 @@ function buildCompareData(products) {
         variantCodesBySku.set(varSku, varCode);
         variantCodesByAttrId.set(varId, varCode);
         if (varCode) cfsVarCodeSet.add(varCode);
+        cfsVarInfo.owner.set(varId, { prodId, option: v.variantOption || '' });
+        if (!cfsVarInfo.byProd.has(prodId)) cfsVarInfo.byProd.set(prodId, []);
+        cfsVarInfo.byProd.get(prodId).push({ varId, option: v.variantOption || '' });
       }
     }
   }
@@ -94,6 +98,7 @@ function buildCompareData(products) {
     variantCodesBySku,
     variantCodesByAttrId,
     cfsVarCodeSet,
+    cfsVarInfo,
   };
 }
 
@@ -188,4 +193,4 @@ function buildStockData(products) {
   return { prodStockBySku, prodStockByProdId, varStockBySku, varStockByAttrId };
 }
 
-module.exports = { fetchCfsProducts, buildCompareData, buildSkuCodeMap, buildStockData };
+module.exports = { fetchCfsProducts, buildCompareData, buildSkuCodeMap, buildStockData };

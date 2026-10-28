@@ -3,8 +3,8 @@ const multer  = require('multer');
 const path    = require('path');
 const fs      = require('fs');
 const { streamShopifyVariants } = require('../utils/parseCSV');
-const { compareVariants }       = require('../utils/matchVariants');
-const { fetchCfsProducts, buildCompareData } = require('../utils/cfsApi');
+const { compareVariants }       = require('../Claude outputs/fix-wrong-variant-no/new/utils/matchVariants');
+const { fetchCfsProducts, buildCompareData } = require('../Claude outputs/fix-wrong-variant-no/new/utils/cfsApi');
 
 const router = express.Router();
 
@@ -77,6 +77,7 @@ router.post(
         variantCodesBySku,
         variantCodesByAttrId,
         cfsVarCodeSet,
+        cfsVarInfo,
       } = buildCompareData(cfsProducts);
 
       const activeCount   = [...validProductSKUs.values()].filter(s => s === 'active').length;
@@ -103,7 +104,7 @@ router.post(
       const { results, summary } = compareVariants(
         shopifyVariants, validVariantSKUs, validProductSKUs, cfsProductIds, cfsVariantAttrIds,
         productCodesBySku, productCodesByProdId, variantCodesBySku, variantCodesByAttrId,
-        cfsVarCodeSet, cfsProductCodeToStatus,
+        cfsVarCodeSet, cfsProductCodeToStatus, cfsVarInfo,
       );
       console.log(`  ✓ ${summary.orphaned} orphaned, ${summary.ok} OK, ${summary.draft} draft/archived, ${summary.cfsInactive} cfs-inactive, ${summary.cfsProduct} cfs-product`);
 
