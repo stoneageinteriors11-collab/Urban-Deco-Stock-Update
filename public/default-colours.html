@@ -97,7 +97,7 @@
       <label class="chk"><input type="checkbox" id="selAll"> Select all shown (with a name)</label>
       <span class="muted" id="shownCount" style="font-size:12px"></span>
       <label class="chk" style="margin-left:auto"><input type="checkbox" id="dryRun" checked> Dry Run (nothing changes)</label>
-      <button class="btn" id="btnApply">Rename selected</button>
+      <button class="btn" id="btnApply">Rename / merge selected</button>
       <button class="btn secondary" id="btnCsv">Export CSV</button>
     </div>
     <div class="status" id="applyStatus"></div>
@@ -108,7 +108,8 @@
   </div>
 
   <div class="card hidden" id="logCard">
-    <div class="card-title"><span class="num">3</span> Log</div>
+    <div class="card-title" style="justify-content:space-between"><span><span class="num">3</span> Log <span id="logWhat" style="text-transform:none;letter-spacing:0;font-weight:500"></span></span>
+      <button class="btn secondary" id="btnLogCsv" style="padding:6px 12px">⬇ Download log (CSV)</button></div>
     <div class="wrap"><table><thead><tr><th>Status</th><th>Message</th></tr></thead><tbody id="log"></tbody></table></div>
     <p class="help" style="margin-top:10px">Live renames are saved for Undo — main page → Step 3 → "↩ Undo a previous run". Photo alt texts that say "Default" are fixed by the next Image Sync run.</p>
   </div>
@@ -191,8 +192,12 @@ function fillFilters() {
 $('fText').oninput = () => render();
 $('fClear').onclick = () => { $('fName').value = ''; $('fConf').value = ''; $('fVendor').value = ''; $('fText').value = ''; state.filter = 'all'; render(); };
 function updCount() {
-  const ticked = state.rows.filter(r => state.picked.has(keyOf(r))).length;
-  $('shownCount').textContent = `Showing ${shown().length} of ${state.rows.length} · ${ticked} ticked in total (only ticked rows are renamed)`;
+  const t = state.rows.filter(r => state.picked.has(keyOf(r)));
+  const merges = t.filter(r => r.action === 'merge').length, renames = t.length - merges;
+  $('shownCount').textContent = `Showing ${shown().length} of ${state.rows.length} · ticked: ${renames} rename + ${merges} merge (incl. rows hidden by filters)`;
+  // the button says what it will do
+  $('btnApply').textContent = !t.length ? 'Rename / merge selected'
+    : !renames ? `Merge selected (${merges})` : !merges ? `Rename selected (${renames})` : `Rename ${renames} + merge ${merges}`;
 }
 function render() {
   const n = f => (f === 'all' ? state.rows : state.rows.filter(r => r.type === f || (f === 'merge' && r.action === 'merge') || (f === 'none' && !r.suggestion) || (f === 'check' && ['low', 'clash', 'none'].includes(r.confidence)))).length;
@@ -242,16 +247,18 @@ $('btnApply').onclick = async () => {
   const dryRun = $('dryRun').checked;
   if (!dryRun && !confirm(`Rename / merge ${items.length} option value(s) LIVE on Shopify?\n\n` + items.slice(0, 15).map(i => `• ${i.title}: ${i.action === 'merge' ? `merge "${i.current}" into "${i.mergeInto}"` : `"${i.current}" → "${i.newName}"`}`).join('\n') + (items.length > 15 ? `\n… and ${items.length - 15} more` : '') + '\n\nSaved for Undo.')) return;
   $('btnApply').disabled = true; $('btnScan').disabled = true;
-  setStatus($('applyStatus'), `${dryRun ? 'Dry run' : 'Renaming'} 0 / ${items.length}…`);
+  setStatus($('applyStatus'), `${dryRun ? 'Dry run' : 'Working'} 0 / ${items.length}…`);
   $('log').innerHTML = ''; $('logCard').classList.remove('hidden');
-  const addLog = l => $('log').insertAdjacentHTML('beforeend', `<tr><td><span class="tag t-${l.status}">${esc(l.status.replace('_', ' '))}</span></td><td>${esc(l.message)}</td></tr>`);
+  state.lastLog = { dryRun, at: new Date(), rows: [] };
+  $('logWhat').textContent = `— ${dryRun ? 'DRY RUN' : 'LIVE'} ${state.lastLog.at.toLocaleString()}`;
+  const addLog = l => (state.lastLog.rows.push(l), 0) || $('log').insertAdjacentHTML('beforeend', `<tr><td><span class="tag t-${l.status}">${esc(l.status.replace('_', ' '))}</span></td><td>${esc(l.message)}</td></tr>`);
   try {
     // live progress: one line per product as it happens
     const last = await stream('/api/default-colours/apply', { items, dryRun }, ev => {
       if (ev.type !== 'progress') return;
       addLog(ev.row);
       const c = ev.counts;
-      setStatus($('applyStatus'), `${dryRun ? 'Dry run' : 'Renaming'} ${ev.done} / ${ev.total} — ${dryRun ? '' : `renamed ${c.changed}, `}skipped ${c.skipped}, failed ${c.failed}… (keep this page open)`);
+      setStatus($('applyStatus'), `${dryRun ? 'Dry run' : 'Working'} ${ev.done} / ${ev.total} — ${dryRun ? '' : `done ${c.changed}, `}skipped ${c.skipped}, failed ${c.failed}… (keep this page open)`);
     });
     if (!last) throw new Error('Lost the connection to the server — check the log above; renames done so far are saved for Undo');
     if (last.type === 'error') throw new Error(last.message);
@@ -261,11 +268,23 @@ $('btnApply').onclick = async () => {
         if (res.ok) { const a = document.createElement('a'); a.href = URL.createObjectURL(await res.blob()); a.download = `undo_default-colours_${last.undoId}.json`; a.click(); }
       } catch (_) {}
     }
-    setStatus($('applyStatus'), dryRun ? `Dry run done — ${last.log.filter(l => l.status === 'dry_run').length} would be renamed, ${last.skipped} skipped, ${last.failed} with a problem. Nothing changed. Untick Dry Run to rename for real.`
-      : `Done — renamed ${last.changed}, skipped ${last.skipped}, failed ${last.failed}. Run "Find" again to refresh.`, last.failed ? 'err' : 'ok');
+    const wm = last.log.filter(l => l.status === 'dry_run' && /^Would move/.test(l.message)).length, wr = last.log.filter(l => l.status === 'dry_run').length - wm;
+    setStatus($('applyStatus'), dryRun ? `Dry run done — ${wr} would be renamed, ${wm} would be merged, ${last.skipped} skipped, ${last.failed} with a problem. Nothing changed. Untick Dry Run to do it for real.`
+      : `Done — ${last.changed} renamed/merged, skipped ${last.skipped}, failed ${last.failed}. Run "Find" again to refresh.`, last.failed ? 'err' : 'ok');
   } catch (e) { setStatus($('applyStatus'), e.message, 'err'); }
   $('btnScan').disabled = false;
   $('btnApply').disabled = false;
+};
+
+// log of the last dry / live run as CSV
+$('btnLogCsv').onclick = () => {
+  const L = state.lastLog; if (!L || !L.rows.length) return;
+  const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const lines = [['Run', 'Time', 'Status', 'Handle', 'Message'].map(q).join(','),
+    ...L.rows.map(l => [L.dryRun ? 'dry run' : 'live', L.at.toISOString(), l.status, l.handle, l.message].map(q).join(','))];
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8' }));
+  a.download = `default-colours_${L.dryRun ? 'dry-run' : 'live'}_${L.at.toISOString().slice(0, 16).replace(/[:T]/g, '-')}.csv`; a.click();
 };
 
 $('btnCsv').onclick = () => {
