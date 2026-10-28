@@ -43,6 +43,8 @@
   .c-high { background: rgba(34,197,94,.15); color: var(--success); }
   .c-medium { background: rgba(56,189,248,.15); color: var(--info); }
   .c-low, .c-clash { background: rgba(245,158,11,.15); color: var(--warning); }
+  .c-merge { background: rgba(167,139,250,.18); color: #a78bfa; }
+  .merge-box { font-size: 12px; } .merge-box b { color: #a78bfa; }
   .c-none { background: rgba(239,68,68,.15); color: var(--danger); }
   .t-A { background: rgba(239,68,68,.15); color: var(--danger); } .t-B { background: rgba(245,158,11,.15); color: var(--warning); } .t-C { background: rgba(148,163,184,.15); color: var(--text-muted); }
   .t-dry_run, .t-updated { background: rgba(56,189,248,.15); color: var(--info); }
@@ -80,13 +82,13 @@
   <div class="card hidden" id="resultsCard">
     <div class="card-title"><span class="num">2</span> Review &amp; rename</div>
     <p class="help"><b>A</b> = "Default" next to real colours (customers see it — fix first) · <b>B</b> = only colour, product has sizes · <b>C</b> = one-variant product (usually hidden).
-      Ticked by default: A and B with a <span class="tag c-high">high</span> or <span class="tag c-medium">medium</span> suggestion. Edit any name before renaming.</p>
+      Ticked by default: A and B with a <span class="tag c-high">high</span> or <span class="tag c-medium">medium</span> suggestion, and <span class="tag c-merge">merge</span> rows. Edit any name before renaming.<br><b>Merge</b> = the "Default" variants are the same CFS product as a real colour on the page (e.g. Bisque Oasis 2 Chairs + Default Title 4–12 Chairs) → they move into that colour and "Default" is removed. SKUs, prices, stock and photos stay as they are.</p>
     <div class="stats" id="stats"></div>
     <div class="row" style="margin-bottom:10px">
       <label class="chk">Suggested name <select id="fName"><option value="">All</option></select></label>
       <label class="chk">Confidence <select id="fConf">
         <option value="">All</option><option value="high">High</option><option value="medium">Medium</option>
-        <option value="low">Low</option><option value="clash">Clash</option><option value="none">No suggestion</option></select></label>
+        <option value="low">Low</option><option value="merge">Merge (split colour)</option><option value="clash">Clash</option><option value="none">No suggestion</option></select></label>
       <label class="chk">Vendor <select id="fVendor"><option value="">All</option></select></label>
       <input type="text" id="fText" placeholder="Search product / SKU…" style="min-width:220px">
       <button class="btn secondary" id="fClear" style="padding:6px 12px">Clear filters</button>
@@ -155,7 +157,7 @@ $('btnScan').onclick = async () => {
     state.rows = last.rows; state.shop = last.shop; state.picked.clear(); state.names = {};
     for (const r of state.rows) {
       state.names[keyOf(r)] = r.suggestion || '';
-      if ((r.type === 'A' || r.type === 'B') && ['high', 'medium'].includes(r.confidence) && r.suggestion) state.picked.add(keyOf(r));
+      if ((r.type === 'A' || r.type === 'B') && ['high', 'medium', 'merge'].includes(r.confidence) && r.suggestion) state.picked.add(keyOf(r));
     }
     const s = last.summary;
     setStatus($('scanStatus'), `Found ${s.total} "Default" value(s) on ${s.products} product(s). Nothing was changed.`, 'ok');
@@ -169,7 +171,7 @@ $('btnScan').onclick = async () => {
 function shown() {
   const f = state.filter;
   const fn = $('fName').value, fc = $('fConf').value, fv = $('fVendor').value, ft = $('fText').value.trim().toLowerCase();
-  return state.rows.filter(r => (f === 'all' || r.type === f || (f === 'none' && !r.suggestion) || (f === 'check' && ['low', 'clash', 'none'].includes(r.confidence)))
+  return state.rows.filter(r => (f === 'all' || r.type === f || (f === 'merge' && r.action === 'merge') || (f === 'none' && !r.suggestion) || (f === 'check' && ['low', 'clash', 'none'].includes(r.confidence)))
     && (!fn || (fn === '(none)' ? !r.suggestion : (r.suggestion || '').toLowerCase() === fn.toLowerCase()))
     && (!fc || r.confidence === fc)
     && (!fv || r.vendor === fv)
@@ -193,8 +195,8 @@ function updCount() {
   $('shownCount').textContent = `Showing ${shown().length} of ${state.rows.length} · ${ticked} ticked in total (only ticked rows are renamed)`;
 }
 function render() {
-  const n = f => (f === 'all' ? state.rows : state.rows.filter(r => r.type === f || (f === 'none' && !r.suggestion) || (f === 'check' && ['low', 'clash', 'none'].includes(r.confidence)))).length;
-  $('stats').innerHTML = [['all', 'All'], ['A', 'A — next to real colours'], ['B', 'B — only colour + sizes'], ['C', 'C — one variant'], ['check', 'Please check'], ['none', 'No suggestion']]
+  const n = f => (f === 'all' ? state.rows : state.rows.filter(r => r.type === f || (f === 'merge' && r.action === 'merge') || (f === 'none' && !r.suggestion) || (f === 'check' && ['low', 'clash', 'none'].includes(r.confidence)))).length;
+  $('stats').innerHTML = [['all', 'All'], ['A', 'A — next to real colours'], ['B', 'B — only colour + sizes'], ['C', 'C — one variant'], ['merge', 'Merge — split colour'], ['check', 'Please check'], ['none', 'No suggestion']]
     .map(([f, l]) => `<div class="stat ${state.filter === f ? 'on' : ''}" data-f="${f}"><b>${n(f)}</b><span>${l}</span></div>`).join('');
   document.querySelectorAll('.stat').forEach(el => el.onclick = () => { state.filter = el.dataset.f; render(); });
   const admin = id => state.shop ? `https://${state.shop}/admin/products/${String(id).split('/').pop()}` : '#';
@@ -209,7 +211,9 @@ function render() {
       <td>${esc(r.current)}</td>
       <td>${esc(r.otherValues.join(', ')) || '<span class="muted">—</span>'}</td>
       <td>${r.variants}</td>
-      <td><input type="text" data-n="${esc(k)}" value="${esc(state.names[k])}" placeholder="type the real name"></td>
+      <td>${r.action === 'merge'
+        ? `<div class="merge-box"><b>Merge into "${esc(r.mergeInto)}"</b><div class="muted">moves ${esc(r.moves.filter(m => !m.conflict).map(m => m.label).join(', '))}</div></div>`
+        : `<input type="text" data-n="${esc(k)}" value="${esc(state.names[k])}" placeholder="type the real name">`}</td>
       <td><span class="tag c-${r.confidence}">${r.confidence === 'none' ? 'no suggestion' : r.confidence}</span></td>
       <td class="notes">${r.notes.map(esc).join('<br>')}</td>
     </tr>`;
@@ -230,12 +234,13 @@ $('selAll').onchange = e => {
 
 $('btnApply').onclick = async () => {
   const items = state.rows.filter(r => state.picked.has(keyOf(r))).map(r => ({ productId: r.productId, optionId: r.optionId, valueId: r.valueId, current: r.current,
-    newName: String(state.names[keyOf(r)] || '').trim(), handle: r.handle, title: r.title }));
+    newName: r.action === 'merge' ? r.mergeInto : String(state.names[keyOf(r)] || '').trim(), handle: r.handle, title: r.title,
+    action: r.action || 'rename', mergeInto: r.mergeInto || null }));
   if (!items.length) { setStatus($('applyStatus'), 'Tick at least one row.', 'err'); return; }
   const empty = items.filter(i => !i.newName);
   if (empty.length) { setStatus($('applyStatus'), `${empty.length} ticked row(s) have no name — type one or untick them.`, 'err'); return; }
   const dryRun = $('dryRun').checked;
-  if (!dryRun && !confirm(`Rename ${items.length} option value(s) LIVE on Shopify?\n\n` + items.slice(0, 15).map(i => `• ${i.title}: "${i.current}" → "${i.newName}"`).join('\n') + (items.length > 15 ? `\n… and ${items.length - 15} more` : '') + '\n\nSaved for Undo.')) return;
+  if (!dryRun && !confirm(`Rename / merge ${items.length} option value(s) LIVE on Shopify?\n\n` + items.slice(0, 15).map(i => `• ${i.title}: ${i.action === 'merge' ? `merge "${i.current}" into "${i.mergeInto}"` : `"${i.current}" → "${i.newName}"`}`).join('\n') + (items.length > 15 ? `\n… and ${items.length - 15} more` : '') + '\n\nSaved for Undo.')) return;
   $('btnApply').disabled = true; $('btnScan').disabled = true;
   setStatus($('applyStatus'), `${dryRun ? 'Dry run' : 'Renaming'} 0 / ${items.length}…`);
   $('log').innerHTML = ''; $('logCard').classList.remove('hidden');
@@ -265,8 +270,8 @@ $('btnApply').onclick = async () => {
 
 $('btnCsv').onclick = () => {
   const q = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
-  const head = ['Type', 'Product', 'Handle', 'Vendor', 'Status', 'Option', 'Now', 'Other values', 'Variants', 'SKUs', 'Suggested name', 'Confidence', 'How we found it'];
-  const lines = state.rows.map(r => [r.type, r.title, r.handle, r.vendor, r.status, r.optionName, r.current, r.otherValues.join(' | '), r.variants, r.skus.join(' '),
+  const head = ['Type', 'Action', 'Product', 'Handle', 'Vendor', 'Status', 'Option', 'Now', 'Other values', 'Variants', 'SKUs', 'Suggested name / merge into', 'Confidence', 'How we found it'];
+  const lines = state.rows.map(r => [r.type, r.action === 'merge' ? 'merge' : 'rename', r.title, r.handle, r.vendor, r.status, r.optionName, r.current, r.otherValues.join(' | '), r.variants, r.skus.join(' '),
     state.names[keyOf(r)] || '', r.confidence, r.notes.join(' / ')].map(q).join(','));
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob(['﻿' + [head.map(q).join(','), ...lines].join('\n')], { type: 'text/csv;charset=utf-8' }));

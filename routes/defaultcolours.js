@@ -29,7 +29,15 @@ const Q_PRODUCTS = `
       }
     }
   }`;
-const Q_PRODUCT = `query P($id: ID!) { product(id: $id) { id title handle options { id name optionValues { id name } } } }`;
+const Q_PRODUCT = `query P($id: ID!) { product(id: $id) { id title handle options { id name optionValues { id name hasVariants } }
+  variants(first: 250) { nodes { id sku title selectedOptions { name value } } } } }`;
+// move variants to another value of the same option (merge a split colour)
+const M_MOVE = `mutation M($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
+  productVariantsBulkUpdate(productId: $productId, variants: $variants) {
+    productVariants { id title selectedOptions { name value } } userErrors { field message } } }`;
+const M_DEL_VALUE = `mutation D($productId: ID!, $option: OptionUpdateInput!, $del: [ID!]) {
+  productOptionUpdate(productId: $productId, option: $option, optionValuesToDelete: $del) {
+    product { id } userErrors { field message code } } }`;
 const M_RENAME = `mutation R($productId: ID!, $option: OptionUpdateInput!, $values: [OptionValueUpdateInput!]) {
   productOptionUpdate(productId: $productId, option: $option, optionValuesToUpdate: $values) {
     product { id } userErrors { field message code } } }`;
@@ -111,7 +119,7 @@ router.post('/apply', async (req, res) => {
   try { client = S.graphqlClient(); } catch (e) { return res.status(400).json({ error: e.message }); }
   const { send, end } = sse(res);
   S.startKeepAwake();
-  console.log(`▶ Default colours — ${dryRun ? 'DRY RUN' : 'LIVE'} rename of ${items.length} value(s)`);
+  console.log(`▶ Default colours — ${dryRun ? 'DRY RUN' : 'LIVE'} rename/merge of ${items.length} value(s)`);
   const log = [];
   let changed = 0, failed = 0, skipped = 0, done = 0;
   const undoRun = dryRun ? null : undo.startRun('default-colour', 'Rename "Default" colour', brandId);
@@ -122,11 +130,60 @@ router.post('/apply', async (req, res) => {
     send({ type: 'progress', done, total: items.length, row, counts: { changed, skipped, failed } });
     if (done % 25 === 0 || done === items.length) console.log(`  … default colours ${done}/${items.length} — renamed:${changed} skipped:${skipped} failed:${failed}`);
   };
+  // Split colour: move the "Default" variants into the real colour (same CFS product), then drop the empty value.
+  // Checked again against the live product first — anything that changed since the scan is skipped.
+  async function doMerge(it, base) {
+    const p = (await S.gql(client, Q_PRODUCT, { id: it.productId }))?.product;
+    if (!p) { failed++; return push({ ...base, status: 'error', message: `Product not found · ${it.title || it.handle}` }); }
+    const o = p.options.find(x => x.id === it.optionId);
+    const val = o?.optionValues.find(x => x.id === it.valueId);
+    const into = o?.optionValues.find(x => x.name.trim().toLowerCase() === String(it.mergeInto || '').trim().toLowerCase());
+    if (!o || !val) { skipped++; return push({ ...base, status: 'skipped', message: `"${it.current}" is no longer on this product — nothing to merge · ${p.title}` }); }
+    if (!into) { failed++; return push({ ...base, status: 'error', message: `"${it.mergeInto}" is no longer a ${o.name} on this product — run the scan again · ${p.title}` }); }
+    const pick = v => v.selectedOptions.find(x => x.name === o.name)?.value;
+    const rest = v => v.selectedOptions.filter(x => x.name !== o.name).map(x => x.value).join(' / ') || '(no other option)';
+    const prodOf = v => (/^UD-(\d+)/i.exec(String(v.sku || '').trim()) || [])[1] || null;
+    const moving = p.variants.nodes.filter(v => pick(v) === val.name);
+    const target = p.variants.nodes.filter(v => pick(v) === into.name);
+    const mProds = new Set(moving.map(prodOf)), tProds = new Set(target.map(prodOf));
+    if (!moving.length) { skipped++; return push({ ...base, status: 'skipped', message: `No "${val.name}" variants left · ${p.title}` }); }
+    if (mProds.size !== 1 || tProds.size !== 1 || [...mProds][0] !== [...tProds][0]) {
+      failed++; return push({ ...base, status: 'error', message: `"${val.name}" and "${into.name}" are no longer the same CFS product — not merged, run the scan again · ${p.title}` });
+    }
+    const have = new Set(target.map(rest));
+    const ok = moving.filter(v => !have.has(rest(v))), blocked = moving.filter(v => have.has(rest(v)));
+    const blockedTxt = blocked.length ? ` — not moved (already under "${into.name}"): ${blocked.map(rest).join(', ')}` : '';
+    if (!ok.length) { failed++; return push({ ...base, status: 'error', message: `"${into.name}" already has ${blocked.map(rest).join(', ')} — nothing can be moved (duplicate variants?) · ${p.title}` }); }
+    if (dryRun) return push({ ...base, status: 'dry_run', message: `Would move ${ok.map(rest).join(', ')} from "${val.name}" → "${into.name}"${blocked.length ? '' : ` and remove "${val.name}"`}${blockedTxt} · ${p.title}` });
+    const r = await S.gql(client, M_MOVE, { productId: p.id, variants: ok.map(v => ({ id: v.id, optionValues: [{ optionName: o.name, name: into.name }] })) });
+    const errs = r?.productVariantsBulkUpdate?.userErrors || [];
+    if (errs.length) { failed++; return push({ ...base, status: 'error', message: `Merge failed: ${errs.map(e => e.message).join(', ')} · ${p.title}` }); }
+    undo.add(undoRun, { type: 'variant-merge', productId: p.id, handle: p.handle, title: p.title, optionName: o.name, from: val.name, into: into.name,
+      variants: ok.map(v => ({ id: v.id, sku: v.sku, label: rest(v) })) });
+    undoId = undo.save(undoRun);
+    // drop the now-empty "Default" value (Shopify may already have removed it)
+    let removed = '';
+    try {
+      const after = (await S.gql(client, Q_PRODUCT, { id: p.id }))?.product;
+      const left = after?.options.find(x => x.id === o.id)?.optionValues.find(x => x.id === val.id);
+      if (!left) removed = ` and "${val.name}" removed`;
+      else if (!left.hasVariants) {
+        const d = await S.gql(client, M_DEL_VALUE, { productId: p.id, option: { id: o.id }, del: [val.id] });
+        const de = d?.productOptionUpdate?.userErrors || [];
+        removed = de.length ? ` — couldn't remove the empty "${val.name}" (${de.map(e => e.message).join(', ')}), remove it by hand` : ` and "${val.name}" removed`;
+      }
+    } catch (e) { removed = ` — couldn't check the empty "${val.name}" (${e.message})`; }
+    changed++;
+    push({ ...base, status: 'updated', message: `Moved ${ok.map(rest).join(', ')} from "${val.name}" → "${into.name}"${removed}${blockedTxt} · ${p.title}` });
+    await S.sleep(250);
+  }
+
   try {
     for (const it of items) {
       const newName = String(it.newName || '').trim();
       const base = { sku: '-', handle: it.handle || '-' };
       try {
+        if (it.action === 'merge') { await doMerge(it, base); continue; }
         if (!newName) { skipped++; push({ ...base, status: 'skipped', message: `No new name given · ${it.title || it.handle}` }); continue; }
         const p = (await S.gql(client, Q_PRODUCT, { id: it.productId }))?.product;
         if (!p) { failed++; push({ ...base, status: 'error', message: `Product not found · ${it.title || it.handle}` }); continue; }
@@ -159,4 +216,4 @@ router.post('/apply', async (req, res) => {
 });
 
 module.exports = router;
-module.exports._q = { M_RENAME, Q_PRODUCT };
+module.exports._q = { M_RENAME, Q_PRODUCT, M_MOVE };

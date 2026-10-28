@@ -1,6 +1,6 @@
 // "Default" colour check — suggestions
 const assert = require('assert');
-const { findDefaults, titleColour } = require('../Claude outputs/default-colours-tool/new/utils/defaultColour');
+const { findDefaults, titleColour } = require('../utils/defaultColour');
 
 const v = (sku, colour, size) => ({ id: 'v' + sku, sku, selectedOptions: [{ name: 'Color', value: colour }, ...(size ? [{ name: 'Size', value: size }] : [])] });
 const opt = (name, ...vals) => ({ id: 'o' + name, name, optionValues: vals.map(x => ({ id: `ov-${name}-${x}`, name: x })) });
@@ -48,4 +48,29 @@ assert.deepStrictEqual(findDefaults({ options: [opt('Title', 'Default Title')], 
 // title colour part
 assert.strictEqual(titleColour('Grover Bed - Natural - Rattan and Oak - Sizes Available'), 'Natural');
 assert.strictEqual(titleColour('Saint Wooden Bed - Sizes Available'), '');
+// ── split colour → merge ──
+const cv = (sku, colour, size) => ({ id: 'id-' + sku, sku, selectedOptions: [{ name: 'Color', value: colour }, { name: 'Size', value: size }] });
+const sizes = ['2 Chairs', '4 Chairs', '6 Chairs', '8 Chairs', '10 Chairs', '12 Chairs'];
+// Tommy: Bisque Oasis 2 Chairs + Default Title 4–12 Chairs, all UD-1276316 → merge into Bisque Oasis
+r = findDefaults({ id: 't', title: 'Tommy Swivel Dining Armchair - Set of 2 - Bisque Oasis - Fabric and Metal', handle: 'tommy', iid: '1276316',
+  options: [opt('Color', 'Bisque Oasis', 'Default Title'), opt('Size', ...sizes)],
+  variants: sizes.map((z, i) => cv(`UD-1276316-${708 + i}`, i ? 'Default Title' : 'Bisque Oasis', z)) }, { cfsName });
+assert.strictEqual(r[0].action, 'merge'); assert.strictEqual(r[0].mergeInto, 'Bisque Oasis'); assert.strictEqual(r[0].confidence, 'merge');
+assert.deepStrictEqual(r[0].moves.map(m => m.label), sizes.slice(1)); assert(r[0].moves.every(m => !m.conflict));
+// Basic Fineer: Default (1276123) merges into "Fineer Natural and Black" (1276123); Black (1276124) is left alone
+r = findDefaults({ id: 'b', title: 'Basic Dining Chair - Set of 2 - Fineer Natural and Black - Synthetic', handle: 'basic', iid: '1276123',
+  options: [opt('Color', 'Fineer Natural and Black', 'Default Title', 'Black'), opt('Size', ...sizes)],
+  variants: [...sizes.map((z, i) => cv(`UD-1276123-${646 + i}`, i ? 'Default Title' : 'Fineer Natural and Black', z)), ...sizes.map((z, i) => cv(`UD-1276124-${652 + i}`, 'Black', z))] }, { cfsName });
+assert.strictEqual(r[0].action, 'merge'); assert.strictEqual(r[0].mergeInto, 'Fineer Natural and Black'); assert.strictEqual(r[0].moves.length, 5);
+// Toon BLACK page: Default variants are the NATURAL product's SKUs (1276113) — not on this page as a colour → no merge, normal rename
+skuHomes = new Map([['UD-1276113-586', [{ handle: 'toon-natural', title: 'Toon - Natural', status: 'ACTIVE', options: [{ name: 'Color', value: 'Natural' }] }]]]);
+r = findDefaults({ id: 'tb', title: 'Toon Dining Chair - Set of 2 - Black', handle: 'toon-black', iid: '1276114',
+  options: [opt('Color', 'Black', 'Default Title'), opt('Size', ...sizes)],
+  variants: [...sizes.map((z, i) => cv(`UD-1276114-${591 + i}`, 'Black', z)), cv('UD-1276113-586', 'Default Title', '4 Chairs')] }, { cfsName, skuHomes });
+assert.strictEqual(r[0].action, 'rename'); assert.strictEqual(r[0].suggestion, 'Natural');
+// a size that already exists under the target colour → conflict
+r = findDefaults({ id: 'c', title: 'X - Bisque Oasis', handle: 'x', iid: '1',
+  options: [opt('Color', 'Bisque Oasis', 'Default Title'), opt('Size', '2 Chairs', '4 Chairs')],
+  variants: [cv('UD-1-1', 'Bisque Oasis', '2 Chairs'), cv('UD-1-2', 'Bisque Oasis', '4 Chairs'), cv('UD-1-3', 'Default Title', '4 Chairs')] }, { cfsName });
+assert.strictEqual(r[0].confidence, 'clash'); assert.strictEqual(r[0].moves[0].conflict, true);
 console.log('DEFAULT COLOUR TESTS PASSED');

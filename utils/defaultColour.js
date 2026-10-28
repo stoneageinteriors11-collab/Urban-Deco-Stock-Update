@@ -23,6 +23,8 @@
  *                the colour part of the title ("Axel Round Coffee Table - Walnut Fluted").
  * Two sources agree → "high"; one source → "medium"; none → no suggestion ("please check").
  * A suggestion that already exists as another value of the option → flagged (would clash).
+ *
+ * Split colour → action 'merge' (see mergeCheck): move the Default variants into the real colour.
  */
 const { colourWords } = require('./colourMatch');
 
@@ -76,15 +78,45 @@ function findDefaults(product, ctx = {}) {
       const pick = x => (x.selectedOptions || []).find(s => s.name === o.name)?.value;
       const dv = (product.variants || []).filter(v => pick(v) === val.name);
       const sv = (product.variants || []).filter(v => { const p = pick(v); return p && !isDefault(p); });
-      rows.push({
+      const row = {
         productId: product.id, title: product.title, handle: product.handle, vendor: product.vendor, status: product.status,
         type, optionId: o.id, optionName: o.name, valueId: val.id, current: val.name, otherValues: others,
-        variants: dv.length, skus: dv.map(v => v.sku).filter(Boolean),
-        ...suggest(product, o.name, dv, sv, others, ctx),
-      });
+        variants: dv.length, skus: dv.map(v => v.sku).filter(Boolean), action: 'rename',
+      };
+      const merge = mergeCheck(o.name, dv, sv);
+      rows.push(merge ? { ...row, ...merge } : { ...row, ...suggest(product, o.name, dv, sv, others, ctx) });
     }
   }
   return rows;
+}
+
+/**
+ * Split colour (Tommy Swivel: "Bisque Oasis" = 2 Chairs, "Default Title" = 4–12 Chairs, all UD-1276316-…):
+ * the Default variants are the SAME CFS product as the variants of exactly one real value on this
+ * product → merge them into that value (move the variants, then drop the empty "Default").
+ * Default variants that belong to a different CFS product (Toon Black page selling Natural SKUs) are
+ * not a merge — they get a normal rename suggestion.
+ * conflicts = Default variants whose other options (e.g. "4 Chairs") already exist under the target value.
+ */
+function mergeCheck(optionName, dv, sv) {
+  if (!dv.length || !sv.length) return null;
+  const prodOf = v => parseSku(v.sku).prodId;
+  const dProds = new Set(dv.map(prodOf));
+  if (dProds.size !== 1 || dProds.has(null)) return null;
+  const [pid] = dProds;
+  const pick = x => (x.selectedOptions || []).find(s => s.name === optionName)?.value;
+  const targets = [...new Set(sv.filter(v => prodOf(v) === pid).map(pick))];
+  if (targets.length !== 1) return null;
+  const into = targets[0];
+  // only when that colour is ONLY this CFS product (otherwise it's not a clean split)
+  if (sv.filter(v => pick(v) === into).some(v => prodOf(v) !== pid)) return null;
+  const rest = v => (v.selectedOptions || []).filter(s => s.name !== optionName).map(s => s.value).join(' / ') || '(no other option)';
+  const have = new Set(sv.filter(v => pick(v) === into).map(rest));
+  const moves = dv.map(v => ({ id: v.id, sku: v.sku, label: rest(v), conflict: have.has(rest(v)) }));
+  const conflicts = moves.filter(m => m.conflict);
+  const notes = [`same CFS product (${pid}) as "${into}" on this product — ${moves.length} variant(s) (${moves.map(m => m.label).join(', ')}) move into "${into}" and "${dv.length ? pick(dv[0]) : ''}" is removed`];
+  if (conflicts.length) notes.push(`"${into}" already has ${conflicts.map(m => m.label).join(', ')} — those can't be moved (duplicate variant) — please check`);
+  return { action: 'merge', mergeInto: into, suggestion: into, confidence: conflicts.length ? 'clash' : 'merge', sources: ['same-cfs-product'], notes, moves };
 }
 
 function suggest(product, optionName, dv, sv, others, ctx) {
@@ -147,4 +179,4 @@ function suggest(product, optionName, dv, sv, others, ctx) {
   return { suggestion: chosen.value, confidence, sources: best.map(c => c.source), notes };
 }
 
-module.exports = { findDefaults, suggest, titleColour, differingWords, isDefault, parseSku };
+module.exports = { findDefaults, suggest, mergeCheck, titleColour, differingWords, isDefault, parseSku };

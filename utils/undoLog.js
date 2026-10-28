@@ -10,6 +10,7 @@
  *   vendor    — product vendor             before → after   (undo: put vendor back)
  *   title     — product title + URL        before → after   (undo: put both back, old URL redirects)
  *   option-value — option value renamed ("Default" → "Oak")      (undo: put the old name back)
+ *   variant-merge — split colour merged ("Default Title" variants moved into "Bisque Oasis") (undo: move them back)
  *   variants-deleted — listed for information only: Shopify can't bring back a
  *                      deleted variant, so this part can NOT be undone.
  *

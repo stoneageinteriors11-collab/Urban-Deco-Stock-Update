@@ -962,6 +962,27 @@ router.post('/undo/:id', async (req, res) => {
         const errs = r?.productOptionUpdate?.userErrors || [];
         if (errs.length) throw new Error(errs.map(x => x.message).join(', '));
         log.push({ ...base, status: 'undone', message: `${e.optionName} put back: "${e.after}" → "${e.before}" · ${name}` });
+      } else if (e.type === 'variant-merge') {
+        // split colour merged ("Default Title" → "Bisque Oasis") → move those variants back to the old value
+        const { M_MOVE, Q_PRODUCT } = require('./defaultcolours')._q;
+        const pp = (await gql(client, Q_PRODUCT, { id: e.productId }))?.product;
+        const cur = new Map((pp?.variants?.nodes || []).map(v => [v.id, v.selectedOptions.find(x => x.name === e.optionName)?.value]));
+        const gone = e.variants.filter(v => !cur.has(v.id));
+        const back = e.variants.filter(v => cur.get(v.id) === e.from);
+        const moved = e.variants.filter(v => cur.has(v.id) && cur.get(v.id) !== e.from && (cur.get(v.id) === e.into || force));
+        const other = e.variants.filter(v => cur.has(v.id) && cur.get(v.id) !== e.from && cur.get(v.id) !== e.into && !force);
+        if (!moved.length) {
+          log.push({ ...base, status: other.length ? 'conflict' : 'info', message: other.length
+            ? `${e.optionName} was changed after the run (${other.map(v => `${v.label}: "${cur.get(v.id)}"`).join(', ')}) — skipped; tick "Overwrite" to undo anyway · ${name}`
+            : `Already back under "${e.from}"${gone.length ? ` (${gone.length} variant(s) no longer exist)` : ''} · ${name}` });
+          if (other.length) skipped++; else doneIdx.push(i);
+          continue;
+        }
+        if (dryRun) { log.push({ ...base, status: 'dry_run', message: `Would move ${moved.map(v => v.label).join(', ')} back from "${e.into}" → "${e.from}" · ${name}` }); continue; }
+        const r = await gql(client, M_MOVE, { productId: e.productId, variants: moved.map(v => ({ id: v.id, optionValues: [{ optionName: e.optionName, name: e.from }] })) });
+        const errs = r?.productVariantsBulkUpdate?.userErrors || [];
+        if (errs.length) throw new Error(errs.map(x => x.message).join(', '));
+        log.push({ ...base, status: 'undone', message: `Moved ${moved.map(v => v.label).join(', ')} back to "${e.from}"${gone.length ? ` (${gone.length} variant(s) no longer exist)` : ''}${back.length ? ` (${back.length} already there)` : ''} · ${name}` });
       } else if (e.type === 'photos') {
         if (dryRun) {
           for (const ph of e.photos) log.push({ ...base, status: 'dry_run', message: `Would re-attach photo · ${name}`, imageUrl: ph.url, imageVerdict: 'keep' });

@@ -1908,7 +1908,7 @@ async function testConnection() {
     p.classList.toggle('hidden');
     if (!p.classList.contains('hidden')) loadUndoRuns();
   }
-  const UNDO_TYPES = { status: 'status change(s)', sku: 'SKU change(s)', photos: 'photo set(s)', vendor: 'vendor change(s)', title: 'title change(s)', 'option-value': 'colour name(s)' };
+  const UNDO_TYPES = { status: 'status change(s)', sku: 'SKU change(s)', photos: 'photo set(s)', vendor: 'vendor change(s)', title: 'title change(s)', 'option-value': 'colour name(s)', 'variant-merge': 'colour merge(s)' };
   async function loadUndoRuns() {
     const el = document.getElementById('undo-list');
     try {
