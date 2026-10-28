@@ -289,7 +289,7 @@ router.post('/stock-sync', async (req, res) => {
           const cur = v.inventoryItem?.inventoryLevel?.quantities?.find(q => q.name === 'available')?.quantity ?? null;
           if (cur !== targetQty) {
             if (!v.inventoryItem?.inventoryLevel) rows.push({ handle: p.handle, sku: v.sku, status: 'warning', message: `Not stocked at "${loc.name}" — quantity not changed (would be ${targetQty})` });
-            else { inventory.push({ inventoryItemId: v.inventoryItem.id, locationId: loc.id, quantity: targetQty, changeFromQuantity: cur ?? 0 }); changes.push(`quantity: ${cur ?? '?'} → ${targetQty}${targetQty === OVERRIDE_QTY && mf[OVERRIDE_KEY] ? ' (order-ahead)' : ''}`); }
+            else { inventory.push({ inventoryItemId: v.inventoryItem.id, locationId: loc.id, quantity: targetQty, changeFromQuantity: cur ?? 0 }); changes.push(`quantity: ${cur ?? '?'} → ${targetQty}${targetQty === OVERRIDE_QTY && mf[OVERRIDE_KEY] ? ' (order-ahead)' : s.qtyNote && targetQty === s.qty ? ` (${s.qtyNote})` : ''}`); }
           }
           if (v.inventoryItem && v.inventoryItem.tracked === false) rows.push({ handle: p.handle, sku: v.sku, status: 'warning', message: 'Inventory is not tracked on Shopify for this variant — quantity has no effect' });
           const cfsText = `CFS: ${s.cfsStatus || '(blank)'}, on hand ${s.cfsOnHand ?? 0}, ${s.deliveryTime || 'no delivery time'}${s.dueDate && s.dueDate !== 'NA' ? `, due ${s.dueDate}` : ''}`;

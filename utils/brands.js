@@ -32,11 +32,12 @@ const BRANDS = [
   { id: 366, vendor: 'Gert Snel',          rule: 'always-5' },
 ];
 const RULE_TEXT = {
-  'as-is':      'Copied exactly as CFS has it',
+  'as-is':      'Copied exactly as CFS has it (IN STOCK with 0 on hand → quantity 5)',
   'in-stock-5': 'IN STOCK → quantity 5 · OUT OF STOCK → quantity 0',
   'always-5':   'Always IN STOCK, quantity 5',
 };
 
+const IN_STOCK_ZERO_QTY = 5;   // quantity used when CFS says IN STOCK but on hand is 0
 const getBrand = id => BRANDS.find(b => b.id === Number(id)) || null;
 
 async function fetchBrandFeed(id) {
@@ -59,7 +60,8 @@ function applyRule(brand, rec) {
   }
   const qty = num(rec.onHand);
   if (!status) out.flags.push('CFS stock status is blank');
-  if (status === 'IN STOCK' && qty === 0) out.flags.push('IN STOCK but 0 on hand');
+  // Other brands only (Urban Deco's own stock sync doesn't use this): CFS says IN STOCK but 0 on hand → 5
+  if (status === 'IN STOCK' && qty === 0) return { ...out, stockStatus: status, qty: IN_STOCK_ZERO_QTY, qtyNote: `CFS IN STOCK but 0 on hand → ${IN_STOCK_ZERO_QTY}` };
   return { ...out, stockStatus: status, qty };
 }
 
@@ -103,4 +105,4 @@ function buildBrandCodes(feed) {
   return bySku;
 }
 
-module.exports = { BRANDS, RULE_TEXT, getBrand, fetchBrandFeed, applyRule, buildBrandStock, buildBrandCodes };
+module.exports = { BRANDS, RULE_TEXT, IN_STOCK_ZERO_QTY, getBrand, fetchBrandFeed, applyRule, buildBrandStock, buildBrandCodes };

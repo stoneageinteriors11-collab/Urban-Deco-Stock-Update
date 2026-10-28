@@ -12,7 +12,10 @@ assert.deepStrictEqual([applyRule(jl, { stockStatus: 'OUT OF STOCK', onHand: 7 }
 assert.deepStrictEqual([applyRule(gs, { stockStatus: '', onHand: 0 }).qty, applyRule(gs, { stockStatus: '', onHand: 0 }).stockStatus], [5, 'IN STOCK']);
 const asis = applyRule(bh, { stockStatus: 'OUT OF STOCK', onHand: 3, deliveryTime: '6-8 Weeks', dueDate: '2026-12-11' });
 assert.deepStrictEqual([asis.qty, asis.stockStatus, asis.deliveryTime, asis.dueDate], [3, 'OUT OF STOCK', '6-8 Weeks', '2026-12-11'], 'copied as-is');
-assert.deepStrictEqual(applyRule(bh, { stockStatus: 'IN STOCK', onHand: 0 }).flags, ['IN STOCK but 0 on hand']);
+{ const z = applyRule(bh, { stockStatus: 'IN STOCK', onHand: 0 });   // IN STOCK + 0 on hand → 5, no flag
+  assert.deepStrictEqual(z.flags, []); assert.strictEqual(z.qty, 5); assert.strictEqual(z.stockStatus, 'IN STOCK'); assert(/0 on hand → 5/.test(z.qtyNote)); }
+assert.strictEqual(applyRule(bh, { stockStatus: 'OUT OF STOCK', onHand: 0 }).qty, 0);   // out of stock stays 0
+assert.strictEqual(applyRule(bh, { stockStatus: 'IN STOCK', onHand: 7 }).qty, 7);       // real numbers copied as they are
 
 // ── fake feed (J-Line) ──
 const feed = [
