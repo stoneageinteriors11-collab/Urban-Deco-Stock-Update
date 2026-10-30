@@ -383,8 +383,18 @@ function productRefSku(variantSku) {
 //   all orphaned, none in CFS feeds   → product set to DRAFT (photos untouched)
 //   all orphaned, all in CFS feeds    → keep everything
 //   all orphaned, mixed               → delete only the ones not in CFS feeds
-function decideDeletion(allVariants, orphanedSKUs, productIdSet, variantAttrIdSet, product = null, handle = '', cfsNames = new Map(), skuHomes = null, decision = null, brandCtx = null) {
-  const inCfs = v => { const { prodId, varId } = parseSku(v.sku); return (prodId && productIdSet.has(prodId)) || (varId && variantAttrIdSet.has(varId)); };
+// Is this SKU in CFS? (its product or variant number is in the feed) — except SKUs the clean-up marked
+// "Option removed from CFS": the CFS product is there but only with its OTHER options (Jarvis Bed 6ft Queen).
+const OPTION_REMOVED_RE = /^Option removed from CFS/;
+const removedOptionSkus = rows => new Set((rows || []).filter(r => OPTION_REMOVED_RE.test(r.codeOnlyNote || '')).map(r => r.variantSku));
+function cfsHas(sku, productIdSet, variantAttrIdSet, gone = new Set()) {
+  if (gone.has(sku)) return false;
+  const { prodId, varId } = parseSku(sku);
+  return !!((prodId && productIdSet.has(prodId)) || (varId && variantAttrIdSet.has(varId)));
+}
+
+function decideDeletion(allVariants, orphanedSKUs, productIdSet, variantAttrIdSet, product = null, handle = '', cfsNames = new Map(), skuHomes = null, decision = null, brandCtx = null, gone = new Set()) {
+  const inCfs = v => cfsHas(v.sku, productIdSet, variantAttrIdSet, gone);
   const orphaned = allVariants.filter(v => orphanedSKUs.has(v.sku));
   if (!orphaned.length) return { mode: 'none', toDelete: [] };
   let result;
@@ -421,6 +431,7 @@ router.post('/delete-variants-image-plan', async (req, res) => {
   try {
     const productIdSet = new Map(cfsProductIds);
     const variantAttrIdSet = new Set(cfsVariantAttrIds);
+    const gone = removedOptionSkus(variants);
     const byHandle = new Map();
     for (const v of variants) { if (!byHandle.has(v.handle)) byHandle.set(v.handle, new Set()); byHandle.get(v.handle).add(v.variantSku); }
     const cfsNames = await getCfsNames(brandId);
@@ -434,7 +445,7 @@ router.post('/delete-variants-image-plan', async (req, res) => {
       const data = await gql(client, PRODUCT_BY_HANDLE_QUERY, { handle });
       const product = data?.productByHandle;
       if (!product) continue;
-      const decision = decideDeletion(product.variants.edges.map(e => e.node), orphanedSKUs, productIdSet, variantAttrIdSet, product, handle, cfsNames, skuHomes, decisions[handle], brandCtx);
+      const decision = decideDeletion(product.variants.edges.map(e => e.node), orphanedSKUs, productIdSet, variantAttrIdSet, product, handle, cfsNames, skuHomes, decisions[handle], brandCtx, gone);
       if (decision.toDelete.length) items.push({ handle, removedSkus: decision.toDelete.map(v => v.sku) });
     }
     const plan = await imageSync.buildRemovalPlan({ client, items, send, check });   // loads the CFS feed only if items exist
@@ -528,6 +539,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
   // cfsProductIds arrives as [[prodId, status], ...] entries; build a Map (has() still works)
   const productIdSet    = new Map(cfsProductIds);
   const variantAttrIdSet = new Set(cfsVariantAttrIds);
+  const gone             = removedOptionSkus(variants);   // "Option removed from CFS" rows — not counted as in CFS
 
   if (!variants.length) {
     return res.status(400).json({ error: 'No variants provided.' });
@@ -583,10 +595,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
 
             if (allOrphaned) {
               // Per-variant CFS presence check
-              const matchedInCFS = allVariants.filter(v => {
-                const { prodId, varId } = parseSku(v.sku);
-                return (prodId && productIdSet.has(prodId)) || (varId && variantAttrIdSet.has(varId));
-              });
+              const matchedInCFS = allVariants.filter(v => cfsHas(v.sku, productIdSet, variantAttrIdSet, gone));
               const notInCFS = allVariants.length - matchedInCFS.length;
               if (matchedInCFS.length === 0) {
                 action = 'set product to DRAFT (no variants found in CFS feeds)';
@@ -602,7 +611,7 @@ router.post('/delete-variants-bulk', async (req, res) => {
             // Own-variant rule: is one of the variants being deleted this product's OWN one?
             if (action.startsWith('delete')) {
               const deleting = allOrphaned
-                ? allVariants.filter(v => { const { prodId, varId } = parseSku(v.sku); return !(prodId && productIdSet.has(prodId)) && !(varId && variantAttrIdSet.has(varId)); })
+                ? allVariants.filter(v => !cfsHas(v.sku, productIdSet, variantAttrIdSet, gone))
                 : deletedNodes;
               const own = ownDraftCheck(product, handle, new Set(deleting.map(v => v.sku)), await getCfsNames(brandId), skuHomes, brandCtx);
               const dec = decisions[handle] || {};
@@ -723,14 +732,8 @@ router.post('/delete-variants-bulk', async (req, res) => {
       }
 
       if (nonOrphanedLeft === 0) {
-        const cfsMatched = orphanedNodes.filter(node => {
-          const { prodId, varId } = parseSku(node.sku);
-          return (prodId && productIdSet.has(prodId)) || (varId && variantAttrIdSet.has(varId));
-        });
-        const cfsUnmatched = orphanedNodes.filter(node => {
-          const { prodId, varId } = parseSku(node.sku);
-          return !(prodId && productIdSet.has(prodId)) && !(varId && variantAttrIdSet.has(varId));
-        });
+        const cfsMatched = orphanedNodes.filter(node => cfsHas(node.sku, productIdSet, variantAttrIdSet, gone));
+        const cfsUnmatched = orphanedNodes.filter(node => !cfsHas(node.sku, productIdSet, variantAttrIdSet, gone));
 
         for (const node of cfsMatched) {
           log.push({ sku: node.sku, handle, status: 'kept', message: `Kept - found in CFS feeds: ${product.title} / ${node.title}`, productCode: productCodeBySku.get(node.sku) || '' });
@@ -2289,3 +2292,4 @@ router.get('/test-connection', async (req, res) => {
 });
 
 module.exports = router;
+module.exports._delete = { decideDeletion, cfsHas, removedOptionSkus };   // for tests

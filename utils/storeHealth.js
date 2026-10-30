@@ -63,6 +63,9 @@ function runChecks(products, ctx) {
         // variant number that belongs to another CFS product (e.g. Batilda Black UD-1271925-17373742 = Cream's number)
         const wp = wrongPairing(s, id => ctx.byVar.get(id), id => ctx.byProd.get(id)?.vars, optsOf(s));
         if (wp) { if (wp.fixedSku) typos.push(`"${s}" → ${wp.fixedSku} (variant no. belongs to CFS product ${wp.ownerProdId})`); else notIn.push(s); continue; }
+        // option removed in CFS: the CFS product still has other options, but not this one
+        const pr = parse(s), bp = ctx.byProd.get(pr.prodId);
+        if (pr.varId && bp?.vars?.length && !bp.vars.some(x => x.varId === pr.varId)) { notIn.push(s); continue; }
         if (!brandOfSku(s)) notIn.push(s);
         continue;
       }

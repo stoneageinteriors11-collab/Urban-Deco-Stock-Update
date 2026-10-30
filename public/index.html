@@ -1366,7 +1366,7 @@ async function testConnection() {
         <td>${isSelectable ? `<input type="checkbox" ${checked} onchange="toggleSKU('${r.variantSku}',this.checked)" />` : ''}</td>
         <td title="${r.title}">${r.title || '—'}</td>
         <td title="${variantLabel}">${variantLabel}</td>
-        <td><code style="font-size:11px;color:var(--text-muted)">${r.variantSku}</code>${r.matchStatus === 'sku-typo' && r.fixedSku ? `<div style="font-size:11px;color:#f472b6" title="${(r.codeOnlyNote || '').replace(/"/g, '&quot;')}">→ ${r.fixedSku}</div>` : ''}</td>
+        <td><code style="font-size:11px;color:var(--text-muted)">${r.variantSku}</code>${r.matchStatus === 'sku-typo' && r.fixedSku ? `<div style="font-size:11px;color:#f472b6" title="${(r.codeOnlyNote || '').replace(/"/g, '&quot;')}">→ ${r.fixedSku}</div>` : ''}${r.matchStatus === 'orphaned' && /^Option removed from CFS/.test(r.codeOnlyNote || '') ? `<div style="font-size:11px;color:var(--text-muted)">${r.codeOnlyNote}</div>` : ''}</td>
         <td>£${r.price || '—'}</td>
         <td>${r.inventoryQty === '' || r.inventoryQty == null ? '—' : r.inventoryQty}</td>
         <td><span class="badge ${badgeCls}" title="${(r.codeOnlyNote || r.otherBrandNote || '').replace(/"/g, '&quot;')}">${badgeTxt}</span>${

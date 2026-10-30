@@ -16,7 +16,9 @@
  *   c) Extract raw IDs from SKU (UD-{prodId}-{varId}):
  *      {varId}  found in cfsVariantAttrIds (iProAttrId column) → matchStatus = 'ok'
  *        (variant exists in CFS under a different SKU mapping — treat as matched)
- *      {prodId} found in cfsProductIds (Product Id column) → matchStatus = 'cfs-product'
+ *      {prodId} found in cfsProductIds but CFS still lists OTHER options of it → 'orphaned'
+ *        (this option was removed in CFS — delete just this variant)
+ *      {prodId} found in cfsProductIds (Product Id column, no options in CFS) → matchStatus = 'cfs-product'
  *        (CFS has this as a product entry but no matching variant — needs review)
  *
  *   d) Deep search — Shopify metafield codes already synced to the product:
@@ -144,6 +146,14 @@ function compareVariants(
       } else if (varId && cfsVariantAttrIds.has(varId)) {
         // Raw variant attr ID found in CFS variant feed → variant exists, just different SKU
         matchStatus = 'ok';
+
+      } else if (prodId && varId && cfsProductIds.has(prodId) && cfsVarInfo && (cfsVarInfo.byProd.get(prodId) || []).length) {
+        // The CFS product still has its other sizes/options, just not this one → that option was
+        // removed in CFS (e.g. Jarvis Bed 6ft Queen gone, 4ft 6in + 5ft King left) → delete just this
+        // variant. Only a CFS product with NO options at all is a "CFS Product Match" below.
+        const left = cfsVarInfo.byProd.get(prodId);
+        matchStatus = 'orphaned';
+        codeOnlyNote = `Option removed from CFS — CFS product ${prodId} now only has: ${left.map(x => x.option || x.varId).join(', ')}`;
 
       } else if (prodId && cfsProductIds.has(prodId)) {
         // Raw product ID found in CFS product feed, but no variant match →

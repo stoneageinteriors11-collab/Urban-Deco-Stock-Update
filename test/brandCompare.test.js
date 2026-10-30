@@ -65,11 +65,11 @@ const server = app.listen(0);
     assert(wv.find(x => x.handle === 'mixed').otherBrandNote.includes('UD-77 (Urban Deco)'), wv.find(x => x.handle === 'mixed').otherBrandNote);
     assert.strictEqual(r.summary.wrongVendor, 2); assert.strictEqual(r.summary.wrongVendorProducts, 2);
     console.log(st, r.summary);
-    assert.deepStrictEqual(st, { 'UD-10': 'ok', 'UD-11-111': 'ok', 'UD-11-999': 'cfs-product', 'UD-12': 'orphaned', 'UD-55': 'other-brand', 'UD-77': 'other-brand', 'UD-13': 'draft',
+    assert.deepStrictEqual(st, { 'UD-10': 'ok', 'UD-11-111': 'ok', 'UD-11-999': 'orphaned', 'UD-12': 'orphaned', 'UD-55': 'other-brand', 'UD-77': 'other-brand', 'UD-13': 'draft',
       'UD-15': 'orphaned', 'UD-16': 'code-only' });
     assert(r.results.find(x => x.variantSku === 'UD-55').otherBrandNote.includes('Beehive (brand 315)'));
     assert(r.results.find(x => x.variantSku === 'UD-77').otherBrandNote.includes('Urban Deco'));
-    assert.strictEqual(r.summary.orphaned, 2); assert.strictEqual(r.summary.otherBrand, 2); assert.strictEqual(r.summary.codeOnly, 1);
+    assert.strictEqual(r.summary.orphaned, 3); assert.strictEqual(r.summary.otherBrand, 2); assert.strictEqual(r.summary.codeOnly, 1);
     assert(!r.results.some(x => x.handle === 'x'), 'exact vendor only');
     // second run reuses the cross-brand index (only this brand's feed is fetched again)
     const before = feedCalls;
