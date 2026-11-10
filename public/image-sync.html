@@ -113,6 +113,15 @@
       <input type="text" id="typeWords" placeholder="sofa, armchair, dining table">
       <div class="help" id="typesNote" style="margin:6px 0 0"></div>
     </div>
+    <div class="types-box">
+      <b style="font-size:13px">Backup gallery file <span class="help" style="margin:0;font-weight:normal">— only used if the CFS photo feed is down (like the stock update's backup Froogle)</span></b>
+      <div class="row" style="margin:8px 0 0">
+        <input type="file" id="feedFile" accept=".csv,.xlsx,.xls,.json">
+        <button class="btn secondary" id="btnFeedUpload" type="button">Upload</button>
+        <button class="btn secondary hidden" id="btnFeedClear" type="button">Remove file</button>
+      </div>
+      <div class="help" id="feedInfo" style="margin:6px 0 0">No backup file uploaded.</div>
+    </div>
     <textarea id="tokens" placeholder="milan-dining-table-white-marble-sizes-available"></textarea>
     <div class="row" style="margin-top:10px">
       <label class="chk">Batch size
@@ -331,6 +340,30 @@ async function loadTypes() {
     list.querySelectorAll('.typeChk').forEach(c => c.onchange = invalidateBackup);
   } catch (e) { if (my === typesReq) list.innerHTML = `<span class="help" style="margin:0;color:var(--warning)">Couldn't load product types: ${esc(e.message)}</span>`; }
 }
+// ── Backup gallery file (used only when the CFS photo feed pages fail) ────────
+function showFeedInfo(u) {
+  $('feedInfo').innerHTML = u
+    ? `In use if the CFS feed is down: <b>${esc(u.name)}</b> — ${u.total.toLocaleString()} products${u.generated ? `, dated ${esc(u.generated)}` : ''}, uploaded ${new Date(u.uploadedAt).toLocaleString()}. <span style="color:var(--warning)">The server forgets it after a restart — upload again if dry runs say the feed is unavailable.</span>`
+    : 'No backup file uploaded. If the CFS photo feed is down, upload the gallery CSV (iProductId, vSKU, Main Image, Gallery Count, Gallery Image1…).';
+  $('btnFeedClear').classList.toggle('hidden', !u);
+}
+(async () => { try { showFeedInfo((await (await fetch(API + '/feed/info')).json()).uploadedFeed); } catch (_) {} })();
+$('btnFeedUpload').onclick = async () => {
+  const f = $('feedFile').files[0];
+  if (!f) { alert('Choose the gallery CSV first'); return; }
+  $('btnFeedUpload').disabled = true; $('feedInfo').textContent = `Uploading and checking ${f.name}…`;
+  try {
+    const fd = new FormData(); fd.append('file', f);
+    const j = await (await fetch(API + '/feed/upload', { method: 'POST', body: fd })).json();
+    if (j.error) throw new Error(j.error);
+    showFeedInfo(j.uploadedFeed); $('feedFile').value = ''; invalidateBackup();
+  } catch (e) { $('feedInfo').innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`; }
+  $('btnFeedUpload').disabled = false;
+};
+$('btnFeedClear').onclick = async () => {
+  if (!confirm('Remove the backup gallery file? Dry runs will only use the CFS photo feed.')) return;
+  try { const j = await (await fetch(API + '/feed/clear', { method: 'POST' })).json(); showFeedInfo(j.uploadedFeed); invalidateBackup(); } catch (e) { alert(e.message); }
+};
 function typeChoice() {
   return { types: [...document.querySelectorAll('.typeChk:checked')].map(c => c.value),
     words: $('typeWords').value.split(',').map(w => w.trim()).filter(Boolean) };

@@ -257,18 +257,57 @@ async function readJsonFeed() {
   if (!Array.isArray(products) || !products.length) throw new Error('JSON feed has no products');
   return { products, generated: data.generated || null };
 }
-async function readCsvFeed() {
-  const res = await axios.get(FEED_CSV_URL, { timeout: 240000, maxContentLength: 200 * 1024 * 1024, responseType: 'text', transformResponse: r => r });
-  const rows = parseCsv(res.data, { columns: true, bom: true, skip_empty_lines: true, relax_column_count: true, trim: true });
-  if (!rows.length || !('iProductId' in rows[0])) throw new Error('CSV feed has no products / unexpected columns');
-  const products = rows.map(r => {
+// Rows of the gallery CSV (columns iProductId, vSKU, Main Image, Gallery Count, Gallery Image1…) → products
+function galleryRowsToProducts(rows, what = 'CSV feed') {
+  if (!rows.length || !('iProductId' in rows[0])) throw new Error(`${what} has no products / unexpected columns (needs iProductId, vSKU, Main Image, Gallery Image1…)`);
+  const products = rows.filter(r => String(r.iProductId ?? '').trim()).map(r => {
     // gallery columns are "Gallery Image1", "Gallery Image2", … in order
     const gallery = Object.keys(r).filter(k => /^Gallery Image\d+$/i.test(k))
       .sort((a, b) => parseInt(a.replace(/\D/g, ''), 10) - parseInt(b.replace(/\D/g, ''), 10))
       .map(k => r[k]).filter(Boolean);
-    return { iProductId: r.iProductId, vSKU: r.vSKU, mainImage: r['Main Image'], galleryCount: Number(r['Gallery Count']), galleryImages: gallery };
+    return { iProductId: String(r.iProductId).trim(), vSKU: r.vSKU, mainImage: r['Main Image'], galleryCount: Number(r['Gallery Count']), galleryImages: gallery.map(String) };
   });
-  return { products, generated: null };
+  if (!products.length) throw new Error(`${what} has no products`);
+  if (!products.some(p => /^https?:\/\//i.test(String(p.mainImage || '')))) throw new Error(`${what}: no photo web addresses found in "Main Image"`);
+  return products;
+}
+async function readCsvFeed() {
+  const res = await axios.get(FEED_CSV_URL, { timeout: 240000, maxContentLength: 200 * 1024 * 1024, responseType: 'text', transformResponse: r => r });
+  const rows = parseCsv(res.data, { columns: true, bom: true, skip_empty_lines: true, relax_column_count: true, trim: true });
+  return { products: galleryRowsToProducts(rows), generated: null };
+}
+
+// ── Backup gallery file (uploaded by hand) ───────────────────────────────────
+// Used only when BOTH CFS feed pages fail (like the stock update's backup Froogle upload).
+// CSV (same columns as cronItemGalleryUrls.php), Excel (.xlsx, same columns) or the old JSON.
+// Kept on the server's disk until removed — Render's free plan clears it on a restart.
+const UPLOADED_FEED = path.join(ROOT, 'gallery-feed-upload.json');
+function parseGalleryFile(buf, name) {
+  const what = `"${name}"`;
+  if (/\.json$/i.test(name)) {
+    let data; try { data = JSON.parse(buf.toString('utf8').replace(/^\uFEFF/, '')); } catch (e) { throw new Error(`${what} is not valid JSON`); }
+    const products = (data?.products || []).filter(p => p && p.iProductId != null);
+    if (!products.length) throw new Error(`${what} has no products`);
+    return { products, generated: data.generated || null };
+  }
+  let rows;
+  if (/\.xlsx?$/i.test(name)) {
+    const XLSX = require('xlsx');
+    const wb = XLSX.read(buf, { type: 'buffer' });
+    rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '', raw: false });
+  } else {
+    rows = parseCsv(buf.toString('utf8'), { columns: true, bom: true, skip_empty_lines: true, relax_column_count: true, trim: true });
+  }
+  return { products: galleryRowsToProducts(rows, what), generated: (name.match(/(20\d{2})[-_]?(\d{2})[-_]?(\d{2})/) || []).slice(1).join('-') || null };
+}
+function uploadedFeedInfo() {
+  const j = readJson(UPLOADED_FEED);
+  return j ? { name: j.name, uploadedAt: j.uploadedAt, generated: j.generated, total: j.products.length } : null;
+}
+async function readUploadedFeed() {
+  const j = readJson(UPLOADED_FEED);
+  if (!j?.products?.length) throw new Error('no backup gallery file uploaded');
+  return { products: j.products, generated: j.generated, name: j.name, uploadedAt: j.uploadedAt };
 }
 async function getFeed(force = false) {
   if (!force && feedCache && Date.now() - feedCache.at < FEED_TTL_MS) return feedCache;
@@ -278,7 +317,17 @@ async function getFeed(force = false) {
     jsonProblem = e.message;
     console.warn(`  ⚠ CFS image JSON feed unusable (${jsonProblem}) — using the CSV export instead`);
     try { got = await readCsvFeed(); source = 'CSV export (JSON feed unavailable)'; }
-    catch (e2) { throw new Error(`CFS image feed unavailable — JSON: ${jsonProblem}; CSV: ${e2.message} — stopping (nothing was changed)`); }
+    catch (e2) {
+      // Last resort: the backup gallery file uploaded on the Image Sync page
+      try {
+        got = await readUploadedFeed();
+        source = `uploaded backup file "${got.name}"${got.generated ? ` (dated ${got.generated})` : ''} — CFS feed pages unavailable`;
+        jsonProblem = `${jsonProblem}; CSV: ${e2.message}`;
+        console.warn(`  ⚠ CFS image feed pages unavailable — using the uploaded backup file ${got.name}`);
+      } catch (_) {
+        throw new Error(`CFS image feed unavailable — JSON: ${jsonProblem}; CSV: ${e2.message} — upload a backup gallery CSV on the Image Sync page to carry on (nothing was changed)`);
+      }
+    }
   }
   const byId = new Map(got.products.map(p => [String(p.iProductId), p]));
   feedCache = { at: Date.now(), generated: got.generated, total: got.products.length, byId, source, jsonProblem };
@@ -463,6 +512,29 @@ router.get('/thumb', async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════
 // GET /status
 // ════════════════════════════════════════════════════════════════════════════
+// ── Backup gallery file: upload / info / remove ───────────────────────────────
+const feedUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(/\.(csv|xlsx|xls|json)$/i.test(file.originalname) ? null : new Error('Please upload the gallery file as .csv, .xlsx or .json'), true) });
+router.post('/feed/upload', (req, res) => {
+  feedUpload.single('file')(req, res, err => {
+    try {
+      if (err) throw err;
+      if (!req.file) throw new Error('No file received');
+      const got = parseGalleryFile(req.file.buffer, req.file.originalname);
+      writeJson(UPLOADED_FEED, { name: req.file.originalname, uploadedAt: new Date().toISOString(), generated: got.generated, products: got.products });
+      feedCache = null;   // next dry run reads the feed again (live pages first, then this file)
+      console.log(`  ✓ Image Sync backup gallery file uploaded: ${req.file.originalname} (${got.products.length} products)`);
+      res.json({ ok: true, uploadedFeed: uploadedFeedInfo() });
+    } catch (e) { res.status(400).json({ error: e.message }); }
+  });
+});
+router.get('/feed/info', (req, res) => res.json({ uploadedFeed: uploadedFeedInfo(), feedSource: feedCache?.source || null }));
+router.post('/feed/clear', (req, res) => {
+  try { fs.unlinkSync(UPLOADED_FEED); } catch (_) {}
+  feedCache = null;
+  res.json({ ok: true, uploadedFeed: null });
+});
+
 router.get('/status', async (req, res) => {
   try {
     const client = graphqlClient();
@@ -471,7 +543,7 @@ router.get('/status', async (req, res) => {
     const need = ['read_products', 'write_products', 'read_files', 'write_files'];
     const keepAwake = !!selfPingUrl();
   const missing = need.filter(s => !scopes.includes(s) && !(s.startsWith('read_') && scopes.includes(s.replace('read_', 'write_'))));
-    res.json({ connected: true, scopes, missing, activeRun, keepAwake, feedCachedAt: feedCache?.at || null });
+    res.json({ connected: true, scopes, missing, activeRun, keepAwake, feedCachedAt: feedCache?.at || null, uploadedFeed: uploadedFeedInfo() });
   } catch (e) {
     res.json({ connected: false, error: e.message });
   }
