@@ -185,6 +185,10 @@ const PRODUCT_FIELDS = `
 const Q_PRODUCTS = `query P($first:Int!,$after:String,$query:String){
   products(first:$first, after:$after, query:$query){ pageInfo{hasNextPage endCursor} nodes{ ${PRODUCT_FIELDS} } } }`;
 const Q_PRODUCT = `query P($id:ID!){ product(id:$id){ ${PRODUCT_FIELDS} } }`;
+// Light list for the product-type filter: one cursor per product, so a batch can stop on any product
+const Q_PRODUCTS_LIGHT = `query L($first:Int!,$after:String,$query:String){
+  products(first:$first, after:$after, query:$query){ pageInfo{hasNextPage endCursor} edges{ cursor node{ id title vendor productType } } } }`;
+const Q_NODES_PRODUCTS = `query N($ids:[ID!]!){ nodes(ids:$ids){ ... on Product { ${PRODUCT_FIELDS} } } }`;
 const Q_PRODUCT_BY_HANDLE = `query P($h:String!){ productByHandle(handle:$h){ ${PRODUCT_FIELDS} } }`;
 const Q_VARIANT_PRODUCTS = `query V($q:String!){ productVariants(first:50, query:$q){ nodes{ product{ id } } } }`;
 const Q_SCOPES = `query { currentAppInstallation { accessScopes { handle } } }`;
@@ -476,6 +480,34 @@ router.get('/status', async (req, res) => {
 // ════════════════════════════════════════════════════════════════════════════
 // POST /dry-run   body: { tokens?: string[], limit?, after?, includeDrafts? }
 // ════════════════════════════════════════════════════════════════════════════
+// ── Product types of a brand (for the filter tick list) ───────────────────────
+// GET /types?brandId=&includeDrafts=1 → { vendor, total, blank, types:[{ type, label, count }] }
+router.get('/types', async (req, res) => {
+  try {
+    const client = graphqlClient();
+    const brand = req.query.brandId ? getBrand(req.query.brandId) : null;
+    if (req.query.brandId && !brand) return res.status(400).json({ error: 'Unknown brand' });
+    const vendor = brand ? brand.vendor : 'Urban Deco';
+    const q = `vendor:"${vendor}"${req.query.includeDrafts === '1' ? '' : ' status:active'}`;
+    const counts = new Map();
+    let after = null, total = 0, blank = 0;
+    do {
+      const d = await gql(client, Q_PRODUCTS_LIGHT, { first: 250, after, query: q });
+      for (const { node } of d.products.edges) {
+        if (String(node.vendor || '').trim().toLowerCase() !== vendor.toLowerCase()) continue;
+        total++;
+        const t = String(node.productType || '').trim();
+        if (!t) { blank++; continue; }
+        counts.set(t, (counts.get(t) || 0) + 1);
+      }
+      after = d.products.pageInfo.hasNextPage ? d.products.pageInfo.endCursor : null;
+    } while (after);
+    const types = [...counts].map(([type, count]) => ({ type, label: core.typeLabel(type), count }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+    res.json({ vendor, total, blank, types });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.post('/dry-run', async (req, res) => {
   let client;
   try { client = graphqlClient(); } catch (e) { return res.status(400).json({ error: e.message }); }
@@ -491,6 +523,10 @@ router.post('/dry-run', async (req, res) => {
     if (req.body?.brandId && !brand) throw new Error('Unknown brand');
     const vendor = brand ? brand.vendor : 'Urban Deco';
     if (brand) send({ type: 'status', message: `Brand: ${vendor} — all CFS photos copied unless you tick the skip options` });
+    // Product-type filter: ticked product types and/or words in the title (empty = all products)
+    const typeFilter = core.makeTypeFilter({ types: req.body?.types, words: req.body?.words });
+    if (typeFilter && tokens.length) send({ type: 'warn', message: 'Product types / title words are ignored when products are listed in the box' });
+    let filterInfo = null;
 
     send({ type: 'status', message: 'Loading CFS image feed (can take ~90 seconds)…' });
     const feed = await getFeed(!!req.body?.refreshFeed);
@@ -503,6 +539,38 @@ router.post('/dry-run', async (req, res) => {
     if (tokens.length) {
       send({ type: 'status', message: `Looking up ${tokens.length} product reference(s)…` });
       products = await resolveProducts(client, tokens, send);
+    } else if (typeFilter) {
+      // Walk the brand's products (light list), keep those of the chosen types, stop at the batch size.
+      // The cursor is the last product taken, so "Next batch" carries on right after it.
+      const q = `vendor:"${vendor}"${includeDrafts ? '' : ' status:active'}`;
+      let after = req.body?.after || null, checked = 0;
+      const ids = [];
+      outer: while (true) {
+        check();
+        const d = await gql(client, Q_PRODUCTS_LIGHT, { first: 250, after, query: q });
+        const page = d.products;
+        for (const e of page.edges) {
+          after = e.cursor;
+          if (String(e.node.vendor || '').trim().toLowerCase() !== vendor.toLowerCase()) continue;
+          checked++;
+          if (typeFilter(e.node)) { ids.push(e.node.id); if (ids.length >= limit) break outer; }
+        }
+        send({ type: 'status', message: `Checked ${checked} ${vendor} products — ${ids.length} of the chosen types…` });
+        if (!page.pageInfo.hasNextPage) { after = null; break; }
+        after = page.pageInfo.endCursor;
+      }
+      // more products after the last one taken? (cheap check, 1 product)
+      if (after) { const more = await gql(client, Q_PRODUCTS_LIGHT, { first: 1, after, query: q }); if (!more.products.edges.length) after = null; }
+      nextCursor = after;
+      for (let i = 0; i < ids.length; i += PAGE_SIZE) {
+        check();
+        const d = await gql(client, Q_NODES_PRODUCTS, { ids: ids.slice(i, i + PAGE_SIZE) });
+        products.push(...(d.nodes || []).filter(Boolean));
+        send({ type: 'status', message: `Fetched ${products.length} of ${ids.length} products…` });
+      }
+      filterInfo = { describe: typeFilter.describe, checked, matched: ids.length };
+      send({ type: 'status', message: `Filter: ${typeFilter.describe} — ${ids.length} product(s) in this batch (checked ${checked})` });
+      if (!products.length) throw new Error(`No ${vendor} products of the chosen types${req.body?.after ? ' left' : ''} (checked ${checked}) — check the ticked types / title words`);
     } else {
       const q = `vendor:"${vendor}"${includeDrafts ? '' : ' status:active'}`;
       let after = req.body?.after || null;
@@ -537,7 +605,7 @@ router.post('/dry-run', async (req, res) => {
     const session = {
       id: newId('plan'), createdAt: new Date().toISOString(), feedGenerated: feed.generated,
       nextCursor, raw: {}, choices: {}, include: {}, replaceMode: !!req.body?.replaceMode,
-      brandId: brand ? brand.id : null, brand: vendor,
+      brandId: brand ? brand.id : null, brand: vendor, filter: filterInfo,
       skipWhiteBg: req.body?.skipWhiteBg !== false, skipNonSquare: req.body?.skipNonSquare !== false,
       cfsHash: Object.fromEntries(cfsHash), shopHash: {},
     };
@@ -550,7 +618,7 @@ router.post('/dry-run', async (req, res) => {
     const out = products.map(p => planFor(session, p.id, feed));
     savePlan(session);
     const summary = summarise(out);
-    send({ type: 'done', planId: session.id, nextCursor, replaceMode: session.replaceMode, brandId: session.brandId, brand: session.brand,
+    send({ type: 'done', planId: session.id, nextCursor, replaceMode: session.replaceMode, brandId: session.brandId, brand: session.brand, filter: filterInfo,
       skipWhiteBg: session.skipWhiteBg, skipNonSquare: session.skipNonSquare, summary, plans: out });
   } catch (e) {
     if (e.stopped) send({ type: 'stopped', message: 'Dry run stopped — nothing was changed' });

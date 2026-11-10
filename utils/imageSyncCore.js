@@ -637,7 +637,24 @@ function planVariantRemoval(input) {
   };
 }
 
+// ── Product-type filter (Image Sync) ─────────────────────────────────────────
+// Short name of a Shopify product type: "Furniture > Tables > Accent Tables > Coffee Tables" → "Coffee Tables"
+function typeLabel(t) { const s = String(t || '').trim(); return s ? s.split('>').pop().trim() : ''; }
+// "Sofas" → "sofa", "Dining Tables" → "dining table", so a word also matches the singular in a title
+const titleWord = w => { const s = String(w || '').trim().toLowerCase().replace(/\s+/g, ' '); return s.length > 3 && /[^s]s$/.test(s) ? s.slice(0, -1) : s; };
+// Keep a product if its product type is one of `types` (exact, case ignored) OR its title contains one
+// of `words`. Nothing chosen → null (no filter, every product of the brand).
+function makeTypeFilter({ types = [], words = [] } = {}) {
+  const T = new Set((types || []).map(t => String(t).trim().toLowerCase()).filter(Boolean));
+  const W = [...new Set((words || []).map(titleWord).filter(Boolean))];
+  if (!T.size && !W.length) return null;
+  const fn = p => T.has(String(p.productType || '').trim().toLowerCase()) || W.some(w => String(p.title || '').toLowerCase().includes(w));
+  fn.describe = [...(types || []).map(t => typeLabel(t) || String(t)), ...W.map(w => `title has "${w}"`)].join(' · ');
+  return fn;
+}
+
 module.exports = {
+  typeLabel, makeTypeFilter,
   parseUdSku, applyCfsudRule, nameKey, fileNameFromUrl, colourOptionName,
   buildProductPlan, plansToCsv, toCsv, compareVisual, VIS, applyPhotoFilters, FILTER, planVariantRemoval, applyGalleryLimit, GALLERY_LIMIT,
 };

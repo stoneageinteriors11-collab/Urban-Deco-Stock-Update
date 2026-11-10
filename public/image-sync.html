@@ -32,6 +32,10 @@
   textarea, input[type=text], select { background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 8px 10px; font: inherit; }
   textarea { width: 100%; min-height: 70px; resize: vertical; font-family: ui-monospace, monospace; font-size: 12px; }
   label.chk { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; font-size: 13px; }
+  .types-box { border: 1px solid var(--border, #333); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+  .types-list { display: flex; flex-wrap: wrap; gap: 6px 14px; max-height: 180px; overflow: auto; margin: 8px 0; }
+  .types-list label.chk { font-size: 12.5px; }
+  .types-box input[type=text] { width: 100%; max-width: 520px; padding: 6px 8px; }
   .status { font-size: 13px; color: var(--text-muted); margin-top: 10px; min-height: 20px; }
   .status.err { color: var(--danger); } .status.ok { color: var(--success); }
   .banner { border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 12px; }
@@ -98,6 +102,16 @@
         <select id="brand"><option value="">Urban Deco</option></select>
       </label>
       <span class="help" id="brandHelp" style="margin:0"></span>
+    </div>
+    <div class="types-box">
+      <div class="row" style="justify-content:space-between;margin:0">
+        <b style="font-size:13px">Product types <span class="help" style="margin:0;font-weight:normal">— only sync these (nothing ticked and no words = all products)</span></b>
+        <span><button class="btn secondary" id="typesAll" type="button">Tick all</button> <button class="btn secondary" id="typesNone" type="button">Clear</button></span>
+      </div>
+      <div class="types-list" id="typesList"><span class="help" style="margin:0">Loading product types…</span></div>
+      <label class="help" style="display:block;margin:4px 0">Or title contains (comma separated, e.g. <code>sofa set, armchair, dining table</code>) — for products with no product type:</label>
+      <input type="text" id="typeWords" placeholder="sofa, armchair, dining table">
+      <div class="help" id="typesNote" style="margin:6px 0 0"></div>
     </div>
     <textarea id="tokens" placeholder="milan-dining-table-white-marble-sizes-available"></textarea>
     <div class="row" style="margin-top:10px">
@@ -262,6 +276,7 @@ async function runDry(after) {
   invalidateBackup();
   try {
     const last = await stream(API + '/dry-run', { tokens, brandId: $('brand').value || null, limit: $('limit').value, includeDrafts: $('includeDrafts').checked, replaceMode: $('replaceMode').checked,
+      ...typeChoice(),
       skipWhiteBg: $('skipWhiteBg').checked, skipNonSquare: $('skipNonSquare').checked, after },
       ev => {
         if (ev.type === 'status') setStatus($('dryStatus'), ev.message);
@@ -274,7 +289,7 @@ async function runDry(after) {
     state.skipWhiteBg = last.skipWhiteBg !== false; state.skipNonSquare = last.skipNonSquare !== false;
     state.brandId = last.brandId || null;
     $('dryBar').classList.add('hidden');
-    setStatus($('dryStatus'), `Dry run ${last.planId} — nothing was changed.`, 'ok');
+    setStatus($('dryStatus'), `Dry run ${last.planId} — nothing was changed.${last.filter ? ` Filter: ${last.filter.describe} — ${last.filter.matched} product(s) in this batch.` : ''}`, 'ok');
     $('btnCsv').href = `${API}/plan/${last.planId}/csv`; $('btnCsv').classList.remove('hidden');
     if (last.nextCursor && !tokens.length) $('btnNext').classList.remove('hidden');
     renderAll();
@@ -296,7 +311,33 @@ function onBrandChange() {
     ? 'Urban Deco rules: white-background and non-square photos skipped, then max 5 photos (main + first 4), like the CFS site.'
     : `${name}: all CFS photos copied (skip boxes unticked — tick them if needed), max 5 photos (main + first 4), like the CFS site.`;
   invalidateBackup();
+  loadTypes();
 }
+// ── Product-type filter ─────────────────────────────────────────────────────
+// Tick list of the brand's Shopify product types (short name + count) and a "title contains" box.
+let typesReq = 0;
+async function loadTypes() {
+  const my = ++typesReq, list = $('typesList');
+  list.innerHTML = '<span class="help" style="margin:0">Loading product types…</span>'; $('typesNote').textContent = '';
+  try {
+    const qs = new URLSearchParams({ brandId: $('brand').value || '', includeDrafts: $('includeDrafts').checked ? '1' : '0' });
+    const j = await (await fetch(`${API}/types?${qs}`)).json();
+    if (my !== typesReq) return;
+    if (j.error) throw new Error(j.error);
+    list.innerHTML = j.types.length
+      ? j.types.map(t => `<label class="chk" title="${esc(t.type)}"><input type="checkbox" class="typeChk" value="${esc(t.type)}"> ${esc(t.label)} <span class="help" style="margin:0">(${t.count})</span></label>`).join('')
+      : '<span class="help" style="margin:0">No product types set on this brand\'s products — use "title contains" below.</span>';
+    $('typesNote').textContent = `${j.total} ${j.vendor} product(s)${j.blank ? ` — ${j.blank} with no product type (only "title contains" can pick those)` : ''}.`;
+    list.querySelectorAll('.typeChk').forEach(c => c.onchange = invalidateBackup);
+  } catch (e) { if (my === typesReq) list.innerHTML = `<span class="help" style="margin:0;color:var(--warning)">Couldn't load product types: ${esc(e.message)}</span>`; }
+}
+function typeChoice() {
+  return { types: [...document.querySelectorAll('.typeChk:checked')].map(c => c.value),
+    words: $('typeWords').value.split(',').map(w => w.trim()).filter(Boolean) };
+}
+$('typesAll').onclick = () => document.querySelectorAll('.typeChk').forEach(c => { c.checked = true; });
+$('typesNone').onclick = () => { document.querySelectorAll('.typeChk').forEach(c => { c.checked = false; }); $('typeWords').value = ''; };
+$('includeDrafts').addEventListener('change', loadTypes);
 const brandReady = (async () => {
   try {
     const { brands = [] } = await (await fetch('/api/brands/list')).json();

@@ -1,0 +1,41 @@
+[graphify] MultiDiGraph edge-collapse diagnostic
+input: <in-memory>
+input_stage: provided JSON (normal graph.json is post-build)
+effective_directed: <direct-call>
+nodes: 695
+unverified_code_nodes: 0
+raw_edges: 1317
+valid_candidate_edges: 1259
+missing_endpoint_edges: 0
+dangling_endpoint_edges: 9
+external_reference_edges: 49
+self_loop_edges: 5
+exact_duplicate_edges: 0
+directed_unique_endpoint_pairs: 1067
+directed_same_endpoint_collapsed_edges: 192
+undirected_unique_endpoint_pairs: 1067
+undirected_same_endpoint_collapsed_edges: 192
+same_endpoint_group_count: 190
+relation_variant_groups: 188
+source_file_variant_groups: 0
+source_location_variant_groups: 3
+context_variant_groups: 0
+post_build_graph_type: Graph
+post_build_edges: 1122
+producer_suppression_sites: 12
+producer_suppression_examples:
+  - L1830 seen_ids arity=unknown
+  - L2393 seen_ids arity=unknown
+  - L2395 seen_doc_refs arity=unknown
+  - L3062 seen_ids arity=unknown
+  - L3209 seen_ids arity=unknown
+  - L4350 seen_keys arity=unknown
+  - L4536 seen_keys arity=unknown
+  - L8160 seen_ids arity=unknown
+examples:
+  - routes_shopify -> routes_shopify_resolvevarcode edges=3 relations=['calls', 'contains'] locations=['L1746', 'L1855', 'L2054'] contexts=['', 'call']
+  - routes_stocksync -> routes_stocksync_tryunlink edges=3 relations=['calls', 'contains', 'indirect_call'] locations=['L57', 'L570', 'L943'] contexts=['', 'argument', 'call']
+  - routes_auth -> routes_auth_savetoken edges=2 relations=['calls', 'contains'] locations=['L13', 'L92'] contexts=['', 'call']
+  - routes_auth -> routes_auth_loadtoken edges=2 relations=['calls', 'contains'] locations=['L105', 'L26'] contexts=['', 'call']
+  - routes_brandsync -> utils_brands_getbrand edges=2 relations=['imports', 'indirect_call'] locations=['L25', 'L397'] contexts=['argument', 'import']
+note: normal graph.json is post-build; raw producer loss must be measured earlier.

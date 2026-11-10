@@ -1,0 +1,248 @@
+{
+  ".github/workflows/stock-sync.yml": {
+    "mtime": 1788869761.8864264,
+    "seen": 1793611829.6257348,
+    "ast_hash": "5897b37cb821164aef8c7a4c4325042c",
+    "semantic_hash": "5897b37cb821164aef8c7a4c4325042c"
+  },
+  "package.json": {
+    "mtime": 1791551988.261847,
+    "seen": 1793611829.6257348,
+    "ast_hash": "4f6745662d9d3466269562abaf8cad1d",
+    "semantic_hash": "4f6745662d9d3466269562abaf8cad1d"
+  },
+  "routes/auth.js": {
+    "mtime": 1788502637.644779,
+    "seen": 1793611829.6257348,
+    "ast_hash": "cda4f35f5aab08178921b0b64e4af8ed",
+    "semantic_hash": "cda4f35f5aab08178921b0b64e4af8ed"
+  },
+  "routes/brandsync.js": {
+    "mtime": 1793193414.8876214,
+    "seen": 1793611829.6257348,
+    "ast_hash": "e9987569c03662c70f88c7b9cdb09ddb",
+    "semantic_hash": "e9987569c03662c70f88c7b9cdb09ddb"
+  },
+  "routes/defaultcolours.js": {
+    "mtime": 1793171378.3640077,
+    "seen": 1793611829.6257348,
+    "ast_hash": "d839d749f3461175fd732820516debb8",
+    "semantic_hash": "d839d749f3461175fd732820516debb8"
+  },
+  "routes/imagesync.js": {
+    "mtime": 1793102300.5131922,
+    "seen": 1793611829.6257348,
+    "ast_hash": "faac0aee89134551fa74ef56bfc3d743",
+    "semantic_hash": "faac0aee89134551fa74ef56bfc3d743"
+  },
+  "routes/shopify.js": {
+    "mtime": 1793365946.3578315,
+    "seen": 1793611829.6257348,
+    "ast_hash": "055620723687cb8a2dde45e9d30a8b21",
+    "semantic_hash": "055620723687cb8a2dde45e9d30a8b21"
+  },
+  "routes/stocksync.js": {
+    "mtime": 1793192558.426937,
+    "seen": 1793611829.6257348,
+    "ast_hash": "fe526a8be7464a4c9c3d989b7d9e50b8",
+    "semantic_hash": "fe526a8be7464a4c9c3d989b7d9e50b8"
+  },
+  "routes/storehealth.js": {
+    "mtime": 1793180410.7455785,
+    "seen": 1793611829.6257348,
+    "ast_hash": "7f1e2c5380ba26d997aaaf1e2f5471ce",
+    "semantic_hash": "7f1e2c5380ba26d997aaaf1e2f5471ce"
+  },
+  "routes/upload.js": {
+    "mtime": 1793192558.7931113,
+    "seen": 1793611829.6257348,
+    "ast_hash": "de062ac7788cec46e654abf6f627ed30",
+    "semantic_hash": "de062ac7788cec46e654abf6f627ed30"
+  },
+  "server.js": {
+    "mtime": 1793174563.3148963,
+    "seen": 1793611829.6257348,
+    "ast_hash": "b77c238849048f2d73457c291ca3dde3",
+    "semantic_hash": "b77c238849048f2d73457c291ca3dde3"
+  },
+  "test/brandCodes.test.js": {
+    "mtime": 1793085520.1365438,
+    "seen": 1793611829.6257348,
+    "ast_hash": "64156439e45f284c78f2f3a681597e1a",
+    "semantic_hash": "64156439e45f284c78f2f3a681597e1a"
+  },
+  "test/brandCompare.test.js": {
+    "mtime": 1793361904.49733,
+    "seen": 1793611829.6257348,
+    "ast_hash": "d0016e113bc62f24b58a6f3c3f362f99",
+    "semantic_hash": "d0016e113bc62f24b58a6f3c3f362f99"
+  },
+  "test/brandStock.test.js": {
+    "mtime": 1793193414.8876214,
+    "seen": 1793611829.6257348,
+    "ast_hash": "51e58597e5d3427d6236b30ce5b079a8",
+    "semantic_hash": "51e58597e5d3427d6236b30ce5b079a8"
+  },
+  "test/defaultColour.test.js": {
+    "mtime": 1793171378.3640077,
+    "seen": 1793611829.6257348,
+    "ast_hash": "bd815e04e46cab898ac0db7dfd4ffb73",
+    "semantic_hash": "bd815e04e46cab898ac0db7dfd4ffb73"
+  },
+  "test/defaultColourRoute.test.js": {
+    "mtime": 1793171378.3640077,
+    "seen": 1793611829.6257348,
+    "ast_hash": "9db5d3107ea08034b2606ad7b81be8f6",
+    "semantic_hash": "9db5d3107ea08034b2606ad7b81be8f6"
+  },
+  "test/e2e.test.js": {
+    "mtime": 1791522494.0,
+    "seen": 1793611829.6257348,
+    "ast_hash": "b03d06818800c36ccef93c6b2673076c",
+    "semantic_hash": "b03d06818800c36ccef93c6b2673076c"
+  },
+  "test/imageSyncCore.test.js": {
+    "mtime": 1793102301.3837607,
+    "seen": 1793611829.6257348,
+    "ast_hash": "069824713781ab40eeaec2f0282ef73c",
+    "semantic_hash": "069824713781ab40eeaec2f0282ef73c"
+  },
+  "test/milan-product.json": {
+    "mtime": 1791522494.0,
+    "seen": 1793611829.6257348,
+    "ast_hash": "041935e067b41371f0a3717ed8dd0abf",
+    "semantic_hash": "041935e067b41371f0a3717ed8dd0abf"
+  },
+  "test/ownVariant.test.js": {
+    "mtime": 1792664424.3713052,
+    "seen": 1793611829.6257348,
+    "ast_hash": "92a9c2ef409d17b75162bf7d8ce1ce6f",
+    "semantic_hash": "92a9c2ef409d17b75162bf7d8ce1ce6f"
+  },
+  "test/promoteOwn.test.js": {
+    "mtime": 1793185178.8522954,
+    "seen": 1793611829.6257348,
+    "ast_hash": "5f04ab48adc930e97f70c7a5139dc712",
+    "semantic_hash": "5f04ab48adc930e97f70c7a5139dc712"
+  },
+  "test/step3.test.js": {
+    "mtime": 1792672548.4201832,
+    "seen": 1793611829.6257348,
+    "ast_hash": "ef9922d25d21029fd582d24a0f4341eb",
+    "semantic_hash": "ef9922d25d21029fd582d24a0f4341eb"
+  },
+  "test/storeHealth.test.js": {
+    "mtime": 1793174630.830307,
+    "seen": 1793611829.6257348,
+    "ast_hash": "4b8f194aa53bc6ebbe6ae93efd23f75d",
+    "semantic_hash": "4b8f194aa53bc6ebbe6ae93efd23f75d"
+  },
+  "test/storeHealthRoute.test.js": {
+    "mtime": 1793180131.1027453,
+    "seen": 1793611829.6257348,
+    "ast_hash": "a4aec5bd4ed4491a92add4136f0b4668",
+    "semantic_hash": "a4aec5bd4ed4491a92add4136f0b4668"
+  },
+  "test/wrongPairing.test.js": {
+    "mtime": 1793365949.3611298,
+    "seen": 1793611829.6257348,
+    "ast_hash": "c57b8b20878349ddb82992424e958354",
+    "semantic_hash": "c57b8b20878349ddb82992424e958354"
+  },
+  "utils/brands.js": {
+    "mtime": 1793193324.4472764,
+    "seen": 1793611829.6257348,
+    "ast_hash": "fdacfdab58b1e1abac39070b4ea603fc",
+    "semantic_hash": "fdacfdab58b1e1abac39070b4ea603fc"
+  },
+  "utils/cfsApi.js": {
+    "mtime": 1793191533.0501275,
+    "seen": 1793611829.6257348,
+    "ast_hash": "1a07d78ad056aab0c0f589f3f58dcc07",
+    "semantic_hash": "1a07d78ad056aab0c0f589f3f58dcc07"
+  },
+  "utils/colourMatch.js": {
+    "mtime": 1792670736.8906736,
+    "seen": 1793611829.6257348,
+    "ast_hash": "1131c31b5aee7da3a1e3989894f0a37d",
+    "semantic_hash": "1131c31b5aee7da3a1e3989894f0a37d"
+  },
+  "utils/defaultColour.js": {
+    "mtime": 1793171275.525302,
+    "seen": 1793611829.6257348,
+    "ast_hash": "95830a87dad12d3ee8d4e16284bad32d",
+    "semantic_hash": "95830a87dad12d3ee8d4e16284bad32d"
+  },
+  "utils/imageSyncCore.js": {
+    "mtime": 1793102300.034367,
+    "seen": 1793611829.6257348,
+    "ast_hash": "709d5a5916c4f5d8fc9956ca438371ae",
+    "semantic_hash": "709d5a5916c4f5d8fc9956ca438371ae"
+  },
+  "utils/matchVariants.js": {
+    "mtime": 1793361902.5102713,
+    "seen": 1793611829.6257348,
+    "ast_hash": "f3a78df39d50d938fe9112646936b61e",
+    "semantic_hash": "f3a78df39d50d938fe9112646936b61e"
+  },
+  "utils/ownVariant.js": {
+    "mtime": 1793015197.1724634,
+    "seen": 1793611829.6257348,
+    "ast_hash": "8333dd9ce087a72d1eb0073ce9db6b96",
+    "semantic_hash": "8333dd9ce087a72d1eb0073ce9db6b96"
+  },
+  "utils/parseCSV.js": {
+    "mtime": 1788256305.2421823,
+    "seen": 1793611829.6257348,
+    "ast_hash": "89c278434ea66f9ce5e652031b292380",
+    "semantic_hash": "89c278434ea66f9ce5e652031b292380"
+  },
+  "utils/storeHealth.js": {
+    "mtime": 1793361902.90125,
+    "seen": 1793611829.6257348,
+    "ast_hash": "910456915d102a0034a116712bcc7af7",
+    "semantic_hash": "910456915d102a0034a116712bcc7af7"
+  },
+  "utils/undoLog.js": {
+    "mtime": 1793171276.6980617,
+    "seen": 1793611829.6257348,
+    "ast_hash": "12739ba565d39054f1e6015561857d9b",
+    "semantic_hash": "12739ba565d39054f1e6015561857d9b"
+  },
+  "README.md": {
+    "mtime": 1788867894.8298428,
+    "seen": 1793611829.6257348,
+    "ast_hash": "5252e2b14bf7005d3da3d3ddac08192a",
+    "semantic_hash": "5252e2b14bf7005d3da3d3ddac08192a"
+  },
+  "public/brands.html": {
+    "mtime": 1793104516.0160103,
+    "seen": 1793611829.6257348,
+    "ast_hash": "a381da71ec73b0cb3c02b6f50b41a27c",
+    "semantic_hash": "a381da71ec73b0cb3c02b6f50b41a27c"
+  },
+  "public/default-colours.html": {
+    "mtime": 1793171713.246004,
+    "seen": 1793611829.6257348,
+    "ast_hash": "5d51bac41b9672cd5fbccaf7d380ef50",
+    "semantic_hash": "5d51bac41b9672cd5fbccaf7d380ef50"
+  },
+  "public/image-sync.html": {
+    "mtime": 1793102300.9709673,
+    "seen": 1793611829.6257348,
+    "ast_hash": "e09c10d2adfccfe7f720cabb5eacf08e",
+    "semantic_hash": "e09c10d2adfccfe7f720cabb5eacf08e"
+  },
+  "public/index.html": {
+    "mtime": 1793361903.717468,
+    "seen": 1793611829.6257348,
+    "ast_hash": "f440af2e68a933d5c8c61f166f6f01d0",
+    "semantic_hash": "f440af2e68a933d5c8c61f166f6f01d0"
+  },
+  "public/store-health.html": {
+    "mtime": 1793180130.339168,
+    "seen": 1793611829.6257348,
+    "ast_hash": "aaefac043fbd43912beecc33a854f365",
+    "semantic_hash": "aaefac043fbd43912beecc33a854f365"
+  }
+}
