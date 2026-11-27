@@ -164,49 +164,9 @@ function graphqlClient() {
 }
 
 // ── Rate-limit-aware GraphQL caller ──────────────────────────────────────────
-// Retries up to 3 times on 429 / transient errors with exponential backoff.
-async function gql(client, query, variables = {}, attempt = 1) {
-  try {
-    const res = await axios.post(
-      client.url,
-      { query, variables },
-      { headers: client.headers, timeout: 30000 }
-    );
-
-    // Surface GraphQL-level errors
-    if (res.data.errors) {
-      const msg = res.data.errors.map(e => e.message).join('; ');
-      throw new Error(`GraphQL error: ${msg}`);
-    }
-
-    return res.data.data;
-
-  } catch (err) {
-    const status = err.response?.status;
-
-    // Network-level failures (socket hang up, ECONNRESET, ETIMEDOUT) have no
-    // err.response — detect them by error code or message.
-    const isNetworkError = !err.response && (
-      err.code === 'ECONNRESET' ||
-      err.code === 'ETIMEDOUT'  ||
-      err.code === 'ENOTFOUND'  ||
-      err.code === 'ECONNABORTED' ||
-      err.message?.includes('socket hang up') ||
-      err.message?.includes('timeout')
-    );
-
-    // Retry on rate limit (429), transient server errors (5xx), or network errors
-    if ((status === 429 || (status >= 500 && status < 600) || isNetworkError) && attempt <= 3) {
-      const delay = attempt * 2000; // 2s, 4s, 6s
-      const reason = isNetworkError ? `network error (${err.code || err.message})` : `HTTP ${status}`;
-      console.warn(`  ⚠ ${reason} — retrying in ${delay}ms (attempt ${attempt}/3)`);
-      await sleep(delay);
-      return gql(client, query, variables, attempt + 1);
-    }
-
-    throw err;
-  }
-}
+// Shared caller (utils/shopifyGql.js): retries THROTTLED (cost limit), and up to
+// 3 times on 429 / 5xx / network errors (2s, 4s, 6s) as before.
+const gql = require('../utils/shopifyGql').createGql({ timeout: 30000, retryNetwork: true, httpRetries: 3 });
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 

@@ -72,22 +72,8 @@ function graphqlClient() {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-async function gql(client, query, variables = {}, attempt = 1) {
-  try {
-    const res = await axios.post(client.url, { query, variables }, { headers: client.headers, timeout: 30000 });
-    if (res.data.errors) throw new Error(`GraphQL error: ${res.data.errors.map(e => e.message).join('; ')}`);
-    return res.data.data;
-  } catch (err) {
-    const status = err.response?.status;
-    if ((status === 429 || (status >= 500 && status < 600)) && attempt <= 3) {
-      const delay = attempt * 2000;
-      console.warn(`  ⚠ HTTP ${status} — retrying in ${delay}ms (attempt ${attempt}/3)`);
-      await sleep(delay);
-      return gql(client, query, variables, attempt + 1);
-    }
-    throw err;
-  }
-}
+// Shared caller: retries THROTTLED (cost limit), 429 and 5xx — see utils/shopifyGql.js
+const gql = require('../utils/shopifyGql').createGql({ timeout: 30000 });
 
 // ── Queries ───────────────────────────────────────────────────────────────────
 
@@ -1542,4 +1528,4 @@ router.get('/download-log', (req, res) => {
   res.send(csvLines.join('\n'));
 });
 
-module.exports = router;
+module.exports = router;

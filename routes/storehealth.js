@@ -13,6 +13,7 @@ const { _shared: S } = require('./brandsync');
 const { runChecks } = require('../utils/storeHealth');
 const { findDefaults } = require('../utils/defaultColour');
 const { BRANDS } = require('../utils/brands');
+const { logRunError } = require('../utils/shopifyGql');
 
 const router = express.Router();
 
@@ -82,7 +83,7 @@ router.post('/run', async (req, res) => {
     send({ type: 'done', products: products.length, includeDrafts, shop: process.env.SHOPIFY_STORE || '', checkedAt: new Date().toISOString(), checks,
       cfsFailed: idx.failed, brands: BRANDS.map(b => ({ id: b.id, vendor: b.vendor })) });
   } catch (e) {
-    console.error('[store-health]', e.message);
+    logRunError('store health', { brand: 'all' }, e);
     send({ type: 'error', message: e.message });
   } finally {
     clearInterval(ping); S.stopKeepAwake();
@@ -144,12 +145,13 @@ router.post('/fix-url', async (req, res) => {
         changed++;
         push({ ...base, status: 'updated', message: `URL changed /${p.handle} → /${now} (old URL redirects) · ${p.title}` });
         await S.sleep(250);
-      } catch (e) { failed++; push({ ...base, status: 'error', message: e.message }); }
+      } catch (e) { failed++; logRunError('store health: fix URL', { handle: base.handle }, e); push({ ...base, status: 'error', message: e.message }); }
     }
     if (changed) { S.clearStoreCache(); infoCache = null; }
     console.log(`  ✓ Fix URL ${dryRun ? 'dry run' : 'live'} — changed:${changed} skipped:${skipped} failed:${failed}${undoId ? ` · undo ${undoId}` : ''}`);
     send({ type: 'done', dryRun, changed, skipped, failed, log, undoId });
   } catch (e) {
+    logRunError('store health: fix URL', {}, e);
     send({ type: 'error', message: e.message, log, undoId });
   } finally { S.stopKeepAwake(); if (!res.writableEnded) res.end(); }
 });

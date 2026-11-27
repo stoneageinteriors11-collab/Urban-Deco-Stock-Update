@@ -14,6 +14,7 @@ const express = require('express');
 const { _shared: S } = require('./brandsync');
 const { findDefaults } = require('../utils/defaultColour');
 const undo = require('../utils/undoLog');
+const { logRunError } = require('../utils/shopifyGql');
 
 const router = express.Router();
 
@@ -60,6 +61,7 @@ router.post('/scan', async (req, res) => {
   try { client = S.graphqlClient(); } catch (e) { return res.status(400).json({ error: e.message }); }
   const { send, end } = sse(res);
   S.startKeepAwake();
+  const at = { brand: String(req.body?.vendor || '').trim() || 'all', handle: '-' };
   try {
     const vendor = String(req.body?.vendor || '').trim();
     const includeDrafts = !!req.body?.includeDrafts;
@@ -92,6 +94,7 @@ router.post('/scan', async (req, res) => {
       for (const p of d.products.nodes) {
         if (vendor && String(p.vendor || '').trim().toLowerCase() !== vendor.toLowerCase()) continue;
         seen++;
+        at.handle = p.handle;
         rows.push(...findDefaults({ ...p, iid: p.iid?.value || null, variants: p.variants.nodes }, { cfsName, skuHomes }));
       }
       send({ type: 'progress', seen, found: rows.length });
@@ -105,7 +108,7 @@ router.post('/scan', async (req, res) => {
     console.log(`  ✓ Default colour scan${vendor ? ` (${vendor})` : ''}: ${JSON.stringify(summary)}`);
     send({ type: 'done', rows, summary, shop: process.env.SHOPIFY_STORE || '' });
   } catch (e) {
-    console.error('[default-colours/scan]', e.message);
+    logRunError('default colours: scan', at, e);
     send({ type: 'error', message: e.message });
   } finally { S.stopKeepAwake(); end(); }
 });
@@ -204,13 +207,13 @@ router.post('/apply', async (req, res) => {
         changed++;
         push({ ...base, status: 'updated', message: `Renamed ${o.name}: "${before}" → "${newName}" · ${p.title}` });
         await S.sleep(250);
-      } catch (e) { failed++; push({ ...base, status: 'error', message: `${e.message} · ${it.title || it.handle}` }); }
+      } catch (e) { failed++; logRunError('default colours: apply', { brand: it.vendor, handle: base.handle }, e); push({ ...base, status: 'error', message: `${e.message} · ${it.title || it.handle}` }); }
     }
     if (changed) S.clearStoreCache();
     console.log(`  ✓ Default colours ${dryRun ? 'dry run' : 'live'} done — renamed:${changed} skipped:${skipped} failed:${failed}${undoId ? ` · undo ${undoId}` : ''}`);
     send({ type: 'done', success: true, dryRun, changed, skipped, failed, log, undoId });
   } catch (e) {
-    console.error('[default-colours/apply]', e.message);
+    logRunError('default colours: apply', { brand: brandId }, e);
     send({ type: 'error', message: e.message, log, undoId });
   } finally { S.stopKeepAwake(); end(); }
 });

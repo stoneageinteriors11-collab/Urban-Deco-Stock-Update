@@ -57,16 +57,21 @@ function graphqlClient() {
   if (!store || !token) throw new Error('Not connected to Shopify. Please connect first.');
   return { url: `https://${store}/admin/api/${version}/graphql.json`, headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' } };
 }
-async function gql(client, query, variables = {}, attempt = 1) {
-  try {
-    const res = await axios.post(client.url, { query, variables }, { headers: client.headers, timeout: 30000 });
-    if (res.data.errors) throw new Error(`GraphQL error: ${res.data.errors.map(e => e.message).join('; ')}`);
-    return res.data.data;
-  } catch (err) {
-    const status = err.response?.status;
-    if ((status === 429 || (status >= 500 && status < 600)) && attempt <= 3) { await sleep(attempt * 2000); return gql(client, query, variables, attempt + 1); }
-    throw err;
-  }
+// Shared caller: retries THROTTLED (cost limit), 429 and 5xx — see utils/shopifyGql.js
+const { createGql, logRunError } = require('../utils/shopifyGql');
+const gql = createGql({ timeout: 30000 });
+
+// Only the custom metafields the stock update / order-ahead code reads, fetched one by one
+// with aliases (metafields(first: 50) on 250 variants made every page very expensive).
+const MF_KEYS = ['inoutstock', 'vnotificationtitle', 'duedate', 'stock_status_override', 'override_cutoff'];
+const MF_FIELDS = MF_KEYS.map(k => `mf_${k}: metafield(namespace: "custom", key: "${k}") { value }`).join('\n        ');
+// Turn the aliased fields back into { metafields: { nodes: [{ key, value }] } } — the shape the
+// rest of the code reads — so nothing else changes. Left alone if metafields is already there.
+function withMf(o) {
+  if (!o) return o;
+  if (!o.metafields) o.metafields = { nodes: MF_KEYS.filter(k => o['mf_' + k] && o['mf_' + k].value != null).map(k => ({ key: k, value: o['mf_' + k].value })) };
+  for (const v of o.variants?.nodes || []) withMf(v);
+  return o;
 }
 
 const LOCATIONS = `query { locations(first: 10) { edges { node { id name } } } }`;
@@ -76,10 +81,10 @@ const PRODUCTS = `
       pageInfo { hasNextPage endCursor }
       nodes {
         id handle title vendor status
-        metafields(first: 50, namespace: "custom") { nodes { key value } }
+        ${MF_FIELDS}
         variants(first: 250) { nodes {
           id sku title
-          metafields(first: 50, namespace: "custom") { nodes { key value } }
+          ${MF_FIELDS}
           inventoryItem { id tracked inventoryLevel(locationId: $loc) { quantities(names: ["available"]) { name quantity } } }
         } }
       }
@@ -199,6 +204,7 @@ router.post('/stock-sync', async (req, res) => {
 
   const log = [];
   const c = { products: 0, variants: 0, updated: 0, unchanged: 0, notInCfs: 0, flagged: 0, skippedDraft: 0, failed: 0 };
+  const at = { brand: brand.vendor, handle: '-' };   // where we are — for the Render log on errors
   const finish = (extra = {}) => {
     clearInterval(ping); cancelled.delete(runId); stopKeepAwake();
     console.log(`  ✓ Other Brands ${brand.vendor} done — ${JSON.stringify(c)}${extra.cancelled ? ' (stopped)' : ''}`);
@@ -231,7 +237,7 @@ router.post('/stock-sync', async (req, res) => {
     do {
       if (cancelled.has(runId)) return finish({ cancelled: true });
       const d = await gql(client, PRODUCTS, { first: 20, after, q: `vendor:"${vendor}"`, loc: loc.id });
-      products.push(...d.products.nodes.filter(p => sameVendor(p.vendor, vendor)));
+      products.push(...d.products.nodes.map(withMf).filter(p => sameVendor(p.vendor, vendor)));
       send({ type: 'fetch', fetched: products.length });
       after = d.products.pageInfo.hasNextPage ? d.products.pageInfo.endCursor : null;
       if (after) await sleep(150);
@@ -250,6 +256,7 @@ router.post('/stock-sync', async (req, res) => {
         continue;
       }
       c.products++;
+      at.handle = p.handle;
       try {
         const metafields = [], inventory = [], rows = [], toDelete = [], ahead = [];
         const prodMf = mfMap(p.metafields?.nodes);
@@ -337,6 +344,7 @@ router.post('/stock-sync', async (req, res) => {
         log.push(...rows);
       } catch (e) {
         c.failed++;
+        logRunError('stock update', at, e);
         log.push({ handle: p.handle, sku: '-', status: 'error', message: e.message });
       }
       if (done % 10 === 0 || done === products.length) send({ type: 'progress', done, total: products.length, counts: c });
@@ -344,6 +352,7 @@ router.post('/stock-sync', async (req, res) => {
     }
     finish();
   } catch (e) {
+    logRunError('stock update', at, e);
     log.push({ handle: '-', sku: '-', status: 'error', message: e.message });
     finish({ error: e.message });
   }
@@ -415,6 +424,7 @@ router.post('/codes-sync', async (req, res) => {
 
   const log = [];
   const c = { products: 0, productCodes: 0, variants: 0, updated: 0, unchanged: 0, notInCfs: 0, flagged: 0, failed: 0, skippedDraft: 0 };
+  const at = { brand: '-', handle: '-' };   // where we are — for the Render log on errors
   const finish = (extra = {}) => {
     clearInterval(ping); cancelled.delete(runId); stopKeepAwake();
     console.log(`  ✓ Other Brands codes ${label} done — ${JSON.stringify(c)}${extra.cancelled ? ' (stopped)' : ''}`);
@@ -425,6 +435,7 @@ router.post('/codes-sync', async (req, res) => {
   try {
    for (const brand of brands) {
     if (cancelled.has(runId)) return finish({ cancelled: true });
+    at.brand = brand.vendor; at.handle = '-';
     send({ type: 'status', message: `Loading CFS feed for ${brand.vendor} (brand ${brand.id})…` });
     let codes, codeByProdId;
     try {
@@ -432,7 +443,7 @@ router.post('/codes-sync', async (req, res) => {
       codes = buildBrandCodes(feed);
       codeByProdId = new Map(feed.filter(x => String(x.productCode || '').trim()).map(x => [String(x.productId), String(x.productCode).trim()]));
     }
-    catch (e) { c.failed++; log.push({ brand: brand.vendor, handle: '-', sku: '-', status: 'error', message: `${brand.vendor}: CFS feed failed — ${e.message} (brand skipped)` }); continue; }
+    catch (e) { c.failed++; logRunError('codes: CFS feed', at, e); log.push({ brand: brand.vendor, handle: '-', sku: '-', status: 'error', message: `${brand.vendor}: CFS feed failed — ${e.message} (brand skipped)` }); continue; }
     send({ type: 'status', message: `${brand.vendor} — CFS: ${codes.size} SKUs with codes` });
     const vendor = brand.vendor;
 
@@ -457,6 +468,7 @@ router.post('/codes-sync', async (req, res) => {
     for (const p of products) {
       if (cancelled.has(runId)) return finish({ cancelled: true });
       done++; c.products++;
+      at.handle = p.handle;
       const metafields = [], rows = [];
       const statusNote = p.status !== 'ACTIVE' ? ` (${p.status.toLowerCase()})` : '';
       // product_code = what CFS has for this product's own CFS product (see chooseProductCode)
@@ -497,7 +509,7 @@ router.post('/codes-sync', async (req, res) => {
             const errs = r?.metafieldsSet?.userErrors || [];
             if (errs.length) { c.failed++; rows.push({ handle: p.handle, sku: '-', status: 'error', message: `Codes: ${errs.map(e => e.message).join(', ')}` }); }
           }
-        } catch (e) { c.failed++; rows.push({ handle: p.handle, sku: '-', status: 'error', message: e.message }); }
+        } catch (e) { c.failed++; logRunError('codes', at, e); rows.push({ handle: p.handle, sku: '-', status: 'error', message: e.message }); }
         await sleep(100);
       }
       log.push(...rows.map(r => ({ ...r, brand: vendor })));
@@ -507,6 +519,7 @@ router.post('/codes-sync', async (req, res) => {
    }
     finish();
   } catch (e) {
+    logRunError('codes', at, e);
     log.push({ handle: '-', sku: '-', status: 'error', message: e.message });
     finish({ error: e.message });
   }
@@ -745,7 +758,7 @@ router.post('/compare', async (req, res) => {
       cfsProductIds: [...cfsProductIds.entries()], cfsVariantAttrIds: [...cfsVariantAttrIds],
     });
   } catch (e) {
-    console.error('[brands/compare]', e.message);
+    logRunError('compare', { brand: brand.vendor }, e);
     res.status(500).json({ success: false, error: e.message });
   } finally { stopKeepAwake(); }
 });
@@ -783,6 +796,7 @@ router.post('/order-ahead', async (req, res) => {
   const log = [];
   const today = ukToday();
   const c = { products: 0, variants: 0, newAhead: 0, keptAhead: 0, cleared: 0, clearedPassed: 0, oosNoDate: 0, oosPassed: 0, oosLater: 0, notInCfs: 0, failed: 0 };
+  const at = { brand: '-', handle: '-' };   // where we are — for the Render log on errors
   const finish = (extra = {}) => {
     clearInterval(ping); cancelled.delete(runId); stopKeepAwake();
     console.log(`  ✓ Order-ahead ${label} done — ${JSON.stringify(c)}${extra.cancelled ? ' (stopped)' : ''}`);
@@ -797,17 +811,18 @@ router.post('/order-ahead', async (req, res) => {
 
     for (const brand of brands) {
       if (cancelled.has(runId)) return finish({ cancelled: true });
+      at.brand = brand.vendor; at.handle = '-';
       send({ type: 'status', message: `${brand.vendor}: loading CFS feed…` });
       let stock;
       try { stock = buildBrandStock(await fetchBrandFeed(brand.id), brand); }
-      catch (e) { log.push({ handle: '-', sku: '-', status: 'error', message: `${brand.vendor}: CFS feed failed — ${e.message}` }); c.failed++; continue; }
+      catch (e) { logRunError('order-ahead: CFS feed', at, e); log.push({ handle: '-', sku: '-', status: 'error', message: `${brand.vendor}: CFS feed failed — ${e.message}` }); c.failed++; continue; }
 
       const products = [];
       let after = null;
       do {
         if (cancelled.has(runId)) return finish({ cancelled: true });
         const d = await gql(client, PRODUCTS, { first: 20, after, q: `vendor:"${brand.vendor}" status:active`, loc: loc.id });
-        products.push(...d.products.nodes.filter(p => sameVendor(p.vendor, brand.vendor) && p.status === 'ACTIVE'));
+        products.push(...d.products.nodes.map(withMf).filter(p => sameVendor(p.vendor, brand.vendor) && p.status === 'ACTIVE'));
         send({ type: 'fetch', fetched: products.length, brand: brand.vendor });
         after = d.products.pageInfo.hasNextPage ? d.products.pageInfo.endCursor : null;
         if (after) await sleep(150);
@@ -817,6 +832,7 @@ router.post('/order-ahead', async (req, res) => {
       for (const p of products) {
         if (cancelled.has(runId)) return finish({ cancelled: true });
         done++; c.products++;
+        at.handle = p.handle;
         const set = [], del = [], inventory = [], rows = [];
         const prodMf = mfMap(p.metafields?.nodes);
         let anyAhead = false;
@@ -882,7 +898,7 @@ router.post('/order-ahead', async (req, res) => {
               const errs = r?.inventorySetQuantities?.userErrors || [];
               if (errs.length) throw new Error(`quantity: ${errs.map(e => e.message).join(', ')}`);
             }
-          } catch (e) { c.failed++; rows.push({ handle: p.handle, sku: '-', status: 'error', message: e.message }); }
+          } catch (e) { c.failed++; logRunError('order-ahead', at, e); rows.push({ handle: p.handle, sku: '-', status: 'error', message: e.message }); }
           await sleep(120);
         }
         log.push(...rows.map(r => ({ ...r, brand: brand.vendor })));
@@ -891,6 +907,7 @@ router.post('/order-ahead', async (req, res) => {
     }
     finish();
   } catch (e) {
+    logRunError('order-ahead', at, e);
     log.push({ handle: '-', sku: '-', status: 'error', message: e.message });
     finish({ error: e.message });
   }

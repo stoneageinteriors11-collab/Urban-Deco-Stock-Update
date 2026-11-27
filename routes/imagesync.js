@@ -139,25 +139,10 @@ function graphqlClient() {
   };
 }
 
-async function gql(client, query, variables = {}, attempt = 1) {
-  try {
-    const res = await axios.post(client.url, { query, variables }, { headers: client.headers, timeout: 60000 });
-    if (res.data.errors) {
-      const throttled = res.data.errors.some(e => e.extensions?.code === 'THROTTLED');
-      if (throttled && attempt <= 6) { await sleep(1500 * attempt); return gql(client, query, variables, attempt + 1); }
-      throw new Error(`GraphQL error: ${res.data.errors.map(e => e.message).join('; ')}`);
-    }
-    return res.data.data;
-  } catch (err) {
-    const status = err.response?.status;
-    const net = !err.response && /ECONNRESET|ETIMEDOUT|ENOTFOUND|ECONNABORTED|socket hang up|timeout/i.test(`${err.code} ${err.message}`);
-    if ((status === 429 || (status >= 500 && status < 600) || net) && attempt <= 4) {
-      await sleep(2000 * attempt);
-      return gql(client, query, variables, attempt + 1);
-    }
-    throw err;
-  }
-}
+// Shared caller (utils/shopifyGql.js): THROTTLED waits for the cost bucket to refill;
+// 429 / 5xx / network errors retried up to 4 times (2s, 4s, 6s, 8s) as before.
+const { createGql, logRunError } = require('../utils/shopifyGql');
+const gql = createGql({ timeout: 60000, retryNetwork: true, httpRetries: 4 });
 
 function userErrorsOf(payload) {
   return [...(payload?.userErrors || []), ...(payload?.mediaUserErrors || [])];
@@ -587,6 +572,7 @@ router.post('/dry-run', async (req, res) => {
   const { send } = sse;
   const runId = startRun(send);
   const check = stopCheck(runId);
+  const at = { brand: req.body?.brandId ? `brand ${req.body.brandId}` : 'Urban Deco', handle: '-' };
   try {
     const tokens = (req.body?.tokens || []).map(s => String(s).trim()).filter(Boolean);
     const limit = Math.max(1, Math.min(MAX_BATCH, parseInt(req.body?.limit, 10) || 25));
@@ -694,7 +680,7 @@ router.post('/dry-run', async (req, res) => {
       skipWhiteBg: session.skipWhiteBg, skipNonSquare: session.skipNonSquare, summary, plans: out });
   } catch (e) {
     if (e.stopped) send({ type: 'stopped', message: 'Dry run stopped — nothing was changed' });
-    else send({ type: 'error', message: e.message });
+    else { logRunError('image sync: dry run', at, e); send({ type: 'error', message: e.message }); }
   }
   endRun(runId);
   sse.end();
@@ -871,7 +857,7 @@ router.post('/backup', async (req, res) => {
     if (archive) { try { archive.abort(); } catch (_) {} }
     try { fs.unlinkSync(zipPath); } catch (_) {}
     if (e.stopped) send({ type: 'stopped', message: 'Backup stopped — no zip was made and nothing was changed' });
-    else send({ type: 'error', message: e.message });
+    else { logRunError('image sync: backup', {}, e); send({ type: 'error', message: e.message }); }
   }
   endRun(runId);
   sse.end();
@@ -1040,6 +1026,7 @@ router.post('/apply', async (req, res) => {
         const result = await applyOne({ client, session: s, feed, pid, job, backup: inBackup.get(pid), send });
         Object.assign(jp, result);
       } catch (e) {
+        logRunError('image sync: apply', { handle: jp.handle }, e);
         jp.state = 'failed'; jp.error = e.message;
       }
       saveJob(job);
@@ -1050,6 +1037,7 @@ router.post('/apply', async (req, res) => {
     const states = Object.values(job.products).reduce((a, p) => { a[p.state] = (a[p.state] || 0) + 1; return a; }, {});
     send({ type: 'done', jobId: job.id, status: job.status, states });
   } catch (e) {
+    logRunError('image sync: apply', {}, e);
     if (job) { job.status = 'stopped'; job.error = e.message; saveJob(job); }
     send({ type: 'error', message: e.message });
   } finally {
@@ -1294,7 +1282,7 @@ router.post('/restore', async (req, res) => {
       if (pauseRequests.has(job.id)) { job.status = 'paused'; break; }
       send({ type: 'progress', done: i - 1, total: items.length, message: `Restoring ${item.handle}…` });
       try { Object.assign(jp, await restoreOne({ client, z, item, force: !!req.body?.force, send })); }
-      catch (e) { jp.state = 'failed'; jp.error = e.message; }
+      catch (e) { logRunError('image sync: restore', { handle: item.handle }, e); jp.state = 'failed'; jp.error = e.message; }
       saveJob(job);
       send({ type: 'product', productId: item.productId, ...jp });
     }
@@ -1302,6 +1290,7 @@ router.post('/restore', async (req, res) => {
     saveJob(job);
     send({ type: 'done', jobId: job.id, status: job.status });
   } catch (e) {
+    logRunError('image sync: restore', {}, e);
     if (job) { job.status = 'stopped'; job.error = e.message; saveJob(job); }
     send({ type: 'error', message: e.message });
   } finally {
@@ -1459,7 +1448,7 @@ router.post('/cleanup/scan', async (req, res) => {
     send({ type: 'done', scanned, items });
   } catch (e) {
     if (e.stopped) send({ type: 'stopped', message: 'Scan stopped — nothing was deleted' });
-    else send({ type: 'error', message: e.message });
+    else { logRunError('image sync: clean-up scan', {}, e); send({ type: 'error', message: e.message }); }
   }
   endRun(runId);
   sse.end();
